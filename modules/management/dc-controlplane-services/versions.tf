@@ -12,6 +12,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
     # Used by the helm CLI bypass of the TF helm provider (see main.tf).
     local = {
       source  = "hashicorp/local"

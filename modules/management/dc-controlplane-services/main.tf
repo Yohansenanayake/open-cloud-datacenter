@@ -386,6 +386,49 @@ resource "kubernetes_service" "dc_api" {
   }
 }
 
+# ── TLS — self-signed certificate for the DC-API ingress ─────────────────────
+# Dev cluster, internal hostname, no public CA path available.
+# Valid for 1 year. Re-running apply after expiry regenerates it automatically.
+
+resource "tls_private_key" "dc_api" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "tls_self_signed_cert" "dc_api" {
+  private_key_pem = tls_private_key.dc_api.private_key_pem
+
+  subject {
+    common_name  = var.dcapi_hostname
+    organization = "WSO2 LK Datacenter (dev)"
+  }
+
+  dns_names = [
+    var.dcapi_hostname,
+    "*.lk.internal.wso2.com",
+  ]
+
+  validity_period_hours = 8760 # 1 year
+
+  allowed_uses = [
+    "key_encipherment",
+    "digital_signature",
+    "server_auth",
+  ]
+}
+
+resource "kubernetes_secret_v1" "dc_api_tls" {
+  metadata {
+    name      = "dc-api-tls"
+    namespace = kubernetes_namespace.dc_system.metadata[0].name
+  }
+  type = "kubernetes.io/tls"
+  data = {
+    "tls.crt" = tls_self_signed_cert.dc_api.cert_pem
+    "tls.key" = tls_private_key.dc_api.private_key_pem
+  }
+}
+
 # ── Ingress + LoadBalancer exposure ───────────────────────────────────────────
 
 # LoadBalancer service in kube-system that gives the rke2-ingress-nginx
@@ -432,6 +475,12 @@ resource "kubernetes_ingress_v1" "dc_api" {
   }
   spec {
     ingress_class_name = "nginx"
+
+    tls {
+      hosts       = [var.dcapi_hostname]
+      secret_name = kubernetes_secret_v1.dc_api_tls.metadata[0].name
+    }
+
     rule {
       host = var.dcapi_hostname
       http {
