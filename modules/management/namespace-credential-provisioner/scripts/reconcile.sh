@@ -78,6 +78,28 @@ is_system_namespace() {
   return 1
 }
 
+# Ensure RoleBindings exist that grant the tenant cloud-provider SA access
+# to NetworkFileSystem CRs (harvester-system) and Longhorn Volume status
+# (longhorn-system). Required so harvester-csi-driver on guest RKE2 clusters
+# can enable RWX support at startup. Without these, every RWX CreateVolume
+# returns `access mode MULTI_NODE_MULTI_WRITER is not supported`.
+#
+# Idempotent: kubectl apply is a no-op if the RoleBinding already matches.
+# Safe before the SA exists: RoleBinding does not validate subject existence.
+# Args: ns
+ensure_rwx_bindings() {
+  local ns="$1"
+  local sa_name="harvester-cloud-provider-${ns}"
+  local rb_name="${sa_name}-rwx"
+
+  for target_ns in harvester-system longhorn-system; do
+    kubectl create rolebinding "$rb_name" \
+      --clusterrole=harvester-cloud-provider-rwx \
+      --serviceaccount="${ns}:${sa_name}" \
+      -n "$target_ns" --dry-run=client -o yaml | kubectl apply -f -
+  done
+}
+
 # Build and write harvesterconfig-<name> to Rancher fleet-default.
 # Args: secret_name  cluster_name  vm_namespace
 write_harvesterconfig() {
@@ -299,6 +321,11 @@ EOF
 
   log "  [ns] SA ready: ${sa_name} in ${ns}"
 
+  # RoleBindings in shared system namespaces so harvester-csi-driver on guest
+  # clusters can enable RWX support. Failure propagates so the namespace stays
+  # unprocessed and the watch loop retries.
+  ensure_rwx_bindings "$ns" || return 1
+
   # Consumer VM-access kubeconfig — separate SA with broader permissions.
   # Explicit return propagates failure to the caller so the namespace is NOT
   # marked processed; the watch loop will retry on the next event.
@@ -348,6 +375,14 @@ on_deleted_namespace() {
     2>/dev/null && log "  [ns] deleted default RoleBinding for ${vm_sa_name}" || true
   kubectl delete rolebinding "${ns}-${vm_sa_name}-public-view" -n "harvester-public" \
     2>/dev/null && log "  [ns] deleted harvester-public RoleBinding for ${vm_sa_name}" || true
+
+  # Delete RWX RoleBindings from harvester-system and longhorn-system. Tolerate
+  # "not found" — they may already be gone or never existed for namespaces
+  # provisioned before this feature was added.
+  for target_ns in harvester-system longhorn-system; do
+    kubectl delete rolebinding "${sa_name}-rwx" -n "$target_ns" 2>/dev/null \
+      && log "  [ns] deleted ${sa_name}-rwx from ${target_ns}" || true
+  done
 }
 
 # ── Cluster watch handlers ─────────────────────────────────────────────────────
@@ -552,8 +587,17 @@ kubectl get namespaces -o json | jq -r '
   [[ "$role" == "infrastructure" ]] && continue
   sa_name="harvester-cloud-provider-${ns}"
   if kubectl get secret "${sa_name}-token" -n "$ns" &>/dev/null; then
-    # Cloud-provider credentials already exist. Check for the VM-access kubeconfig
-    # separately — may be absent on pods that ran before this feature was added.
+    # Cloud-provider credentials already exist. Always re-run ensure_rwx_bindings
+    # — idempotent, and the only way to backfill namespaces provisioned before
+    # this feature was added. On failure, skip marking as processed so the
+    # watch loop retries on the next event.
+    if ! ensure_rwx_bindings "$ns"; then
+      log "  WARN: RWX rolebinding backfill failed for ${ns} — will retry on next watch event"
+      continue
+    fi
+
+    # Check for the VM-access kubeconfig separately — may be absent on pods
+    # that ran before that feature was added.
     if kubectl get secret "harvester-vm-kubeconfig" -n "$ns" &>/dev/null; then
       log "INIT namespace: ${ns} — already provisioned, skipping"
       echo "$ns" >> "$PROCESSED_NS_FILE"

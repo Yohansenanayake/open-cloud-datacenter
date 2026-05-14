@@ -73,6 +73,30 @@ resource "kubernetes_cluster_role_binding_v1" "provisioner" {
   }
 }
 
+# ── ClusterRole — RWX support for tenant cloud-provider SAs ───────────────────
+# Bound by the reconciler per-tenant into harvester-system and longhorn-system.
+# Required so harvester-csi-driver running on guest RKE2 clusters can probe
+# NetworkFileSystem / Longhorn Volume resources at startup; without these the
+# driver silently disables RWX support and every RWX CreateVolume returns
+# `access mode MULTI_NODE_MULTI_WRITER is not supported`.
+resource "kubernetes_cluster_role_v1" "cloud_provider_rwx" {
+  metadata {
+    name = "harvester-cloud-provider-rwx"
+  }
+
+  rule {
+    api_groups = ["harvesterhci.io"]
+    resources  = ["networkfilesystems"]
+    verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
+  }
+
+  rule {
+    api_groups = ["longhorn.io"]
+    resources  = ["volumes"]
+    verbs      = ["get", "list", "watch"]
+  }
+}
+
 # ── Secret — Rancher kubeconfig ───────────────────────────────────────────────
 # The reconciler writes harvesterconfig-<ns> into Rancher's fleet-default.
 # This kubeconfig is mounted read-only into the pod.
@@ -189,5 +213,8 @@ resource "kubernetes_deployment_v1" "provisioner" {
     }
   }
 
-  depends_on = [kubernetes_cluster_role_binding_v1.provisioner]
+  depends_on = [
+    kubernetes_cluster_role_binding_v1.provisioner,
+    kubernetes_cluster_role_v1.cloud_provider_rwx,
+  ]
 }

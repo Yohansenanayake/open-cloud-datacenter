@@ -15,11 +15,18 @@ For every namespace labelled as a tenant namespace, the provisioner creates:
 2. A long-lived SA token Secret
 3. `harvester-vm-kubeconfig` Secret in the namespace — a namespace-scoped kubeconfig
    consumers use to authenticate the `harvester` Terraform provider
+4. `harvester-cloud-provider-<ns>-rwx` RoleBindings in `harvester-system` and
+   `longhorn-system`, granting the tenant cloud-provider SA the permissions
+   harvester-csi-driver needs at startup to enable RWX support on guest clusters
+   (read/write `networkfilesystems.harvesterhci.io`, read `volumes.longhorn.io`).
+   Bound against the shared `harvester-cloud-provider-rwx` ClusterRole this
+   module also creates.
 
 On startup the provisioner backfills any existing namespaces that are missing the
-`harvester-vm-kubeconfig` Secret (upgrade path).
+`harvester-vm-kubeconfig` Secret or the RWX RoleBindings (upgrade path).
 
-On namespace deletion it cleans up the cross-namespace `harvester-public` RoleBinding.
+On namespace deletion it cleans up the cross-namespace `harvester-public` RoleBinding
+and the RWX RoleBindings in `harvester-system` / `longhorn-system`.
 
 ## Why this matters
 
