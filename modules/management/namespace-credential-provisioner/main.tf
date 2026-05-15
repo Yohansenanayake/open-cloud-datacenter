@@ -46,8 +46,20 @@ resource "kubernetes_cluster_role_v1" "provisioner" {
     verbs      = ["get", "create", "patch", "update", "delete", "escalate"]
   }
 
-  # Needed to create RoleBindings that reference ClusterRoles. bind allows
-  # referencing a specific ClusterRole without holding all its permissions.
+  # Manage ClusterRoleBindings cluster-wide. Used to bind tenant cloud-provider
+  # ServiceAccounts to the chart-shipped `harvesterhci.io:csi-driver` ClusterRole
+  # — required for harvester-csi-driver on guest RKE2 clusters to enable RWX
+  # support. ClusterRoleBindings are cluster-scoped (not namespaced) so the
+  # `rolebindings` rule above does not cover them.
+  rule {
+    api_groups = ["rbac.authorization.k8s.io"]
+    resources  = ["clusterrolebindings"]
+    verbs      = ["get", "create", "patch", "update", "delete"]
+  }
+
+  # Needed to create RoleBindings and ClusterRoleBindings that reference
+  # ClusterRoles. bind allows referencing a specific ClusterRole without
+  # holding all its permissions.
   rule {
     api_groups = ["rbac.authorization.k8s.io"]
     resources  = ["clusterroles"]
