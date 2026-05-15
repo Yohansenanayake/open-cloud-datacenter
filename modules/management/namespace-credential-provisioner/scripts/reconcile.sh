@@ -93,18 +93,24 @@ is_system_namespace() {
 # that the official `generate_addon.sh` script (which only binds to
 # `harvesterhci.io:cloudprovider`) leaves behind.
 #
-# Idempotent: kubectl apply is a no-op if the binding already matches. Safe
-# before the SA exists: ClusterRoleBinding does not validate subject existence.
+# Short-circuits if the binding already exists — keeps the init pass quiet on
+# already-provisioned tenants and avoids spurious `configured` output from
+# kubectl apply's three-way merge over creationTimestamp normalization. Note
+# this means we do not reconcile drift in the binding's `subjects` field if
+# someone tampers with it out-of-band; the `roleRef` is immutable in any case.
 # Args: ns
 ensure_csi_clusterrolebinding() {
   local ns="$1"
   local sa_name="harvester-cloud-provider-${ns}"
   local crb_name="${sa_name}-csi-driver"
 
+  if kubectl get clusterrolebinding "$crb_name" &>/dev/null; then
+    return 0
+  fi
+
   kubectl create clusterrolebinding "$crb_name" \
     --clusterrole=harvesterhci.io:csi-driver \
-    --serviceaccount="${ns}:${sa_name}" \
-    --dry-run=client -o yaml | kubectl apply -f -
+    --serviceaccount="${ns}:${sa_name}"
 }
 
 # Build and write harvesterconfig-<name> to Rancher fleet-default.
