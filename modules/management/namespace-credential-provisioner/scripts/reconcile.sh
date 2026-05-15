@@ -107,24 +107,6 @@ ensure_csi_clusterrolebinding() {
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
-# One-time migration: delete the per-tenant `${sa_name}-rwx` RoleBindings in
-# harvester-system / longhorn-system that an earlier iteration of this fix
-# (custom `harvester-cloud-provider-rwx` ClusterRole + 2 RoleBindings) created.
-# Safe to call always — no-op if the bindings never existed.
-# Args: ns
-cleanup_legacy_rwx_bindings() {
-  local ns="$1"
-  local sa_name="harvester-cloud-provider-${ns}"
-  local rb_name="${sa_name}-rwx"
-
-  for target_ns in harvester-system longhorn-system; do
-    if kubectl get rolebinding "$rb_name" -n "$target_ns" &>/dev/null; then
-      kubectl delete rolebinding "$rb_name" -n "$target_ns" \
-        && log "  [migrate] removed legacy rolebinding ${rb_name} from ${target_ns}" || true
-    fi
-  done
-}
-
 # Build and write harvesterconfig-<name> to Rancher fleet-default.
 # Args: secret_name  cluster_name  vm_namespace
 write_harvesterconfig() {
@@ -352,10 +334,6 @@ EOF
   # retries.
   ensure_csi_clusterrolebinding "$ns" || return 1
 
-  # Drop any leftover per-namespace RoleBindings from the earlier iteration of
-  # this fix. Always-safe no-op when they aren't present.
-  cleanup_legacy_rwx_bindings "$ns"
-
   # Consumer VM-access kubeconfig — separate SA with broader permissions.
   # Explicit return propagates failure to the caller so the namespace is NOT
   # marked processed; the watch loop will retry on the next event.
@@ -411,11 +389,6 @@ on_deleted_namespace() {
   # garbage-collect them — we must remove explicitly. Tolerate "not found".
   kubectl delete clusterrolebinding "${sa_name}-csi-driver" 2>/dev/null \
     && log "  [ns] deleted clusterrolebinding ${sa_name}-csi-driver" || true
-
-  # Also remove the legacy `${sa_name}-rwx` RoleBindings if they still exist
-  # — one-time migration cleanup for namespaces last reconciled by the earlier
-  # iteration of this fix. Safe no-op otherwise.
-  cleanup_legacy_rwx_bindings "$ns"
 }
 
 # ── Cluster watch handlers ─────────────────────────────────────────────────────
@@ -628,10 +601,6 @@ kubectl get namespaces -o json | jq -r '
       log "  WARN: CSI ClusterRoleBinding backfill failed for ${ns} — will retry on next watch event"
       continue
     fi
-
-    # One-time migration cleanup for any leftover `-rwx` RoleBindings from the
-    # earlier iteration of this fix. No-op once they've been removed.
-    cleanup_legacy_rwx_bindings "$ns"
 
     # Check for the VM-access kubeconfig separately — may be absent on pods
     # that ran before that feature was added.

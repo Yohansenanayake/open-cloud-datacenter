@@ -26,8 +26,7 @@ For every namespace labelled as a tenant namespace, the provisioner creates:
    `generate_addon.sh` script leaves it out.
 
 On startup the provisioner backfills any existing namespaces that are missing the
-`harvester-vm-kubeconfig` Secret or the CSI ClusterRoleBinding (upgrade path),
-and removes leftover `*-rwx` RoleBindings from an earlier iteration of this fix.
+`harvester-vm-kubeconfig` Secret or the CSI ClusterRoleBinding (upgrade path).
 
 On namespace deletion it cleans up the cross-namespace `harvester-public` RoleBinding
 and the per-tenant `…-csi-driver` ClusterRoleBinding (cluster-scoped, so namespace
