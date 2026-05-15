@@ -15,18 +15,23 @@ For every namespace labelled as a tenant namespace, the provisioner creates:
 2. A long-lived SA token Secret
 3. `harvester-vm-kubeconfig` Secret in the namespace — a namespace-scoped kubeconfig
    consumers use to authenticate the `harvester` Terraform provider
-4. `harvester-cloud-provider-<ns>-rwx` RoleBindings in `harvester-system` and
-   `longhorn-system`, granting the tenant cloud-provider SA the permissions
-   harvester-csi-driver needs at startup to enable RWX support on guest clusters
-   (read/write `networkfilesystems.harvesterhci.io`, read `volumes.longhorn.io`).
-   Bound against the shared `harvester-cloud-provider-rwx` ClusterRole this
-   module also creates.
+4. `harvester-cloud-provider-<ns>-csi-driver` `ClusterRoleBinding`, mapping
+   the tenant cloud-provider SA to the chart-shipped `harvesterhci.io:csi-driver`
+   `ClusterRole`. Required so harvester-csi-driver on guest RKE2 clusters can
+   read `storageclasses`, read/write `networkfilesystems.harvesterhci.io`, and
+   read `volumes.longhorn.io` — without it, RWX provisioning silently fails
+   with `Failed to get NetworkFS …: not found` at mount time. This mirrors
+   what Rancher UI provisioning and the legacy
+   `workloads/harvester-cloud-credential` module create; the official
+   `generate_addon.sh` script leaves it out.
 
 On startup the provisioner backfills any existing namespaces that are missing the
-`harvester-vm-kubeconfig` Secret or the RWX RoleBindings (upgrade path).
+`harvester-vm-kubeconfig` Secret or the CSI ClusterRoleBinding (upgrade path),
+and removes leftover `*-rwx` RoleBindings from an earlier iteration of this fix.
 
 On namespace deletion it cleans up the cross-namespace `harvester-public` RoleBinding
-and the RWX RoleBindings in `harvester-system` / `longhorn-system`.
+and the per-tenant `…-csi-driver` ClusterRoleBinding (cluster-scoped, so namespace
+GC will not remove it).
 
 ## Why this matters
 
