@@ -33,7 +33,7 @@ variable "log_level" {
 
 variable "webhook_domain" {
   type        = string
-  description = "Domain suffix used in the ValidatingWebhookConfiguration webhook names (convention: <handler>.<resource>.<group>.<domain>). Operators typically set this to their organization's DNS domain so webhook names don't collide with other operators in shared clusters."
+  description = "Domain suffix used in the MutatingWebhookConfiguration webhook names (convention: <handler>.<resource>.<group>.<domain>). Operators typically set this to their organization's DNS domain so webhook names don't collide with other operators in shared clusters."
   default     = "example.com"
 }
 

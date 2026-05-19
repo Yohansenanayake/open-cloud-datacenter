@@ -106,13 +106,21 @@ resource "kubernetes_secret" "tls" {
 # Webhook-specific env secrets: only the Harvester kubeconfig is sensitive at
 # runtime. Keeping it separate from the TLS secret so rotation of one doesn't
 # force a pod restart for the other.
+#
+# Note on the base64 dance: the consumer passes the kubeconfig pre-encoded
+# (`harvester_kubeconfig_b64`) so it can flow through TF remote_state /
+# outputs without literal YAML embedding. Terraform's `kubernetes_secret`
+# `data` field auto-base64-encodes whatever string it receives — so we
+# decode here first, otherwise the value in the live Secret ends up double-
+# encoded and the webhook pod reads back base64-of-base64 instead of the
+# raw kubeconfig.
 resource "kubernetes_secret" "webhook" {
   metadata {
     name      = "dc-api-webhook-secrets"
     namespace = kubernetes_namespace.webhook.metadata[0].name
   }
   data = {
-    DCWEBHOOK_KUBECONFIG = var.harvester_kubeconfig_b64
+    DCWEBHOOK_KUBECONFIG = base64decode(var.harvester_kubeconfig_b64)
   }
 }
 
