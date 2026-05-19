@@ -74,12 +74,19 @@ resource "kubernetes_secret" "dc_api" {
   }
   data = {
     DCAPI_DB_URL                       = "postgres://dc_api:${random_password.postgres.result}@dc-postgres.dc-system:5432/dc_api?sslmode=disable"
-    DCAPI_OIDC_AUDIENCE                = var.oidc_audience
+    DCAPI_OIDC_AUDIENCE                = join(",", var.oidc_audience)
     DCAPI_HARVESTER_KUBECONFIG         = var.harvester_kubeconfig
     DCAPI_RANCHER_TOKEN                = var.rancher_token
     DCAPI_RANCHER_HARVESTER_CREDENTIAL = var.harvester_cloud_credential_id
     DCAPI_OPERATOR_SSH_KEY             = var.operator_ssh_key
     DCAPI_OPERATOR_PASSWORD            = var.operator_password
+    # F7 — BFF confidential OIDC client. Empty defaults so existing
+    # consumers that don't pass BFF inputs keep working with Bearer-only
+    # auth; dc-api checks bff_client_id at startup to decide whether to
+    # mount /v1/auth/*.
+    DCAPI_BFF_CLIENT_ID      = var.bff_client_id
+    DCAPI_BFF_CLIENT_SECRET  = var.bff_client_secret
+    DCAPI_BFF_SESSION_SECRET = var.bff_session_secret
   }
 }
 
@@ -134,6 +141,25 @@ resource "kubernetes_config_map" "dc_api_config" {
     DCAPI_ADMIN_GROUP         = var.admin_group
     DCAPI_LOG_LEVEL           = var.log_level
     DCAPI_LISTEN_ADDR         = ":8080"
+
+    # F15 — VPC external (SNAT) network config consumed by dc-api at startup
+    # to bootstrap the KubeOVN ProviderNetwork / Vlan / Subnet / NAD for
+    # tenant VPC outbound traffic.
+    DCAPI_VPC_EXTERNAL_BRIDGE       = var.vpc_external_bridge
+    DCAPI_VPC_EXTERNAL_CIDR         = var.vpc_external_cidr
+    DCAPI_VPC_EXTERNAL_GATEWAY      = var.vpc_external_gateway
+    DCAPI_VPC_EXTERNAL_RESERVED_IPS = var.vpc_external_reserved_ips
+    DCAPI_VPC_EXTERNAL_VLAN_ID      = tostring(var.vpc_external_vlan_id)
+
+    # F7 — BFF non-secret URL / cookie config. Sensitive client_id/secret
+    # /session-secret live in the dc-api-secrets Secret next to the other
+    # secrets. Empty values are safe defaults — dc-api gates BFF activation
+    # on bff_client_id being non-empty.
+    DCAPI_BFF_REDIRECT_URL         = var.bff_redirect_url
+    DCAPI_BFF_POST_LOGIN_REDIRECT  = var.bff_post_login_redirect
+    DCAPI_BFF_POST_LOGOUT_REDIRECT = var.bff_post_logout_redirect
+    DCAPI_BFF_COOKIE_DOMAIN        = var.bff_cookie_domain
+    DCAPI_BFF_COOKIE_SECURE        = tostring(var.bff_cookie_secure)
   }
 }
 
@@ -265,8 +291,19 @@ resource "kubernetes_deployment" "dc_api" {
     }
   }
 
+  # The container image is owned by CI (whatever build pipeline pushes
+  # dc-api images to your registry — typically a `kubectl set image
+  # deployment/dc-api dc-api=<registry>/dc-api:<sha>` on every commit).
+  # TF only seeds an initial value (var.dc_api_image) for the FIRST
+  # `terraform apply` against a brand new cluster — after that, CI
+  # rolls the image forward on every commit and TF must not fight it.
+  # Without ignore_changes on the container image, every `terraform
+  # plan` after a CI deploy would show a noisy revert.
   lifecycle {
-    ignore_changes = [metadata[0].annotations]
+    ignore_changes = [
+      metadata[0].annotations,
+      spec[0].template[0].spec[0].container[0].image,
+    ]
   }
 
   spec {
@@ -311,24 +348,121 @@ resource "kubernetes_deployment" "dc_api" {
             }
           }
 
-          dynamic "env" {
-            for_each = toset([
-              "DCAPI_DB_URL",
-              "DCAPI_OIDC_AUDIENCE",
-              "DCAPI_HARVESTER_KUBECONFIG",
-              "DCAPI_RANCHER_TOKEN",
-              "DCAPI_RANCHER_HARVESTER_CREDENTIAL",
-              "DCAPI_OPERATOR_SSH_KEY",
-              "DCAPI_OPERATOR_PASSWORD",
-            ])
-            content {
-              name = env.value
-              value_from {
-                secret_key_ref {
-                  name     = kubernetes_secret.dc_api.metadata[0].name
-                  key      = env.value
-                  optional = contains(["DCAPI_OPERATOR_SSH_KEY", "DCAPI_OPERATOR_PASSWORD"], env.value)
-                }
+          # Secret-backed env vars. Listed explicitly (instead of via dynamic
+          # for_each over a set) so the order in the k8s Deployment spec is
+          # stable and source-controlled. `toset` would alphabetise during
+          # iteration which causes a noisy positional diff on every plan
+          # against an existing deployment.
+          #
+          # Order matches the live deployment so existing clusters get a
+          # zero-diff plan after adopting this module:
+          #   1-3: BFF_* (always present in the Secret — empty defaults are
+          #               written when BFF isn't configured, so optional=false
+          #               is safe and dc-api gates BFF activation on
+          #               bff_client_id != "" at startup)
+          #   4:   DB_URL
+          #   5:   OIDC_AUDIENCE
+          #   6:   HARVESTER_KUBECONFIG
+          #   7:   RANCHER_TOKEN
+          #   8:   RANCHER_HARVESTER_CREDENTIAL
+          #   9-10: OPERATOR_* (optional — used only during cluster bootstrap)
+          env {
+            name = "DCAPI_BFF_CLIENT_ID"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_BFF_CLIENT_ID"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_BFF_CLIENT_SECRET"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_BFF_CLIENT_SECRET"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_BFF_SESSION_SECRET"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_BFF_SESSION_SECRET"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_DB_URL"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_DB_URL"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_OIDC_AUDIENCE"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_OIDC_AUDIENCE"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_HARVESTER_KUBECONFIG"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_HARVESTER_KUBECONFIG"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_RANCHER_TOKEN"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_RANCHER_TOKEN"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_RANCHER_HARVESTER_CREDENTIAL"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_RANCHER_HARVESTER_CREDENTIAL"
+                optional = false
+              }
+            }
+          }
+          env {
+            name = "DCAPI_OPERATOR_SSH_KEY"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_OPERATOR_SSH_KEY"
+                optional = true
+              }
+            }
+          }
+          env {
+            name = "DCAPI_OPERATOR_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name     = kubernetes_secret.dc_api.metadata[0].name
+                key      = "DCAPI_OPERATOR_PASSWORD"
+                optional = true
               }
             }
           }
@@ -403,10 +537,10 @@ resource "tls_self_signed_cert" "dc_api" {
     organization = "WSO2 LK Datacenter (dev)"
   }
 
-  dns_names = [
-    var.dcapi_hostname,
-    "*.lk.internal.wso2.com",
-  ]
+  dns_names = concat(
+    [var.dcapi_hostname],
+    var.ingress_additional_dns_names,
+  )
 
   validity_period_hours = 8760 # 1 year
 
@@ -634,10 +768,22 @@ resource "null_resource" "arc_controller" {
     when        = destroy
     on_failure  = continue
     interpreter = ["/usr/bin/env", "bash", "-c"]
-    command     = <<-EOT
+    # lookup() with empty default so the provisioner survives the
+    # one-shot replacement of legacy null_resources whose trigger map
+    # didn't include kubeconfig_path (added in the workdir-randomization
+    # round). When the key is missing we skip the uninstall — the new
+    # null_resource that takes its place runs `helm upgrade --install`
+    # which is idempotent, so the helm release simply continues to
+    # exist with the same name and gets re-managed by the new resource.
+    command = <<-EOT
       set -eu
       if [[ -z "${self.triggers.namespace}" ]]; then exit 0; fi
-      export KUBECONFIG="${self.triggers.kubeconfig_path}"
+      KCP="${lookup(self.triggers, "kubeconfig_path", "")}"
+      if [[ -z "$KCP" ]]; then
+        echo "[arc_controller] skipping helm uninstall: legacy state has no kubeconfig_path trigger; the replacement resource will re-manage via helm upgrade --install"
+        exit 0
+      fi
+      export KUBECONFIG="$KCP"
       helm uninstall arc --namespace "${self.triggers.namespace}" --ignore-not-found || true
     EOT
   }
@@ -674,10 +820,18 @@ resource "null_resource" "dc_runner" {
     when        = destroy
     on_failure  = continue
     interpreter = ["/usr/bin/env", "bash", "-c"]
-    command     = <<-EOT
+    # See identical comment on null_resource.arc_controller's destroy
+    # provisioner — defensive lookup() for the one-shot replacement of
+    # legacy null_resources whose triggers predate kubeconfig_path.
+    command = <<-EOT
       set -eu
       if [[ -z "${self.triggers.namespace}" ]]; then exit 0; fi
-      export KUBECONFIG="${self.triggers.kubeconfig_path}"
+      KCP="${lookup(self.triggers, "kubeconfig_path", "")}"
+      if [[ -z "$KCP" ]]; then
+        echo "[dc_runner] skipping helm uninstall: legacy state has no kubeconfig_path trigger; the replacement resource will re-manage via helm upgrade --install"
+        exit 0
+      fi
+      export KUBECONFIG="$KCP"
       helm uninstall dc-runner --namespace "${self.triggers.namespace}" --ignore-not-found || true
     EOT
   }

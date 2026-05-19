@@ -6,8 +6,13 @@ variable "oidc_issuer" {
 }
 
 variable "oidc_audience" {
-  type        = string
-  description = "OIDC client ID / audience for the DC-API application in Asgardeo. Passed to DC-API as DCAPI_OIDC_AUDIENCE."
+  type        = list(string)
+  description = "Every client ID dc-api should accept as a valid OIDC `aud` claim. dcctl, cloud-ui SPA, cloud-ui-bff confidential client, Rancher SSO client, and any other Asgardeo app whose tokens hit dc-api. Joined with commas at projection time and passed as DCAPI_OIDC_AUDIENCE."
+
+  validation {
+    condition     = length(var.oidc_audience) > 0
+    error_message = "oidc_audience must contain at least one client ID."
+  }
 }
 
 # ── Rancher ───────────────────────────────────────────────────────────────────
@@ -47,8 +52,13 @@ variable "dc_api_image" {
 
 variable "dcapi_hostname" {
   type        = string
-  description = "Public hostname for the DC-API ingress. Must resolve to the LoadBalancer IP (via /etc/hosts on dev machines or via internal DNS in production)."
-  default     = "dcapi.lk.internal.wso2.com"
+  description = "Public hostname for the DC-API ingress. Must resolve to the LoadBalancer IP (via /etc/hosts on dev machines or via internal/public DNS in production). Consumers should pick a per-environment hostname (e.g. dcapi.<env>.example.com) to keep environments routable independently."
+}
+
+variable "ingress_additional_dns_names" {
+  type        = list(string)
+  description = "Extra DNS names to add to the self-signed cert's SAN list (e.g. environment wildcards like *.dev.example.com). Empty by default — the cert only covers dcapi_hostname."
+  default     = []
 }
 
 variable "tenant_group_prefix" {
@@ -133,4 +143,90 @@ variable "helm_kubeconfig" {
   type        = string
   sensitive   = true
   description = "Full kubeconfig YAML pointing at the Rancher proxy URL with admin token. Used by null_resource local-exec to invoke helm CLI directly, bypassing the TF helm provider."
+}
+
+# ── F15: VPC external (SNAT) network ──────────────────────────────────────────
+# These get projected into the dc-api ConfigMap as DCAPI_VPC_EXTERNAL_* env
+# vars. dc-api reads them at startup to bootstrap the KubeOVN ProviderNetwork
+# / Vlan / Subnet / NetworkAttachmentDefinition that tenant VPCs SNAT through.
+
+variable "vpc_external_bridge" {
+  type        = string
+  description = "Host bridge name backing the external network (e.g. 'mgmt-br'). Matches Harvester's host NIC/bridge."
+}
+
+variable "vpc_external_cidr" {
+  type        = string
+  description = "CIDR of the external (management) network. dc-api places NAT gateway pod NICs and EIPs inside this CIDR."
+}
+
+variable "vpc_external_gateway" {
+  type        = string
+  description = "Upstream gateway IP for the external network."
+}
+
+variable "vpc_external_reserved_ips" {
+  type        = string
+  description = "Comma-separated IPs already in use on the external network. Listed so kube-ovn IPAM avoids them."
+}
+
+variable "vpc_external_vlan_id" {
+  type        = number
+  description = "VLAN tag for the external network. 0 = untagged."
+  default     = 0
+}
+
+# ── F7: BFF confidential OIDC client ──────────────────────────────────────────
+# Non-empty bff_client_id activates /v1/auth/{login,callback,logout,me} in
+# dc-api. Sensitive values land in the dc-api-secrets Secret; redirect / cookie
+# config lands in the dc-api-config ConfigMap.
+
+variable "bff_client_id" {
+  type        = string
+  description = "Asgardeo client ID for the BFF confidential OIDC client. Empty string disables BFF (dc-api falls back to Bearer-only auth). Projected as DCAPI_BFF_CLIENT_ID."
+  default     = ""
+}
+
+variable "bff_client_secret" {
+  type        = string
+  sensitive   = true
+  description = "Asgardeo client secret for the BFF client. Projected as DCAPI_BFF_CLIENT_SECRET."
+  default     = ""
+}
+
+variable "bff_session_secret" {
+  type        = string
+  sensitive   = true
+  description = "Base64-encoded 32-byte AES-256 key used by dc-api to seal BFF session cookies. Projected as DCAPI_BFF_SESSION_SECRET. Rotating this invalidates every active session."
+  default     = ""
+}
+
+variable "bff_redirect_url" {
+  type        = string
+  description = "Asgardeo redirect URI for the BFF authorization-code flow (must be whitelisted in the Asgardeo app). Projected as DCAPI_BFF_REDIRECT_URL."
+  default     = ""
+}
+
+variable "bff_post_login_redirect" {
+  type        = string
+  description = "URL dc-api 302s the browser to after a successful BFF login. Projected as DCAPI_BFF_POST_LOGIN_REDIRECT."
+  default     = ""
+}
+
+variable "bff_post_logout_redirect" {
+  type        = string
+  description = "URL dc-api 302s the browser to after BFF logout. Projected as DCAPI_BFF_POST_LOGOUT_REDIRECT."
+  default     = ""
+}
+
+variable "bff_cookie_domain" {
+  type        = string
+  description = "Cookie domain scope for BFF session cookies (e.g. '.lk-dev.internal.wso2.com'). Projected as DCAPI_BFF_COOKIE_DOMAIN."
+  default     = ""
+}
+
+variable "bff_cookie_secure" {
+  type        = bool
+  description = "Whether to set the Secure flag on the BFF session cookie. Should be true everywhere except localhost http://. Projected as DCAPI_BFF_COOKIE_SECURE."
+  default     = true
 }
