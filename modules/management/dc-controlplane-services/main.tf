@@ -469,7 +469,7 @@ resource "kubernetes_deployment" "dc_api" {
 
           liveness_probe {
             http_get {
-              path = "/healthz"
+              path = var.cloudui_health_path
               port = 8080
             }
             initial_delay_seconds = 10
@@ -478,7 +478,7 @@ resource "kubernetes_deployment" "dc_api" {
 
           readiness_probe {
             http_get {
-              path = "/healthz"
+              path = var.cloudui_health_path
               port = 8080
             }
             initial_delay_seconds = 5
@@ -598,7 +598,7 @@ resource "kubernetes_deployment" "cloud_ui" {
 
           liveness_probe {
             http_get {
-              path = "/healthz"
+              path = var.cloudui_health_path
               port = 8080
             }
             initial_delay_seconds = 5
@@ -607,7 +607,7 @@ resource "kubernetes_deployment" "cloud_ui" {
 
           readiness_probe {
             http_get {
-              path = "/healthz"
+              path = var.cloudui_health_path
               port = 8080
             }
             initial_delay_seconds = 3
@@ -797,11 +797,12 @@ resource "kubernetes_ingress_v1" "dc_api" {
 }
 
 # ── cloud-ui Ingress + TLS reuse ──────────────────────────────────────────────
-# The cloud-ui Deployment + Service are applied by the cloud-ui GitHub workflow
-# (not by this module). After a cluster rebuild that Ingress would be missing
-# until the next workflow run, leaving cloud-ui unreachable. Keeping the
-# Ingress here means routing is restored as part of the TF apply; the Service
-# the Ingress points at appears as soon as the workflow runs.
+# This module owns all three cloud-ui resources: the Deployment + Service
+# (defined above) and this Ingress. Keeping the Ingress next to its backend
+# means a cluster rebuild restores routing as part of the TF apply, with no
+# dependency on a separate workflow run. CI is still expected to roll the
+# image forward via `kubectl set image`; the Deployment's lifecycle ignores
+# image changes so TF and CI don't fight.
 #
 # The cert this Ingress references is the same dc-api self-signed cert — its
 # SAN list includes any wildcards passed via ingress_additional_dns_names, so

@@ -83,6 +83,10 @@ variable "cloudui_service_port" {
   type        = number
   description = "Backend Service port the cloud-ui Ingress points at."
   default     = 80
+  validation {
+    condition     = var.cloudui_service_port >= 1 && var.cloudui_service_port <= 65535 && floor(var.cloudui_service_port) == var.cloudui_service_port
+    error_message = "cloudui_service_port must be an integer between 1 and 65535."
+  }
 }
 
 variable "cloudui_image" {
@@ -95,6 +99,16 @@ variable "cloudui_replicas" {
   type        = number
   description = "Replica count for the cloud-ui Deployment."
   default     = 1
+  validation {
+    condition     = var.cloudui_replicas >= 1 && floor(var.cloudui_replicas) == var.cloudui_replicas
+    error_message = "cloudui_replicas must be an integer >= 1."
+  }
+}
+
+variable "cloudui_health_path" {
+  type        = string
+  description = "HTTP path the cloud-ui liveness + readiness probes hit on the container port. Default '/healthz' matches the wso2/cloud-ui image's nginx.conf. Override to '/' for consumers that ship a stock nginx-unprivileged image (which doesn't serve /healthz)."
+  default     = "/healthz"
 }
 
 variable "tenant_group_prefix" {

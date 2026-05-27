@@ -84,7 +84,7 @@ resource "kubernetes_storage_class_v1" "vm_local" {
 # the host cluster's default StorageClass (the original module behaviour).
 locals {
   vm_storage_class_name = (
-    var.vm_storage_class_override != "" ? var.vm_storage_class_override :
+    trimspace(var.vm_storage_class_override) != "" ? trimspace(var.vm_storage_class_override) :
     var.create_local_storage_class ? var.local_storage_class_name :
     ""
   )
