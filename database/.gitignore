@@ -1,3 +1,9 @@
 bin/
 cover.out
 
+# Packer build output
+database/images/packer/output-*/
+
+# Packer temp files
+database/images/packer/packer_cache/
+database/images/packer/*.qcow2
