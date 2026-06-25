@@ -70,6 +70,9 @@ func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (str
 func (s *stubHarvester) TeardownAll(_ context.Context, _, _ string, _ dbaasv1.ResourceRefs) error {
 	return nil
 }
+func (s *stubHarvester) ClearDataVolumeOwnerRef(_ context.Context, _, _ string) error { return nil }
+func (s *stubHarvester) DeleteDataVolume(_ context.Context, _, _ string) error        { return nil }
+func (s *stubHarvester) SwapVMOSDisk(_ context.Context, _, _, _, _ string) error { return nil }
 
 // newWaitReadyReconciler returns a reconciler and a DBInstance wired up for
 // phaseWaitReady unit tests. The inst is pre-registered in the fake client.

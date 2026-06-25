@@ -26,7 +26,7 @@ import (
 //   - implemented mutable post-create: dbInstanceClass, allocatedStorage,
 //     running, deletionProtection
 //   - implemented immutable post-create (modify is refused): networkRef,
-//     osImage, dbName, masterUsername, port, storageType, staticNetwork,
+//     dbName, masterUsername, port, storageType, staticNetwork,
 //     vmPassword, engineVersion
 //   - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
 //     multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
@@ -41,9 +41,10 @@ type DBInstanceSpec struct {
 	DBInstanceClass string `json:"dbInstanceClass"`
 
 	// EngineVersion is the PostgreSQL major version, e.g. "16".
-	// NOT YET IMPLEMENTED: cloud-init installs whatever PostgreSQL the OS
-	// image's apt repo provides (Ubuntu 24.04 → PG 16; older → older). The
-	// field is recorded but does not drive package selection.
+	// Optional: a defaulting webhook sets it to the latest PG version in the
+	// BakedImages catalog if unspecified. A validating webhook rejects EOL or
+	// unknown versions at admission with a clear error.
+	// Immutable after first reconcile.
 	// +optional
 	EngineVersion string `json:"engineVersion,omitempty"`
 
@@ -146,19 +147,12 @@ type DBInstanceSpec struct {
 	// +optional
 	Running *bool `json:"running,omitempty"`
 
-	// OSImage is the Harvester VirtualMachineImage to clone for the VM's
-	// OS disk. Either "<ns>/<name>" or just "<name>" (resolved in the
-	// "default" namespace), or the image's spec.displayName.
-	// Immutable after first reconcile.
-	// +optional
-	OSImage string `json:"osImage,omitempty"`
-
 	// NetworkRef is a Harvester NAD reference (namespace/name) for the VLAN
 	// network the database VM attaches to. This is the VM's only network
-	// interface: client traffic, package install during cloud-init, and the
-	// Prometheus metrics scrape all go through it. The NAD must already exist
-	// on the cluster (the controller does not create networks) and the VLAN
-	// must have internet egress.
+	// interface: client traffic and the Prometheus metrics scrape go through it.
+	// The NAD must already exist on the cluster (the controller does not create
+	// networks). No internet egress required — packages are pre-installed in the
+	// baked image.
 	// Immutable after first reconcile.
 	// Example: "iaas-net/vm-subnet-001".
 	// +required
@@ -335,8 +329,6 @@ type AppliedSpec struct {
 	// +optional
 	NetworkRef string `json:"networkRef,omitempty"`
 	// +optional
-	OSImage string `json:"osImage,omitempty"`
-	// +optional
 	DBName string `json:"dbName,omitempty"`
 	// +optional
 	MasterUsername string `json:"masterUsername,omitempty"`
@@ -346,6 +338,12 @@ type AppliedSpec struct {
 	Port int `json:"port,omitempty"`
 	// +optional
 	StorageType string `json:"storageType,omitempty"`
+	// ImageRevision is the baked image revision the VM was provisioned or last
+	// repaved with, e.g. "v20260615". Used for drift detection — when this
+	// differs from the current LatestBakedImages revision, OSUpdateAvailable
+	// is set to True.
+	// +optional
+	ImageRevision string `json:"imageRevision,omitempty"`
 }
 
 // Endpoint is the network address clients use to reach the database.
@@ -453,8 +451,10 @@ const (
 
 	// Condition type constants for DBInstance liveness monitoring.
 	// These are the Type field of entries in Status.Conditions.
-	ConditionDegraded = "Degraded" // readiness probe failing or guest agent disconnected (report-only)
-	ConditionFailed   = "Failed"   // crash-loop give-up, or a fatal provisioning error
+	ConditionDegraded          = "Degraded"          // readiness probe failing or guest agent disconnected (report-only)
+	ConditionFailed            = "Failed"            // crash-loop give-up, or a fatal provisioning error
+	ConditionOSUpdateAvailable = "OSUpdateAvailable" // VM is running an older image revision; repave available
+	ConditionPGVersionEOL      = "PGVersionEOL"      // VM's engineVersion has reached upstream EOL; customer migration required
 
 	// Condition reason constants (Conditions[].Reason).
 	ReasonPostgresUnreachable    = "PostgresUnreachable"
@@ -493,6 +493,41 @@ var InstanceClasses = map[string]InstanceClassSpec{
 	"db.r5.large":   {2, 16384, 300},
 	"db.r5.xlarge":  {4, 32768, 500},
 	"db.r5.2xlarge": {8, 65536, 800},
+}
+
+// BakedImageEntry describes a single baked image revision.
+type BakedImageEntry struct {
+	ImageName  string   // Harvester VirtualMachineImage name, e.g. "ubuntu-2204-postgres-v20260615"
+	OSVersion  string   // Ubuntu LTS stream, e.g. "22.04"
+	PGVersions []string // PG major versions pre-installed, e.g. ["15", "16", "17"]
+}
+
+// BakedImageStream is the per-OS-stream entry in LatestBakedImages.
+// Validated must be true before the operator uses this stream for new VMs.
+type BakedImageStream struct {
+	Revision  string // e.g. "v20260615"
+	Validated bool   // false = image under test, not safe to provision against
+}
+
+// BakedImages is the catalog of all baked image revisions ever published.
+// Old entries are kept so existing VMs can reference their creation-time revision
+// in status.appliedSpec.imageRevision for drift detection.
+// To add a new revision: add one entry here and bump LatestBakedImages.
+var BakedImages = map[string]BakedImageEntry{
+	"v20260515": {
+		ImageName:  "ubuntu-2204-postgres-v20260515",
+		OSVersion:  "22.04",
+		PGVersions: []string{"15", "16", "17"},
+	},
+}
+
+// LatestBakedImages maps OS stream → current validated revision.
+// DefaultOSVersion is read from the BACKING_IMAGE_OS_VERSION operator env var —
+// flip the env var to change the default stream without a code change.
+// Add new streams with Validated: false until testing is complete.
+var LatestBakedImages = map[string]BakedImageStream{
+	"22.04": {Revision: "v20260515", Validated: true},
+	// "24.04": {Revision: "v20261201", Validated: false}, // uncomment when 24.04 stream is ready
 }
 
 func init() {

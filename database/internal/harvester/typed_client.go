@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -40,6 +41,7 @@ import (
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvesterclientset "github.com/harvester/harvester/pkg/generated/clientset/versioned"
+	cdiclientset "kubevirt.io/client-go/containerizeddataimporter"
 	kvclientset "kubevirt.io/client-go/kubevirt"
 )
 
@@ -49,6 +51,7 @@ type TypedClient struct {
 	Clientset         harvesterclientset.Interface
 	KubeClient        kubernetes.Interface
 	KvClientset       kvclientset.Interface
+	CdiClientset      cdiclientset.Interface
 	GrafanaURL        string
 	MgmtLogicalSwitch string
 }
@@ -79,11 +82,15 @@ func NewTypedClient(config *rest.Config, grafanaURL string) (*TypedClient, error
 	if err != nil {
 		return nil, err
 	}
-	return NewTypedClientWithClientsets(clientset, kubeClient, kvClientset, grafanaURL), nil
+	cdiClient, err := cdiclientset.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return NewTypedClientWithClientsets(clientset, kubeClient, kvClientset, cdiClient, grafanaURL), nil
 }
 
-func NewTypedClientWithClientsets(clientset harvesterclientset.Interface, kubeClient kubernetes.Interface, kvClientset kvclientset.Interface, grafanaURL string) *TypedClient {
-	return &TypedClient{Clientset: clientset, KubeClient: kubeClient, KvClientset: kvClientset, GrafanaURL: grafanaURL}
+func NewTypedClientWithClientsets(clientset harvesterclientset.Interface, kubeClient kubernetes.Interface, kvClientset kvclientset.Interface, cdiClient cdiclientset.Interface, grafanaURL string) *TypedClient {
+	return &TypedClient{Clientset: clientset, KubeClient: kubeClient, KvClientset: kvClientset, CdiClientset: cdiClient, GrafanaURL: grafanaURL}
 }
 
 func (c *TypedClient) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error) {
@@ -152,7 +159,7 @@ func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (v
 
 	// Resolve the image first so a bad/missing image fails before we create any
 	// Secrets (no orphans on the most common early failure).
-	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.ImageName)
 	if err != nil {
 		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
 	}
@@ -505,6 +512,66 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 		return fmt.Errorf("teardown: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func (c *TypedClient) ClearDataVolumeOwnerRef(ctx context.Context, ns, dvName string) error {
+	patch := []byte(`{"metadata":{"ownerReferences":[]}}`)
+	_, err := c.CdiClientset.CdiV1beta1().DataVolumes(ns).Patch(
+		ctx, dvName, types.MergePatchType, patch, metav1.PatchOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (c *TypedClient) DeleteDataVolume(ctx context.Context, ns, dvName string) error {
+	err := c.CdiClientset.CdiV1beta1().DataVolumes(ns).Delete(ctx, dvName, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) error {
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
+	if err != nil {
+		return fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
+	}
+	newTemplate := map[string]any{
+		"apiVersion": "cdi.kubevirt.io/v1beta1",
+		"kind":       "DataVolume",
+		"metadata": map[string]any{
+			"name": fmt.Sprintf("pg-%s-os", instID),
+			"annotations": map[string]any{
+				"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
+			},
+		},
+		"spec": map[string]any{
+			"source": map[string]any{"blank": map[string]any{}},
+			"pvc": map[string]any{
+				"accessModes":      []any{"ReadWriteMany"},
+				"volumeMode":       "Block",
+				"storageClassName": imgSC,
+				"resources": map[string]any{
+					"requests": map[string]any{"storage": "20Gi"},
+				},
+			},
+		},
+	}
+	patch := map[string]any{
+		"spec": map[string]any{
+			"dataVolumeTemplates": []any{newTemplate},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("SwapVMOSDisk marshal: %w", err)
+	}
+	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Patch(
+		ctx, vmName, types.MergePatchType, patchBytes, metav1.PatchOptions{},
+	)
+	return err
 }
 
 // Helpers

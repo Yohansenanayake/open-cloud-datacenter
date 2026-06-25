@@ -31,7 +31,6 @@ func TestImmutableDriftNormalizesCreateDefaults(t *testing.T) {
 			DBInstanceClass:  "db.t3.medium",
 			AllocatedStorage: 50,
 			NetworkRef:       "default/vm-network",
-			OSImage:          "ubuntu-22.04-server-cloudimg-amd64.img",
 			DBName:           "orders",
 			MasterUsername:   "dbadmin",
 			Port:             5432,
@@ -61,7 +60,6 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 		Status: dbaasv1.DBInstanceStatus{
 			AppliedSpec: &dbaasv1.AppliedSpec{
 				NetworkRef:     "default/vm-network",
-				OSImage:        "ubuntu-22.04-server-cloudimg-amd64.img",
 				DBName:         "orders",
 				MasterUsername: "dbadmin",
 				Port:           5432,
@@ -72,5 +70,31 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 
 	if drift := immutableDrift(inst); drift != "dbName" {
 		t.Fatalf("immutableDrift() = %q, want dbName", drift)
+	}
+}
+
+func TestImmutableDriftDetectsEngineVersionChange(t *testing.T) {
+	inst := &dbaasv1.DBInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
+		Spec: dbaasv1.DBInstanceSpec{
+			DBInstanceClass:  "db.t3.medium",
+			AllocatedStorage: 50,
+			NetworkRef:       "default/vm-network",
+			EngineVersion:    "17", // user tried to bump PG version
+		},
+		Status: dbaasv1.DBInstanceStatus{
+			AppliedSpec: &dbaasv1.AppliedSpec{
+				NetworkRef:     "default/vm-network",
+				DBName:         "orders",
+				MasterUsername: "dbadmin",
+				EngineVersion:  "16", // VM was provisioned with PG 16
+				Port:           5432,
+				StorageType:    "longhorn",
+			},
+		},
+	}
+
+	if drift := immutableDrift(inst); drift != "engineVersion" {
+		t.Fatalf("immutableDrift() = %q, want engineVersion", drift)
 	}
 }

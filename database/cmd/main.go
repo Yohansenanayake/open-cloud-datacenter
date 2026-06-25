@@ -205,6 +205,11 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbinstance")
 		os.Exit(1)
 	}
+
+	if err := dbaasv1alpha1.SetupDBInstanceWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up webhook", "webhook", "DBInstance")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

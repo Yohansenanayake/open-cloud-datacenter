@@ -66,7 +66,10 @@ spec:
           # KubeOVN logical switch for launcher pod mgmt-NIC pinning.
           # Change to your cluster's management switch name for VPC setups.
           - --mgmt-logical-switch=ovn-default
-        image: controller:latest
+        env:
+        - name: BACKING_IMAGE_OS_VERSION
+          value: "22.04"      
+        image: ghcr.io/tgcjananga/dbaas-controller:backed-images-v20260624
         name: manager
         ports:
         - containerPort: 8081

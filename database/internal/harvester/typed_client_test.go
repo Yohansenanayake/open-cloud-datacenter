@@ -19,6 +19,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	cdifake "kubevirt.io/client-go/containerizeddataimporter/fake"
 	kvfake "kubevirt.io/client-go/kubevirt/fake"
 )
 
@@ -216,8 +217,8 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if osTemplate == nil {
 		t.Fatalf("OS PVC template not found")
 	}
-	if got := osTemplate.Annotations["harvesterhci.io/imageId"]; got != "default/ubuntu-22.04" {
-		t.Fatalf("OS image annotation = %q, want default/ubuntu-22.04", got)
+	if got := osTemplate.Annotations["harvesterhci.io/imageId"]; got != "default/ubuntu-2204-postgres-v20260615" {
+		t.Fatalf("OS image annotation = %q, want default/ubuntu-2204-postgres-v20260615", got)
 	}
 	dataTemplate := findPVCTemplate(templates, "pg-orders-data")
 	if dataTemplate == nil {
@@ -595,7 +596,7 @@ func TestTypedTeardownAggregatesDeleteErrors(t *testing.T) {
 }
 
 func newTestTypedClient(objs ...runtime.Object) *TypedClient {
-	return NewTypedClientWithClientsets(harvesterfake.NewSimpleClientset(objs...), kubefake.NewSimpleClientset(), kvfake.NewSimpleClientset(), "")
+	return NewTypedClientWithClientsets(harvesterfake.NewSimpleClientset(objs...), kubefake.NewSimpleClientset(), kvfake.NewSimpleClientset(), cdifake.NewSimpleClientset(), "")
 }
 
 func findPVCTemplate(pvcs []*corev1.PersistentVolumeClaim, name string) *corev1.PersistentVolumeClaim {
@@ -642,8 +643,8 @@ func vmInterfaceHasPort(vm *kubevirtv1.VirtualMachine, interfaceName string, por
 func testTypedVMImage() *harvesterhciov1beta1.VirtualMachineImage {
 	return &harvesterhciov1beta1.VirtualMachineImage{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "harvesterhci.io/v1beta1", Kind: "VirtualMachineImage"},
-		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu-22.04", Namespace: "default"},
-		Spec:       harvesterhciov1beta1.VirtualMachineImageSpec{DisplayName: "Ubuntu 22.04"},
+		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu-2204-postgres-v20260615", Namespace: "default"},
+		Spec:       harvesterhciov1beta1.VirtualMachineImageSpec{DisplayName: "Ubuntu 22.04 PostgreSQL v20260615"},
 		Status: harvesterhciov1beta1.VirtualMachineImageStatus{
 			StorageClassName: "longhorn-image-ubuntu",
 			Conditions: []harvesterhciov1beta1.Condition{

@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -33,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -112,7 +114,13 @@ type VMCreateParams struct {
 	Namespace              string
 	CPUCores               int
 	MemoryMB               int
-	OSImage                string
+	// ImageName is the Harvester VirtualMachineImage name resolved from the
+	// BakedImages catalog by the controller. e.g. "ubuntu-2204-postgres-v20260615".
+	ImageName              string
+	// EngineVersion is the PostgreSQL major version to activate via cloud-init.
+	// e.g. "16". All supported versions are pre-installed in the baked image;
+	// bootstrap.sh activates only this one.
+	EngineVersion          string
 	DataVolumeRef          string
 	DataVolumeSizeGB       int
 	DataVolumeStorageClass string
@@ -131,9 +139,7 @@ type VMCreateParams struct {
 	StaticNetwork *dbaasv1.NetworkConfig
 	// DNSServerIP, when non-empty, pins the VM's resolver via KubeVirt
 	// dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
-	// subnets to defeat the virt-launcher internal-DHCP DNS race (it would
-	// otherwise inject unreachable cluster DNS, breaking apt during
-	// cloud-init). Supplied by the control plane (per-VPC CoreDNS address).
+	// subnets to defeat the virt-launcher internal-DHCP DNS race.
 	DNSServerIP string
 }
 
@@ -258,7 +264,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 
 	// Resolve the Harvester VirtualMachineImage before creating any resources
 	// so that a missing image causes an early error without leaving orphan Secrets.
-	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.ImageName)
 	if err != nil {
 		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
 	}
@@ -641,6 +647,74 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 // RemoveCloudInitDisk is a no-op on the dynamic client pending implementation.
 // The typed client (default) has the full implementation.
 func (c *Client) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
+
+// ClearDataVolumeOwnerRef patches the DataVolume to remove all ownerReferences.
+// This must be called before deleting the VM CR during repave so the pgdata
+// DataVolume is not cascade-deleted by the garbage collector.
+func (c *Client) ClearDataVolumeOwnerRef(ctx context.Context, ns, dvName string) error {
+	patch := []byte(`{"metadata":{"ownerReferences":[]}}`)
+	_, err := c.Dynamic.Resource(dvGVR).Namespace(ns).Patch(
+		ctx, dvName, types.MergePatchType, patch, metav1.PatchOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// DeleteDataVolume deletes a DataVolume by name. NotFound is treated as success
+// so the call is idempotent across reconcile retries.
+func (c *Client) DeleteDataVolume(ctx context.Context, ns, dvName string) error {
+	err := c.Dynamic.Resource(dvGVR).Namespace(ns).Delete(ctx, dvName, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// SwapVMOSDisk replaces the os-disk DataVolumeTemplate in the VM spec so the
+// next start uses the new baked image's BackingImage StorageClass. The old
+// DataVolume must already be deleted before calling this.
+func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) error {
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
+	if err != nil {
+		return fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
+	}
+	newTemplate := map[string]any{
+		"apiVersion": "cdi.kubevirt.io/v1beta1",
+		"kind":       "DataVolume",
+		"metadata": map[string]any{
+			"name": fmt.Sprintf("pg-%s-os", instID),
+			"annotations": map[string]any{
+				"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
+			},
+		},
+		"spec": map[string]any{
+			"source": map[string]any{"blank": map[string]any{}},
+			"pvc": map[string]any{
+				"accessModes":      []any{"ReadWriteMany"},
+				"volumeMode":       "Block",
+				"storageClassName": imgSC,
+				"resources": map[string]any{
+					"requests": map[string]any{"storage": "20Gi"},
+				},
+			},
+		},
+	}
+	patch := map[string]any{
+		"spec": map[string]any{
+			"dataVolumeTemplates": []any{newTemplate},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("SwapVMOSDisk marshal: %w", err)
+	}
+	_, err = c.Dynamic.Resource(vmGVR).Namespace(ns).Patch(
+		ctx, vmName, types.MergePatchType, patchBytes, metav1.PatchOptions{},
+	)
+	return err
+}
 
 // DeleteSecret deletes a Secret, ignoring NotFound. Used by the controller to
 // clean up the ephemeral cloud-init Secret once the VM reaches Available.

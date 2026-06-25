@@ -45,4 +45,18 @@ type ClientInterface interface {
 
 	DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error)
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error
+
+	// Repave helpers — used by phaseRepave() to swap the OS disk.
+	// ClearDataVolumeOwnerRef removes all ownerReferences from a DataVolume so
+	// it is not cascade-deleted when the VM CR is patched during repave.
+	ClearDataVolumeOwnerRef(ctx context.Context, ns, dvName string) error
+	// DeleteDataVolume deletes a DataVolume by name. NotFound is treated as success.
+	DeleteDataVolume(ctx context.Context, ns, dvName string) error
+	// SwapVMOSDisk replaces the os-disk DataVolumeTemplate in the VM spec with a
+	// new one backed by the image referenced by imgRef (name or displayName in
+	// namespace default). The storageClass is resolved from the image's own
+	// status.storageClassName, so this works whether the image was uploaded via
+	// kubectl (metadata.name matches) or the Harvester UI (auto-generated name,
+	// displayName matches).
+	SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) error
 }

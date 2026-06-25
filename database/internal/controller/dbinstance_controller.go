@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,8 +44,12 @@ import (
 // immutableDrift can't drift apart over time. A change here should be
 // rare and accompanied by docs/USAGE updates.
 const (
-	defaultOSImage     = "ubuntu-22.04-server-cloudimg-amd64.img"
 	defaultStorageType = "longhorn"
+
+	// AnnotationRepaveTrigger is set to "now" by an operator to trigger an OS
+	// disk swap on the next reconcile. The controller clears it after repave
+	// completes to prevent re-triggering on the next reconcile.
+	AnnotationRepaveTrigger = "dbaas.opencloud.wso2.com/repave-trigger"
 	defaultMasterUser  = "dbadmin"
 	defaultPort        = 5432
 
@@ -137,6 +143,12 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if (inst.Status.Phase == dbaasv1.StatusAvailable || inst.Status.Phase == dbaasv1.StatusModifying) &&
 		inst.Generation != inst.Status.ObservedGeneration {
 		return r.reconcileModify(ctx, &inst)
+	}
+
+	// --- Repave trigger (checked before phase dispatch so it fires from Available) ---
+	if inst.Annotations[AnnotationRepaveTrigger] == "now" &&
+		inst.Status.ProvisioningPhase == dbaasv1.PhaseAvailable {
+		return r.phaseRepave(ctx, &inst)
 	}
 
 	// --- Phase-based provisioning ---
@@ -245,13 +257,24 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	if dbName == "" {
 		dbName = id
 	}
-	osImage := inst.Spec.OSImage
-	if osImage == "" {
-		osImage = defaultOSImage
-	}
 	storageType := inst.Spec.StorageType
 	if storageType == "" {
 		storageType = defaultStorageType
+	}
+
+	// Resolve image from baked catalog.
+	osVersion := os.Getenv("BACKING_IMAGE_OS_VERSION")
+	stream, ok := dbaasv1.LatestBakedImages[osVersion]
+	if !ok || !stream.Validated {
+		return r.fail(ctx, inst, "InvalidOSStream",
+			fmt.Errorf("OS stream %q is not available or not validated; check BACKING_IMAGE_OS_VERSION env var", osVersion))
+	}
+	imageEntry := dbaasv1.BakedImages[stream.Revision]
+	engineVersion := inst.Spec.EngineVersion
+	if !slices.Contains(imageEntry.PGVersions, engineVersion) {
+		return r.fail(ctx, inst, "UnsupportedEngineVersion",
+			fmt.Errorf("engineVersion %q is not available in image revision %q (stream %q); supported: %v",
+				engineVersion, stream.Revision, osVersion, imageEntry.PGVersions))
 	}
 
 	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := r.Harvester.CreatePostgresVM(ctx, harvester.VMCreateParams{
@@ -259,7 +282,8 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 		Namespace:              ns,
 		CPUCores:               classSpec.CPUCores,
 		MemoryMB:               classSpec.MemoryMB,
-		OSImage:                osImage,
+		ImageName:              imageEntry.ImageName,
+		EngineVersion:          engineVersion,
 		DataVolumeRef:          inst.Status.Resources.DataVolumeName,
 		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
 		DataVolumeStorageClass: storageType,
@@ -296,13 +320,13 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	// CR never reports observedGeneration=current for changes we silently
 	// couldn't carry through to the running VM.
 	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{
-		NetworkRef:     inst.Spec.NetworkRef,
-		OSImage:        osImage,
-		DBName:         dbName,
+		NetworkRef:    inst.Spec.NetworkRef,
+		DBName:        dbName,
 		MasterUsername: masterUser,
-		EngineVersion:  inst.Spec.EngineVersion,
-		Port:           specPort(inst.Spec.Port),
-		StorageType:    storageType,
+		EngineVersion: engineVersion,
+		Port:          specPort(inst.Spec.Port),
+		StorageType:   storageType,
+		ImageRevision: stream.Revision,
 	}
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.Message = "VM created, waiting for PostgreSQL to initialize"
@@ -549,6 +573,42 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 		}
 	}
 
+	// -------------------------------------------------------------------------
+	// Baked image drift detection
+	// -------------------------------------------------------------------------
+	// When the applied revision differs from the current stream revision a new
+	// image has been published. There are two distinct cases:
+	//   OSUpdateAvailable — engineVersion is still in the new image → safe repave
+	//   PGVersionEOL      — engineVersion was removed from the new image → customer
+	//                       must migrate data before repaving
+	osVersion := os.Getenv("BACKING_IMAGE_OS_VERSION")
+	if stream, ok := dbaasv1.LatestBakedImages[osVersion]; ok && stream.Validated && inst.Status.AppliedSpec != nil {
+		if inst.Status.AppliedSpec.ImageRevision != stream.Revision {
+			appliedEntry := dbaasv1.BakedImages[inst.Status.AppliedSpec.ImageRevision]
+			currentEntry := dbaasv1.BakedImages[stream.Revision]
+			if slices.Contains(currentEntry.PGVersions, inst.Spec.EngineVersion) {
+				// PG version present in new image — repave is safe.
+				setCondition(inst, dbaasv1.ConditionOSUpdateAvailable, metav1.ConditionTrue,
+					"ImageRevisionDrift",
+					fmt.Sprintf("VM is on image %q (OS %s); new image %q (OS %s) available — annotate with %s=now to repave",
+						inst.Status.AppliedSpec.ImageRevision, appliedEntry.OSVersion,
+						stream.Revision, currentEntry.OSVersion, AnnotationRepaveTrigger))
+				removeCondition(inst, dbaasv1.ConditionPGVersionEOL)
+			} else {
+				// PG version removed from new image — customer must migrate data first.
+				setCondition(inst, dbaasv1.ConditionPGVersionEOL, metav1.ConditionTrue,
+					"PGVersionRemovedFromCatalog",
+					fmt.Sprintf("engineVersion %q is not available in new image %q (available: %v) — "+
+						"create a new DBInstance with a supported version and migrate data before repaving",
+						inst.Spec.EngineVersion, stream.Revision, currentEntry.PGVersions))
+				removeCondition(inst, dbaasv1.ConditionOSUpdateAvailable)
+			}
+		} else {
+			removeCondition(inst, dbaasv1.ConditionOSUpdateAvailable)
+			removeCondition(inst, dbaasv1.ConditionPGVersionEOL)
+		}
+	}
+
 	if equality.Semantic.DeepEqual(prev, &inst.Status) {
 		// No status drift this cycle — skip the Update entirely.
 		return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
@@ -619,6 +679,94 @@ func (r *DBInstanceReconciler) phaseFailed(ctx context.Context, inst *dbaasv1.DB
 	inst.Status.Phase = dbaasv1.StatusStarting
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.Message = "VM healthy again; re-validating readiness"
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
+}
+
+// phaseRepave swaps the OS disk for the latest baked image while leaving the
+// pgdata disk untouched. Triggered by the repave-trigger=now annotation.
+//
+// Step 0: Clear pgdata ownerRef (safety — prevents cascade delete if VM CR is patched)
+// Step 1: Stop VM, wait for VMI to disappear
+// Step 2: Delete old OS disk DataVolume
+// Step 3: Resolve new image from catalog
+// Step 4: Patch VM spec with new OS disk DataVolumeTemplate
+// Step 5: Start VM → re-enter phaseWaitReady
+// Step 7: imageRevision + conditions updated in phaseAvailable after ready
+func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	ns := inst.Namespace
+	vmName := inst.Status.Resources.VMName
+	osDVName := fmt.Sprintf("pg-%s-os", inst.Name)
+	pgdataDVName := inst.Status.Resources.DataVolumeName
+
+	inst.Status.Phase = dbaasv1.StatusModifying
+
+	// Step 0: protect pgdata from cascade deletion.
+	if err := r.Harvester.ClearDataVolumeOwnerRef(ctx, ns, pgdataDVName); err != nil {
+		return r.fail(ctx, inst, "RepavePgdataProtectFailed",
+			fmt.Errorf("could not clear pgdata ownerRef before repave: %w", err))
+	}
+
+	// Step 1: stop VM; wait for VMI to disappear before touching disks.
+	if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
+		return r.fail(ctx, inst, "RepaveStopFailed", err)
+	}
+	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
+	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if readiness.Running {
+		inst.Status.Message = "Repave: waiting for VM to stop"
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
+	}
+
+	// Step 2: delete old OS disk; pgdata is already ownerRef-free so it is safe.
+	if err := r.Harvester.DeleteDataVolume(ctx, ns, osDVName); err != nil {
+		return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
+	}
+
+	// Step 3: resolve new image from catalog and verify the VM's engineVersion
+	// is still present. If the PG version was removed (EOL) the repave must be
+	// blocked — the data directory format is version-specific and pg_createcluster
+	// would fail on boot if the requested version is not in the new image.
+	osVersion := os.Getenv("BACKING_IMAGE_OS_VERSION")
+	stream, ok := dbaasv1.LatestBakedImages[osVersion]
+	if !ok || !stream.Validated {
+		return r.fail(ctx, inst, "InvalidOSStream",
+			fmt.Errorf("OS stream %q is not available or not validated", osVersion))
+	}
+	entry := dbaasv1.BakedImages[stream.Revision]
+	if !slices.Contains(entry.PGVersions, inst.Spec.EngineVersion) {
+		return r.fail(ctx, inst, "RepaveBlockedPGVersionEOL",
+			fmt.Errorf("engineVersion %q is not available in new image %q (available: %v) — "+
+				"migrate data to a supported version before repaving",
+				inst.Spec.EngineVersion, stream.Revision, entry.PGVersions))
+	}
+
+	// Step 4: patch VM spec with new OS disk DataVolumeTemplate.
+	// SwapVMOSDisk resolves the image by name or displayName and reads
+	// storageClassName from status — works with both kubectl-named and
+	// UI-uploaded (auto-named) VirtualMachineImages.
+	if err := r.Harvester.SwapVMOSDisk(ctx, ns, vmName, inst.Name, entry.ImageName); err != nil {
+		return r.fail(ctx, inst, "RepaveSwapOSDiskFailed", err)
+	}
+
+	// Step 5: start VM and re-enter the wait-ready chain.
+	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
+		return r.fail(ctx, inst, "RepaveStartFailed", err)
+	}
+
+	// Update imageRevision and clear annotation + OSUpdateAvailable.
+	if inst.Status.AppliedSpec != nil {
+		inst.Status.AppliedSpec.ImageRevision = stream.Revision
+	}
+	removeCondition(inst, dbaasv1.ConditionOSUpdateAvailable)
+	if inst.Annotations != nil {
+		delete(inst.Annotations, AnnotationRepaveTrigger)
+	}
+
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
+	inst.Status.LastKnownVMIUID = ""
+	inst.Status.Message = fmt.Sprintf("Repave in progress: OS disk swapped to %s, waiting for VM ready", stream.Revision)
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
@@ -731,10 +879,6 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 	if a == nil {
 		return ""
 	}
-	osImage := inst.Spec.OSImage
-	if osImage == "" {
-		osImage = defaultOSImage
-	}
 	dbName := inst.Spec.DBName
 	if dbName == "" {
 		dbName = inst.Name
@@ -749,10 +893,6 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 		storageType = defaultStorageType
 	}
 
-	appliedOSImage := a.OSImage
-	if appliedOSImage == "" {
-		appliedOSImage = defaultOSImage
-	}
 	appliedDBName := a.DBName
 	if appliedDBName == "" {
 		appliedDBName = inst.Name
@@ -773,9 +913,6 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 	var changed []string
 	if a.NetworkRef != inst.Spec.NetworkRef {
 		changed = append(changed, "networkRef")
-	}
-	if appliedOSImage != osImage {
-		changed = append(changed, "osImage")
 	}
 	if appliedDBName != dbName {
 		changed = append(changed, "dbName")
