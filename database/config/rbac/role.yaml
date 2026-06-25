@@ -36,6 +36,8 @@ rules:
   - create
   - delete
   - get
+  - patch
+  - update
 - apiGroups:
   - cdi.kubevirt.io
   resources:
