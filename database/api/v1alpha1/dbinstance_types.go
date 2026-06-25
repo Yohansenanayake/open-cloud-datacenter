@@ -41,11 +41,12 @@ type DBInstanceSpec struct {
 	DBInstanceClass string `json:"dbInstanceClass"`
 
 	// EngineVersion is the PostgreSQL major version, e.g. "16".
-	// Optional: a defaulting webhook sets it to the latest PG version in the
-	// BakedImages catalog if unspecified. A validating webhook rejects EOL or
-	// unknown versions at admission with a clear error.
 	// Immutable after first reconcile.
+	// TODO: remove +kubebuilder:default once the DBInstance defaulting webhook is
+	// deployed (dbinstance_webhook.go DBInstanceDefaulter) — the webhook sets this
+	// dynamically from the BakedImages catalog instead of a hardcoded value.
 	// +optional
+	// +kubebuilder:default="17"
 	EngineVersion string `json:"engineVersion,omitempty"`
 
 	// DBName is the initial database to create. Default: the instance name.

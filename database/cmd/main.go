@@ -206,10 +206,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := dbaasv1alpha1.SetupDBInstanceWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to set up webhook", "webhook", "DBInstance")
-		os.Exit(1)
-	}
+	// TODO: enable once MutatingWebhookConfiguration/ValidatingWebhookConfiguration
+	// are deployed and TLS certs are provisioned for the webhook server.
+	// Until then the +kubebuilder:default marker on EngineVersion handles defaulting
+	// and the controller rejects invalid versions at reconcile time.
+	//
+	// if err := dbaasv1alpha1.SetupDBInstanceWebhookWithManager(mgr); err != nil {
+	// 	setupLog.Error(err, "Failed to set up webhook", "webhook", "DBInstance")
+	// 	os.Exit(1)
+	// }
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
