@@ -50,8 +50,8 @@ const (
 	// disk swap on the next reconcile. The controller clears it after repave
 	// completes to prevent re-triggering on the next reconcile.
 	AnnotationRepaveTrigger = "dbaas.opencloud.wso2.com/repave-trigger"
-	defaultMasterUser  = "dbadmin"
-	defaultPort        = 5432
+	defaultMasterUser       = "dbadmin"
+	defaultPort             = 5432
 
 	// Liveness for phaseAvailable is report-only: the controller reacts to the
 	// KubeVirt readiness probe's already-debounced Ready condition (tuned via
@@ -91,7 +91,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=harvesterhci.io,resources=virtualmachineimages,verbs=get;list
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create;update;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;delete;update;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
@@ -230,7 +230,7 @@ func (r *DBInstanceReconciler) phaseStorage(ctx context.Context, inst *dbaasv1.D
 
 	inst.Status.Resources.DataVolumeName = dvName
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseStorageProvisioned
-	inst.Status.Message = "Encrypted storage provisioned"  // Enctyption ? longhorn and harvester-longhorn storage class doesn't have volume encryption enabled by default.
+	inst.Status.Message = "Encrypted storage provisioned" // Enctyption ? longhorn and harvester-longhorn storage class doesn't have volume encryption enabled by default.
 
 	return r.advance(ctx, inst)
 }
@@ -320,13 +320,13 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	// CR never reports observedGeneration=current for changes we silently
 	// couldn't carry through to the running VM.
 	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{
-		NetworkRef:    inst.Spec.NetworkRef,
-		DBName:        dbName,
+		NetworkRef:     inst.Spec.NetworkRef,
+		DBName:         dbName,
 		MasterUsername: masterUser,
-		EngineVersion: engineVersion,
-		Port:          specPort(inst.Spec.Port),
-		StorageType:   storageType,
-		ImageRevision: stream.Revision,
+		EngineVersion:  engineVersion,
+		Port:           specPort(inst.Spec.Port),
+		StorageType:    storageType,
+		ImageRevision:  stream.Revision,
 	}
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.Message = "VM created, waiting for PostgreSQL to initialize"
@@ -454,8 +454,8 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
 
 		} else if inst.Status.LastKnownVMIUID != readiness.VMIUID {
-			log.FromContext(ctx).Info("unplanned VMI restart detected","oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
-			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,"Unplanned VMI restart detected (UID %s → %s)",inst.Status.LastKnownVMIUID, readiness.VMIUID)
+			log.FromContext(ctx).Info("unplanned VMI restart detected", "oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting, "Unplanned VMI restart detected (UID %s → %s)", inst.Status.LastKnownVMIUID, readiness.VMIUID)
 			inst.Status.RestartCount++ //for observerability only , no-op
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
 
@@ -474,7 +474,7 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 			if inst.Status.RecentUnplannedRestarts >= crashLoopThreshold {
 				termMsg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
 					inst.Status.RecentUnplannedRestarts, crashLoopWindow)
-				// Halt the VM before declaring failed: under RunStrategyAlways KubeVirt keep restarting it forever. 
+				// Halt the VM before declaring failed: under RunStrategyAlways KubeVirt keep restarting it forever.
 				// If StopVM fails , return without no status update , retry with next reconcile.
 				if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
 					log.FromContext(ctx).Error(err, "StopVM failed during crash-loop halt (will retry)")
@@ -967,7 +967,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 // ============================================================
 
 func (r *DBInstanceReconciler) advance(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	return ctrl.Result{Requeue: true}, r.statusUpdate(ctx, inst)  // Requeue : true is depreceated need to decide on timing.
+	return ctrl.Result{Requeue: true}, r.statusUpdate(ctx, inst) // Requeue : true is depreceated need to decide on timing.
 }
 
 func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstance, reason string, err error) (ctrl.Result, error) {
