@@ -85,7 +85,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbinstances/finalizers,verbs=update
 
 // Harvester resources the reconciler creates and tears down on behalf of callers.
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;create;update;delete
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;create;update;delete;patch
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get
 // +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop;virtualmachines/restart,verbs=update
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete;patch
