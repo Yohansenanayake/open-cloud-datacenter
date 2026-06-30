@@ -533,7 +533,7 @@ var BakedImages = map[string]BakedImageEntry{
 // Add new streams with Validated: false until testing is complete.
 var LatestBakedImages = map[string]BakedImageStream{
 	"22.04": {Revision: "v20260515", Validated: true},
-	"24.04": {Revision: "v20260715", Validated: false},
+	"24.04": {Revision: "v20260715", Validated: true},
 	// "24.04": {Revision: "v20261201", Validated: false}, // uncomment when 24.04 stream is ready
 }
 
