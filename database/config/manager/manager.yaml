@@ -69,7 +69,7 @@ spec:
         env:
         - name: BACKING_IMAGE_OS_VERSION
           value: "22.04"      
-        image: ghcr.io/tgcjananga/dbaas-controller:backed-images-v20260625_4
+        image: controller:latest
         name: manager
         ports:
         - containerPort: 8081

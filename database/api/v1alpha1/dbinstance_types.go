@@ -520,6 +520,11 @@ var BakedImages = map[string]BakedImageEntry{
 		OSVersion:  "22.04",
 		PGVersions: []string{"15", "16", "17"},
 	},
+	"v20260715": {
+		ImageName:  "ubuntu-2404-postgres-v20260715",
+		OSVersion:  "24.04",
+		PGVersions: []string{"15", "16", "17"},
+	},
 }
 
 // LatestBakedImages maps OS stream → current validated revision.
@@ -528,6 +533,7 @@ var BakedImages = map[string]BakedImageEntry{
 // Add new streams with Validated: false until testing is complete.
 var LatestBakedImages = map[string]BakedImageStream{
 	"22.04": {Revision: "v20260515", Validated: true},
+	"24.04": {Revision: "v20260715", Validated: false},
 	// "24.04": {Revision: "v20261201", Validated: false}, // uncomment when 24.04 stream is ready
 }
 

@@ -6,4 +6,4 @@ database/images/packer/output-*/
 
 # Packer temp files
 database/images/packer/packer_cache/
-database/images/packer/*.qcow2
+*.qcow2
