@@ -31,7 +31,7 @@ type ClientInterface interface {
 
 	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error)
 	GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error)
-	DialVMListener(ctx context.Context, ns, vmName string, port int) error  // not used anymore , will be removed in future
+	DialVMListener(ctx context.Context, ns, vmName string, port int) error // not used anymore , will be removed in future
 	StopVM(ctx context.Context, ns, vmName string) error
 	StartVM(ctx context.Context, ns, vmName string) error
 	ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error
@@ -42,6 +42,10 @@ type ClientInterface interface {
 	// Must be called before DeleteSecret on the cloud-init secret; otherwise
 	// poweroff/restart leaves the VM stuck in Starting with FailedMount.
 	RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error
+	// PrepareCloudInitForRepave recreates the ephemeral cloud-init Secret from
+	// the existing credentials Secret and reattaches the cloudinit disk to a
+	// halted VM before an OS-disk repave boot.
+	PrepareCloudInitForRepave(ctx context.Context, p VMCreateParams, vmName, credSecretName, cloudInitSecretName string) error
 
 	DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error)
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error

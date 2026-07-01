@@ -110,13 +110,13 @@ func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 
 // VMCreateParams bundles everything needed to create a PostgreSQL VM.
 type VMCreateParams struct {
-	ID                     string
-	Namespace              string
-	CPUCores               int
-	MemoryMB               int
+	ID        string
+	Namespace string
+	CPUCores  int
+	MemoryMB  int
 	// ImageName is the Harvester VirtualMachineImage name resolved from the
 	// BakedImages catalog by the controller. e.g. "ubuntu-2204-postgres-v20260615".
-	ImageName              string
+	ImageName string
 	// EngineVersion is the PostgreSQL major version to activate via cloud-init.
 	// e.g. "16". All supported versions are pre-installed in the baked image;
 	// bootstrap.sh activates only this one.
@@ -647,6 +647,120 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 // RemoveCloudInitDisk is a no-op on the dynamic client pending implementation.
 // The typed client (default) has the full implementation.
 func (c *Client) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
+
+func (c *Client) PrepareCloudInitForRepave(ctx context.Context, p VMCreateParams, vmName, credSecretName, cloudInitSecretName string) error {
+	secret, err := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Get(ctx, credSecretName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get credentials Secret %s/%s for repave cloud-init: %w", p.Namespace, credSecretName, err)
+	}
+	get := func(key string) (string, error) {
+		if v, ok, _ := unstructured.NestedString(secret.Object, "data", key); ok {
+			b, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				return "", fmt.Errorf("decode credentials Secret key %q: %w", key, err)
+			}
+			return string(b), nil
+		}
+		if v, ok, _ := unstructured.NestedString(secret.Object, "stringData", key); ok {
+			return v, nil
+		}
+		return "", fmt.Errorf("credentials Secret %s/%s is missing key %q", p.Namespace, credSecretName, key)
+	}
+	adminPw, err := get("admin_password")
+	if err != nil {
+		return err
+	}
+	replPw, err := get("repl_password")
+	if err != nil {
+		return err
+	}
+	exporterPw, err := get("exporter_password")
+	if err != nil {
+		return err
+	}
+	caCert, err := get("ca_cert")
+	if err != nil {
+		return err
+	}
+	caKey, err := get("ca_key")
+	if err != nil {
+		return err
+	}
+	serverCert, err := get("server_cert")
+	if err != nil {
+		return err
+	}
+	serverKey, err := get("server_key")
+	if err != nil {
+		return err
+	}
+	tls := &TLSBundle{CACertPEM: caCert, CAKeyPEM: caKey, ServerCertPEM: serverCert, ServerKeyPEM: serverKey}
+
+	cloudInitSecret := newUnstructured("v1", "Secret", cloudInitSecretName, p.Namespace)
+	_ = unstructured.SetNestedField(cloudInitSecret.Object, "Opaque", "type")
+	_ = unstructured.SetNestedField(cloudInitSecret.Object, map[string]any{
+		"userdata":    buildCloudInit(p, adminPw, replPw, exporterPw, tls),
+		"networkdata": buildNetworkData(p),
+	}, "stringData")
+	if _, err := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, cloudInitSecret, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		existing, getErr := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Get(ctx, cloudInitSecretName, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		_ = unstructured.SetNestedField(existing.Object, map[string]any{
+			"userdata":    buildCloudInit(p, adminPw, replPw, exporterPw, tls),
+			"networkdata": buildNetworkData(p),
+		}, "stringData")
+		_, err = c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+
+	vm, err := c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	disks, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "domain", "devices", "disks")
+	if !namedSliceContains(disks, "cloudinit") {
+		disks = append(disks, map[string]any{"name": "cloudinit", "disk": map[string]any{"bus": "virtio"}})
+		_ = unstructured.SetNestedSlice(vm.Object, disks, "spec", "template", "spec", "domain", "devices", "disks")
+	}
+	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
+	cloudInitVolume := map[string]any{
+		"name": "cloudinit",
+		"cloudInitNoCloud": map[string]any{
+			"secretRef":            map[string]any{"name": cloudInitSecretName},
+			"networkDataSecretRef": map[string]any{"name": cloudInitSecretName},
+		},
+	}
+	replaced := false
+	for i := range volumes {
+		if volume, ok := volumes[i].(map[string]any); ok && volume["name"] == "cloudinit" {
+			volumes[i] = cloudInitVolume
+			replaced = true
+		}
+	}
+	if !replaced {
+		volumes = append(volumes, cloudInitVolume)
+	}
+	_ = unstructured.SetNestedSlice(vm.Object, volumes, "spec", "template", "spec", "volumes")
+	_, err = c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Update(ctx, vm, metav1.UpdateOptions{})
+	return err
+}
+
+func namedSliceContains(items []any, name string) bool {
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if ok && m["name"] == name {
+			return true
+		}
+	}
+	return false
+}
 
 // ClearDataVolumeOwnerRef patches the DataVolume to remove all ownerReferences.
 // This must be called before deleting the VM CR during repave so the pgdata

@@ -576,6 +576,63 @@ func TestTypedRemoveCloudInitDiskIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestTypedPrepareCloudInitForRepaveRecreatesSecretAndReattachesDisk(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient(testTypedVMImage())
+	params := testVMCreateParams()
+
+	vmName, credName, ciName, _, err := client.CreatePostgresVM(ctx, params)
+	if err != nil {
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
+	}
+	if err := client.RemoveCloudInitDisk(ctx, params.Namespace, vmName); err != nil {
+		t.Fatalf("RemoveCloudInitDisk returned error: %v", err)
+	}
+	if err := client.DeleteSecret(ctx, params.Namespace, ciName); err != nil {
+		t.Fatalf("DeleteSecret returned error: %v", err)
+	}
+
+	if err := client.PrepareCloudInitForRepave(ctx, params, vmName, credName, ciName); err != nil {
+		t.Fatalf("PrepareCloudInitForRepave returned error: %v", err)
+	}
+
+	secret, err := client.KubeClient.CoreV1().Secrets(params.Namespace).Get(ctx, ciName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("cloud-init Secret was not recreated: %v", err)
+	}
+	userdata := secret.StringData["userdata"]
+	if userdata == "" {
+		userdata = string(secret.Data["userdata"])
+	}
+	if !strings.Contains(userdata, "ENGINE_VERSION="+params.EngineVersion) {
+		t.Fatalf("cloud-init userdata does not contain requested engine version: %q", userdata)
+	}
+
+	vm, err := client.Clientset.KubevirtV1().VirtualMachines(params.Namespace).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get VM after repave prep: %v", err)
+	}
+	hasDisk := false
+	for _, disk := range vm.Spec.Template.Spec.Domain.Devices.Disks {
+		hasDisk = hasDisk || disk.Name == "cloudinit"
+	}
+	if !hasDisk {
+		t.Fatalf("cloudinit disk was not reattached")
+	}
+	for _, volume := range vm.Spec.Template.Spec.Volumes {
+		if volume.Name != "cloudinit" {
+			continue
+		}
+		source := volume.CloudInitNoCloud
+		if source == nil || source.UserDataSecretRef == nil || source.UserDataSecretRef.Name != ciName ||
+			source.NetworkDataSecretRef == nil || source.NetworkDataSecretRef.Name != ciName {
+			t.Fatalf("cloudinit volume source = %#v, want secret refs to %q", source, ciName)
+		}
+		return
+	}
+	t.Fatalf("cloudinit volume was not reattached")
+}
+
 func TestTypedTeardownAggregatesDeleteErrors(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(&kubevirtv1.VirtualMachine{

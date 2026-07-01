@@ -32,8 +32,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -436,6 +436,75 @@ func (c *TypedClient) RemoveCloudInitDisk(ctx context.Context, ns, vmName string
 		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 		return err
 	})
+}
+
+func (c *TypedClient) PrepareCloudInitForRepave(ctx context.Context, p VMCreateParams, vmName, credSecretName, cloudInitSecretName string) error {
+	secret, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, credSecretName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get credentials Secret %s/%s for repave cloud-init: %w", p.Namespace, credSecretName, err)
+	}
+	m, err := materialFromSecret(secret, p.Namespace, credSecretName)
+	if err != nil {
+		return err
+	}
+	if err := c.ensureCloudInitSecret(ctx, p, cloudInitSecretName, m); err != nil {
+		return fmt.Errorf("ensure cloud-init Secret %s/%s for repave: %w", p.Namespace, cloudInitSecretName, err)
+	}
+	return c.attachCloudInitDisk(ctx, p.Namespace, vmName, cloudInitSecretName)
+}
+
+func (c *TypedClient) attachCloudInitDisk(ctx context.Context, ns, vmName, cloudInitSecretName string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		hasDisk := false
+		for _, disk := range vm.Spec.Template.Spec.Domain.Devices.Disks {
+			if disk.Name == "cloudinit" {
+				hasDisk = true
+				break
+			}
+		}
+		if !hasDisk {
+			vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, kubevirtv1.Disk{
+				Name: "cloudinit",
+				DiskDevice: kubevirtv1.DiskDevice{
+					Disk: &kubevirtv1.DiskTarget{Bus: kubevirtv1.DiskBusVirtio},
+				},
+			})
+		}
+
+		hasVolume := false
+		for i := range vm.Spec.Template.Spec.Volumes {
+			if vm.Spec.Template.Spec.Volumes[i].Name != "cloudinit" {
+				continue
+			}
+			hasVolume = true
+			vm.Spec.Template.Spec.Volumes[i].VolumeSource.CloudInitNoCloud = cloudInitNoCloudSource(cloudInitSecretName)
+			break
+		}
+		if !hasVolume {
+			vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, kubevirtv1.Volume{
+				Name: "cloudinit",
+				VolumeSource: kubevirtv1.VolumeSource{
+					CloudInitNoCloud: cloudInitNoCloudSource(cloudInitSecretName),
+				},
+			})
+		}
+
+		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+func cloudInitNoCloudSource(secretName string) *kubevirtv1.CloudInitNoCloudSource {
+	ref := &corev1.LocalObjectReference{Name: secretName}
+	return &kubevirtv1.CloudInitNoCloudSource{
+		UserDataSecretRef:    ref,
+		NetworkDataSecretRef: ref,
+	}
 }
 
 // Deploy the prometheus monitoring stack. Discussion : Harvester already have Prometheus operator, what to do ?

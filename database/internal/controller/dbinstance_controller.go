@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -750,6 +751,52 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 		return r.fail(ctx, inst, "RepaveSwapOSDiskFailed", err)
 	}
 
+	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
+	if !ok {
+		return r.fail(ctx, inst, "InvalidClass", fmt.Errorf("unknown class: %s", inst.Spec.DBInstanceClass))
+	}
+	masterUser := inst.Spec.MasterUsername
+	if masterUser == "" {
+		masterUser = defaultMasterUser
+	}
+	dbName := inst.Spec.DBName
+	if dbName == "" {
+		dbName = inst.Name
+	}
+	storageType := inst.Spec.StorageType
+	if storageType == "" {
+		storageType = defaultStorageType
+	}
+	credSecretName := inst.Status.Resources.SecretName
+	if credSecretName == "" {
+		credSecretName = fmt.Sprintf("pg-%s-credentials", inst.Name)
+	}
+	cloudInitSecretName := fmt.Sprintf("pg-%s-cloudinit", inst.Name)
+	if err := r.Harvester.PrepareCloudInitForRepave(ctx, harvester.VMCreateParams{
+		ID:                     inst.Name,
+		Namespace:              ns,
+		CPUCores:               classSpec.CPUCores,
+		MemoryMB:               classSpec.MemoryMB,
+		ImageName:              entry.ImageName,
+		EngineVersion:          inst.Spec.EngineVersion,
+		DataVolumeRef:          inst.Status.Resources.DataVolumeName,
+		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
+		DataVolumeStorageClass: storageType,
+		NADName:                inst.Status.Resources.NADName,
+		MasterUser:             masterUser,
+		DBName:                 dbName,
+		Port:                   specPort(inst.Spec.Port),
+		MaxConnections:         classSpec.MaxConnections,
+		BackupEnabled:          inst.Spec.BackupRetentionPeriod > 0,
+		BackupWindow:           inst.Spec.PreferredBackupWindow,
+		S3Config:               inst.Spec.S3BackupConfig,
+		VMPassword:             inst.Spec.VMPassword,
+		StaticNetwork:          inst.Spec.StaticNetwork,
+		DNSServerIP:            inst.Spec.DNSServerIP,
+	}, vmName, credSecretName, cloudInitSecretName); err != nil {
+		return r.fail(ctx, inst, "RepaveCloudInitFailed", err)
+	}
+
 	// Step 5: start VM and re-enter the wait-ready chain.
 	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
 		return r.fail(ctx, inst, "RepaveStartFailed", err)
@@ -761,8 +808,12 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 	}
 	removeCondition(inst, dbaasv1.ConditionOSUpdateAvailable)
 	if inst.Annotations != nil {
-		delete(inst.Annotations, AnnotationRepaveTrigger)
+		patch := client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"annotations":{"dbaas.opencloud.wso2.com/repave-trigger":null}}}`))
+		if err := r.Patch(ctx, inst, patch); err != nil {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+		}
 	}
+	inst.Status.Resources.CloudInitSecretName = cloudInitSecretName
 
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.LastKnownVMIUID = ""
