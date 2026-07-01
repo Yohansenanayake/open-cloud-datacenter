@@ -19,6 +19,7 @@ package harvester
 import (
 	"context"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -91,6 +92,9 @@ func TestCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
 	userdata, _, _ := unstructured.NestedString(cloudInitSecret.Object, "stringData", "userdata")
 	if userdata == "" {
 		t.Fatalf("cloudinit Secret has no stringData.userdata")
+	}
+	if !strings.Contains(userdata, "systemctl enable postgresql") {
+		t.Fatalf("cloudinit userdata does not enable postgresql for reboot survival")
 	}
 
 	// VM must exist.

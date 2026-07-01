@@ -122,6 +122,9 @@ func TestTypedCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
 	if cloudInitSecret.StringData["userdata"] == "" {
 		t.Fatalf("cloudinit Secret has no stringData.userdata")
 	}
+	if !strings.Contains(cloudInitSecret.StringData["userdata"], "systemctl enable postgresql") {
+		t.Fatalf("cloudinit userdata does not enable postgresql for reboot survival")
+	}
 	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); err != nil {
 		t.Fatalf("get created VM: %v", err)
 	}

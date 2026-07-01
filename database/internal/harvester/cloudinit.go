@@ -196,6 +196,7 @@ ssh_pwauth: true
       echo "hostssl all all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
       echo "hostssl replication all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
 
+      systemctl enable postgresql
       systemctl restart postgresql
 
       # Create admin user and database. The master user gets CREATEDB and
