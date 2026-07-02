@@ -8,11 +8,14 @@ rules:
   - ""
   resources:
   - endpoints
+  - services
   verbs:
   - create
   - delete
   - get
+  - list
   - update
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -37,17 +40,6 @@ rules:
   - get
   - list
   - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - create
-  - delete
-  - get
-  - list
   - update
   - watch
 - apiGroups:
@@ -89,6 +81,13 @@ rules:
   - harvesterhci.io
   resources:
   - virtualmachineimages
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - k8s.cni.cncf.io
+  resources:
+  - network-attachment-definitions
   verbs:
   - get
   - list
