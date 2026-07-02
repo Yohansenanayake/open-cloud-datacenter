@@ -742,17 +742,19 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
 	}
 
-	// Step 3: delete old OS disk; pgdata is already ownerRef-free so it is safe.
-	if err := r.Harvester.DeleteDataVolume(ctx, ns, osDVName); err != nil {
-		return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
-	}
-
-	// Step 4: patch VM spec with new OS disk DataVolumeTemplate.
-	// SwapVMOSDisk resolves the image by name or displayName and reads
-	// storageClassName from status — works with both kubectl-named and
-	// UI-uploaded (auto-named) VirtualMachineImages.
+	// Step 3: update the DVT to the new image BEFORE deleting the existing DV.
+	// CDI watches DataVolumes; the instant a DV is deleted it reads the VM's
+	// dataVolumeTemplates to recreate it. If the DVT is still pointing at the old
+	// image at that moment, CDI recreates the DV from the old image. Patching the
+	// DVT first ensures CDI reads the already-updated template on recreation.
 	if err := r.Harvester.SwapVMOSDisk(ctx, ns, vmName, inst.Name, entry.ImageName); err != nil {
 		return r.fail(ctx, inst, "RepaveSwapOSDiskFailed", err)
+	}
+
+	// Step 4: delete old OS disk; DVT is already updated, so CDI recreates the
+	// DV from the new image when the VM starts.
+	if err := r.Harvester.DeleteDataVolume(ctx, ns, osDVName); err != nil {
+		return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
 	}
 
 	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]

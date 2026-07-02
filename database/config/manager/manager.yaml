@@ -68,7 +68,7 @@ spec:
           - --mgmt-logical-switch=ovn-default
         env:
         - name: BACKING_IMAGE_OS_VERSION
-          value: "22.04"      
+          value: "24.04"      
         image: controller:latest
         name: manager
         ports:
