@@ -8,7 +8,6 @@ rules:
   - ""
   resources:
   - endpoints
-  - services
   verbs:
   - create
   - delete
@@ -36,6 +35,21 @@ rules:
   - create
   - delete
   - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
 - apiGroups:
   - cdi.kubevirt.io
   resources:
@@ -84,6 +98,8 @@ rules:
   - virtualmachineinstances
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - kubevirt.io
   resources:
@@ -92,7 +108,9 @@ rules:
   - create
   - delete
   - get
+  - list
   - update
+  - watch
 - apiGroups:
   - monitoring.coreos.com
   resources:
@@ -101,7 +119,9 @@ rules:
   - create
   - delete
   - get
+  - list
   - update
+  - watch
 - apiGroups:
   - subresources.kubevirt.io
   resources:
