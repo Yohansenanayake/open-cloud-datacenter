@@ -52,7 +52,6 @@ func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ in
 func (s *stubHarvester) CreatePostgresVM(_ context.Context, _ harvester.VMCreateParams) (string, string, string, string, error) {
 	return "", "", "", "", nil
 }
-func (s *stubHarvester) DialVMListener(_ context.Context, _, _ string, _ int) error { return nil }
 func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error {
 	s.StopVMCalls++
 	return s.stopVMErr

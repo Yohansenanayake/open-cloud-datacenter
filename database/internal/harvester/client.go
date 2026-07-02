@@ -92,13 +92,12 @@ type Client struct {
 	GrafanaURL string
 	// MgmtLogicalSwitch, when non-empty, is stamped onto the VM launcher pod
 	// as the `ovn.kubernetes.io/logical_switch` annotation. On a Kube-OVN
-	// cluster this keeps the launcher pod's DEFAULT network (and therefore the
-	// mgmt-net masquerade NIC the controller probes) on a shared,
+	// cluster this keeps the launcher pod's DEFAULT network on a shared,
 	// controller-reachable subnet (e.g. "ovn-default") instead of inheriting
 	// the project namespace's tenant-VPC default — which is isolated and
 	// unreachable from the controller. The data-net NIC still attaches to the
 	// tenant subnet via Multus. Empty = don't set the annotation (correct for
-	// non-OVN clusters and for unit tests). See DialVMListener.
+	// non-OVN clusters and for unit tests).
 	MgmtLogicalSwitch string
 }
 

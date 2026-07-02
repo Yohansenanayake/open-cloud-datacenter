@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 
@@ -330,35 +329,6 @@ func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (V
 	return readiness, nil
 }
 
-// TODO: Not used anymore , clean up later from interface and dynamic client
-func (c *TypedClient) DialVMListener(ctx context.Context, ns, vmName string, port int) error {
-	// Dial VM port 5432 using TCP using management pod network
-	list, err := c.KubeClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("vm.kubevirt.io/name=%s", vmName),
-	})
-	if err != nil {
-		return fmt.Errorf("list launcher pods for %s: %w", vmName, err)
-	}
-	podIP := ""
-	for _, pod := range list.Items {
-		if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
-			podIP = pod.Status.PodIP
-			break
-		}
-	}
-	if podIP == "" {
-		return fmt.Errorf("no Running launcher pod with podIP for VM %s", vmName)
-	}
-	addr := fmt.Sprintf("%s:%d", podIP, port)
-	d := net.Dialer{Timeout: dialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-	_ = conn.Close()
-	return nil
-}
-
 // To align behavior with kubevirt v1.1.1, we set runStrategy to Halted when stopping a VM.
 // see harvester/pkg/api/vm/handler.go 142 for harvester version 1.7.1
 func (c *TypedClient) StopVM(ctx context.Context, ns, vmName string) error {
@@ -607,11 +577,12 @@ func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgR
 	if err != nil {
 		return fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
 	}
+	osDVName := fmt.Sprintf("pg-%s-os", instID)
 	newTemplate := map[string]any{
 		"apiVersion": "cdi.kubevirt.io/v1beta1",
 		"kind":       "DataVolume",
 		"metadata": map[string]any{
-			"name": fmt.Sprintf("pg-%s-os", instID),
+			"name": osDVName,
 			"annotations": map[string]any{
 				"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
 			},
@@ -628,9 +599,30 @@ func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgR
 			},
 		},
 	}
+
+	// MergePatch replaces arrays entirely, so read the existing dataVolumeTemplates
+	// and preserve any entries beyond the OS disk before patching.
+	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("SwapVMOSDisk: get VM %s/%s: %w", ns, vmName, err)
+	}
+	templates := make([]any, 0, len(vm.Spec.DataVolumeTemplates))
+	replaced := false
+	for i := range vm.Spec.DataVolumeTemplates {
+		if vm.Spec.DataVolumeTemplates[i].Name == osDVName {
+			templates = append(templates, newTemplate)
+			replaced = true
+		} else {
+			templates = append(templates, vm.Spec.DataVolumeTemplates[i])
+		}
+	}
+	if !replaced {
+		templates = append(templates, newTemplate)
+	}
+
 	patch := map[string]any{
 		"spec": map[string]any{
-			"dataVolumeTemplates": []any{newTemplate},
+			"dataVolumeTemplates": templates,
 		},
 	}
 	patchBytes, err := json.Marshal(patch)

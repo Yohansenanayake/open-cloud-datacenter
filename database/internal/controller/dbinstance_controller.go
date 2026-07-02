@@ -147,9 +147,14 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// --- Repave trigger (checked before phase dispatch so it fires from Available) ---
-	if inst.Annotations[AnnotationRepaveTrigger] == "now" &&
-		inst.Status.ProvisioningPhase == dbaasv1.PhaseAvailable {
-		return r.phaseRepave(ctx, &inst)
+	if inst.Annotations[AnnotationRepaveTrigger] == "now" {
+		if inst.Status.ProvisioningPhase == dbaasv1.PhaseAvailable {
+			return r.phaseRepave(ctx, &inst)
+		}
+		inst.Status.Message = fmt.Sprintf(
+			"repave-trigger requires ProvisioningPhase=%s (current: %s); remove the annotation or wait until the instance is Available",
+			dbaasv1.PhaseAvailable, inst.Status.ProvisioningPhase)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.statusUpdate(ctx, &inst)
 	}
 
 	// --- Phase-based provisioning ---
@@ -701,34 +706,9 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 
 	inst.Status.Phase = dbaasv1.StatusModifying
 
-	// Step 0: protect pgdata from cascade deletion.
-	if err := r.Harvester.ClearDataVolumeOwnerRef(ctx, ns, pgdataDVName); err != nil {
-		return r.fail(ctx, inst, "RepavePgdataProtectFailed",
-			fmt.Errorf("could not clear pgdata ownerRef before repave: %w", err))
-	}
-
-	// Step 1: stop VM; wait for VMI to disappear before touching disks.
-	if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
-		return r.fail(ctx, inst, "RepaveStopFailed", err)
-	}
-	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
-	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-	if readiness.Running {
-		inst.Status.Message = "Repave: waiting for VM to stop"
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
-	}
-
-	// Step 2: delete old OS disk; pgdata is already ownerRef-free so it is safe.
-	if err := r.Harvester.DeleteDataVolume(ctx, ns, osDVName); err != nil {
-		return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
-	}
-
-	// Step 3: resolve new image from catalog and verify the VM's engineVersion
-	// is still present. If the PG version was removed (EOL) the repave must be
-	// blocked — the data directory format is version-specific and pg_createcluster
-	// would fail on boot if the requested version is not in the new image.
+	// Step 0: resolve new image and verify engineVersion BEFORE any destructive
+	// operation. A bad stream config or EOL PG version must be caught here so we
+	// never leave the VM halted without an OS disk.
 	osVersion := os.Getenv("BACKING_IMAGE_OS_VERSION")
 	stream, ok := dbaasv1.LatestBakedImages[osVersion]
 	if !ok || !stream.Validated {
@@ -741,6 +721,30 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 			fmt.Errorf("engineVersion %q is not available in new image %q (available: %v) — "+
 				"migrate data to a supported version before repaving",
 				inst.Spec.EngineVersion, stream.Revision, entry.PGVersions))
+	}
+
+	// Step 1: protect pgdata from cascade deletion.
+	if err := r.Harvester.ClearDataVolumeOwnerRef(ctx, ns, pgdataDVName); err != nil {
+		return r.fail(ctx, inst, "RepavePgdataProtectFailed",
+			fmt.Errorf("could not clear pgdata ownerRef before repave: %w", err))
+	}
+
+	// Step 2: stop VM; wait for VMI to disappear before touching disks.
+	if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
+		return r.fail(ctx, inst, "RepaveStopFailed", err)
+	}
+	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
+	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if readiness.Running {
+		inst.Status.Message = "Repave: waiting for VM to stop"
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
+	}
+
+	// Step 3: delete old OS disk; pgdata is already ownerRef-free so it is safe.
+	if err := r.Harvester.DeleteDataVolume(ctx, ns, osDVName); err != nil {
+		return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
 	}
 
 	// Step 4: patch VM spec with new OS disk DataVolumeTemplate.
@@ -802,19 +806,20 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 		return r.fail(ctx, inst, "RepaveStartFailed", err)
 	}
 
-	// Update imageRevision and clear annotation + OSUpdateAvailable.
-	if inst.Status.AppliedSpec != nil {
-		inst.Status.AppliedSpec.ImageRevision = stream.Revision
-	}
-	removeCondition(inst, dbaasv1.ConditionOSUpdateAvailable)
+	// r.Patch writes to the server AND overwrites inst with the server response,
+	// including inst.Status. Patch the annotation first, then set all status
+	// fields so they are not silently discarded.
 	if inst.Annotations != nil {
 		patch := client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"annotations":{"dbaas.opencloud.wso2.com/repave-trigger":null}}}`))
 		if err := r.Patch(ctx, inst, patch); err != nil {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 		}
 	}
+	if inst.Status.AppliedSpec != nil {
+		inst.Status.AppliedSpec.ImageRevision = stream.Revision
+	}
+	removeCondition(inst, dbaasv1.ConditionOSUpdateAvailable)
 	inst.Status.Resources.CloudInitSecretName = cloudInitSecretName
-
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.LastKnownVMIUID = ""
 	inst.Status.Message = fmt.Sprintf("Repave in progress: OS disk swapped to %s, waiting for VM ready", stream.Revision)
