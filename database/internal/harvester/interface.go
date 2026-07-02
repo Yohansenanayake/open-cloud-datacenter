@@ -31,7 +31,7 @@ type ClientInterface interface {
 
 	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error)
 	GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error)
-	DialVMListener(ctx context.Context, ns, vmName string, port int) error  // not used anymore , will be removed in future
+	DialVMListener(ctx context.Context, ns, vmName string, port int) error // not used anymore , will be removed in future
 	StopVM(ctx context.Context, ns, vmName string) error
 	StartVM(ctx context.Context, ns, vmName string) error
 	ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error
