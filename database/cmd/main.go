@@ -25,9 +25,11 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -50,6 +52,11 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(dbaasv1alpha1.AddToScheme(scheme))
+
+	// Child types the reconciler watches (Owns/Watches) must be in the manager's
+	// scheme so controller-runtime can build their informers.
+	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
+	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -65,6 +72,7 @@ func main() {
 	var mgmtLogicalSwitch string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var maxConcurrentReconciles int
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -91,6 +99,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1,
+		"Maximum number of DBInstances reconciled concurrently. Raise for many instances; "+
+			"reconciles are serialized per object regardless, so this only adds cross-instance parallelism.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -199,8 +210,9 @@ func main() {
 	}
 
 	if err := (&controller.DBInstanceReconciler{
-		Client:    mgr.GetClient(),
-		Harvester: hvClient,
+		Client:                  mgr.GetClient(),
+		Harvester:               hvClient,
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbinstance")
 		os.Exit(1)

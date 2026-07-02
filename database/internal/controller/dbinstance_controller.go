@@ -22,15 +22,20 @@ import (
 	"strings"
 	"time"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -71,6 +76,10 @@ type DBInstanceReconciler struct {
 	client.Client
 	Harvester harvester.ClientInterface
 	Recorder  record.EventRecorder
+	// MaxConcurrentReconciles bounds how many DBInstances reconcile in parallel.
+	// Reconciles are serialized per object regardless, so raising this only adds
+	// cross-instance parallelism (safe). <1 is treated as 1.
+	MaxConcurrentReconciles int
 }
 
 // DBInstance CRD permissions.
@@ -79,14 +88,16 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbinstances/finalizers,verbs=update
 
 // Harvester resources the reconciler creates and tears down on behalf of callers.
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;create;update;delete
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get
+// list;watch added (alongside get;create;update;delete) so controller-runtime can
+// run informers for Owns()/Watches() on these child types (PR1).
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
 // +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop;virtualmachines/restart,verbs=update
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=harvesterhci.io,resources=virtualmachineimages,verbs=get;list
-// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create;update;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;delete
-// +kubebuilder:rbac:groups="",resources=services,verbs=get;create;update;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -470,7 +481,7 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 			inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 			inst.Status.Message = "Unplanned VM restart detected; waiting for readiness"
 			_ = r.statusUpdate(ctx, inst) // go back to phaseVMCreated -> phaseWaitReady
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil  // Do we need to requeueAfter ? or just watch ?
 		}
 	}
 
@@ -914,8 +925,30 @@ func removeCondition(inst *dbaasv1.DBInstance, condType string) {
 // SetupWithManager registers the reconciler with controller-runtime.
 func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
+
+	maxConcurrent := r.MaxConcurrentReconciles
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&dbaasv1.DBInstance{}).
+		// Children the controller reconciles to desired state. Owner references
+		// are wired in a later PR; until then these Owns watches are inert (no
+		// owned object maps back), but registering the informers now keeps
+		// SetupWithManager stable and is harmless (idempotent reconciles).
+		Owns(&corev1.Secret{}).
+		Owns(&corev1.Service{}).
+		Owns(&kubevirtv1.VirtualMachine{}).
+		Owns(&monitoringv1.ServiceMonitor{}).
+		// VMIs are created by KubeVirt (owned by the VM, not the DBInstance), so
+		// they are mapped by the dbaas instance label rather than via Owns(). This
+		// makes liveness/endpoint refresh event-driven (UID/phase/Ready changes)
+		// instead of relying solely on the periodic requeue.
+		Watches(&kubevirtv1.VirtualMachineInstance{},
+			handler.EnqueueRequestsFromMapFunc(mapVMIToInstance),
+			builder.WithPredicates(vmiHealthChangedPredicate)).
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Named("dbinstance").
 		Complete(r)
 }
