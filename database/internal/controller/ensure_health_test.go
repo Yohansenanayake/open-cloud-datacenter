@@ -1,0 +1,141 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
+)
+
+// newHealthInst returns an instance whose VM was already created (the state the
+// old phaseWaitReady tests started from).
+func newHealthInst() *dbaasv1.DBInstance {
+	inst := newProvisionInst()
+	inst.Status.Resources.VMName = "pg-orders"
+	return inst
+}
+
+// Ported from TestPhaseWaitReadyRequeuesWhenVMINotRunning.
+func TestEnsureDatabaseHealthPendingWhileVMINotRunning(t *testing.T) {
+	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: false}}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomePending || res.Reason != "VMBooting" {
+		t.Fatalf("res = %+v, want Pending/VMBooting", res)
+	}
+	if res.Result.RequeueAfter != healthRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
+	}
+	if !strings.Contains(inst.Status.Message, "VM booting") {
+		t.Fatalf("Message = %q, want gate-1 (VM booting) message", inst.Status.Message)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("DatabaseReady = %+v, want False", cond)
+	}
+}
+
+// A VMI that does not exist yet (first boot) is the same gate, not an error.
+func TestEnsureDatabaseHealthPendingWhileVMIAbsent(t *testing.T) {
+	notFound := apierrors.NewNotFound(
+		schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachineinstances"}, "pg-orders")
+	stub := &stubHarvester{readinessErr: notFound}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomePending || res.Reason != "VMBooting" {
+		t.Fatalf("res = %+v, want Pending/VMBooting on VMI NotFound", res)
+	}
+}
+
+// Ported from TestPhaseWaitReadyRequeuesWhenReadinessProbeNotYetPassed.
+func TestEnsureDatabaseHealthPendingWhileProbeNotPassing(t *testing.T) {
+	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+		Running: true,
+		IP:      "192.168.40.50",
+		Ready:   false, // probe has not passed yet
+	}}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomePending || res.Reason != "PostgresInitializing" {
+		t.Fatalf("res = %+v, want Pending/PostgresInitializing", res)
+	}
+	if res.Result.RequeueAfter != healthRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
+	}
+	if !strings.Contains(inst.Status.Message, "PostgreSQL initializing") {
+		t.Fatalf("Message = %q, want gate-2 (PostgreSQL initializing) message", inst.Status.Message)
+	}
+}
+
+// Ported from TestPhaseWaitReadyAdvancesWhenBothGatesPass.
+func TestEnsureDatabaseHealthSatisfiedWhenReady(t *testing.T) {
+	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+		Running: true,
+		IP:      "192.168.40.50",
+		Ready:   true,
+	}}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
+	}
+	ep := inst.Status.Endpoint
+	if ep == nil || ep.Address != "192.168.40.50" || ep.Port != defaultPort {
+		t.Fatalf("Endpoint = %+v, want 192.168.40.50:%d", ep, defaultPort)
+	}
+	if !strings.Contains(ep.JDBCURL, "sslmode=verify-ca") {
+		t.Fatalf("JDBCURL = %q, want SSL-enforcing URL", ep.JDBCURL)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
+		t.Fatal("DatabaseReady should be True")
+	}
+}
+
+// A non-NotFound readiness error is infrastructure failure, not a boot gate.
+func TestEnsureDatabaseHealthGenericErrorIsTransient(t *testing.T) {
+	boom := errors.New("apiserver timeout")
+	stub := &stubHarvester{readinessErr: boom}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomeTransient || !errors.Is(res.Err, boom) {
+		t.Fatalf("res = %+v, want Transient carrying the error", res)
+	}
+}

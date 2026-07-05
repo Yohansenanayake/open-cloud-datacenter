@@ -153,23 +153,12 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.reconcileModify(ctx, &inst)
 	}
 
-	// --- Phase-based provisioning ---
+	// --- Dispatch. Steady-state and parked instances stay on the legacy
+	// handlers; the whole provisioning window runs the bounded ensure-step
+	// runner (PR4). Legacy paths that need re-readiness (start, resize,
+	// restart/failed recovery) set ProvisioningPhase=VMCreated, which lands in
+	// the runner's health gate naturally. ---
 	switch inst.Status.ProvisioningPhase {
-	case "", dbaasv1.PhasePending:
-		return r.phaseNetwork(ctx, &inst)
-	case dbaasv1.PhaseNetworkProvisioned:
-		return r.phaseStorage(ctx, &inst)
-	case dbaasv1.PhaseStorageProvisioned:
-		return r.phaseVM(ctx, &inst)
-	// PhaseWaitingForCloudInit is no longer written (phaseWaitReady uses a single
-	// PhaseVMCreated phase and per-gate messages), but is still matched here so
-	// CRs created before that change still route to the wait handler.
-	case dbaasv1.PhaseVMCreated, dbaasv1.PhaseWaitingForCloudInit:
-		return r.phaseWaitReady(ctx, &inst)
-	case dbaasv1.PhaseDatabaseReady:
-		return r.phaseMonitoring(ctx, &inst)
-	case dbaasv1.PhaseMonitoringDeployed:
-		return r.phaseAvailable(ctx, &inst)
 	case dbaasv1.PhaseAvailable:
 		return r.phaseAvailable(ctx, &inst)
 	case dbaasv1.PhaseStopped:
@@ -177,230 +166,20 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case dbaasv1.PhaseFailed:
 		return r.phaseFailed(ctx, &inst)
 	default:
-		return ctrl.Result{}, fmt.Errorf("unknown phase: %s", inst.Status.ProvisioningPhase)
+		// "", Pending, NetworkProvisioned, StorageProvisioned, VMCreated,
+		// WaitingForCloudInit (legacy value), DatabaseReady, MonitoringDeployed.
+		// The runner re-derives where it is from observed state, so any
+		// intermediate phase value routes here safely.
+		return r.runProvisioning(ctx, &inst)
 	}
 }
 
 // ============================================================
-// Provisioning phases
+// Steady-state and lifecycle phases (legacy dispatch)
+//
+// Provisioning (network/storage/VM create/readiness/monitoring) moved to the
+// bounded ensure-step runner — see ensure_steps.go and the ensure_*.go files.
 // ============================================================
-
-func (r *DBInstanceReconciler) phaseNetwork(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	// First entry: mark the instance as creating before doing any work.
-	if inst.Status.Phase == "" {
-		inst.Status.Phase = dbaasv1.StatusCreating
-	}
-
-	// Skip if already done.
-	if inst.Status.Resources.NADName != "" {
-		inst.Status.ProvisioningPhase = dbaasv1.PhaseNetworkProvisioned
-		return r.advance(ctx, inst)
-	}
-
-	// The controller doesn't create or own networks: spec.networkRef must
-	// point at an existing Multus NAD (typically a Harvester VLAN network).
-	if inst.Spec.NetworkRef == "" {
-		return r.fail(ctx, inst, "NetworkRefMissing",
-			fmt.Errorf("spec.networkRef is required (namespace/nad of an existing Multus NetworkAttachmentDefinition)"))
-	}
-	// No check for existence of the NAD; we should implement this
-	inst.Status.Resources.NADName = inst.Spec.NetworkRef
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseNetworkProvisioned
-	inst.Status.Message = fmt.Sprintf("Using network %s", inst.Spec.NetworkRef)
-
-	return r.advance(ctx, inst)
-}
-
-func (r *DBInstanceReconciler) phaseStorage(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	// skip if already done
-	if inst.Status.Resources.DataVolumeName != "" {
-		inst.Status.ProvisioningPhase = dbaasv1.PhaseStorageProvisioned
-		return r.advance(ctx, inst)
-	}
-
-	id := inst.Name
-	ns := inst.Namespace
-	storageType := inst.Spec.StorageType //storage class of the data volume, should this be a spec ?
-	if storageType == "" {
-		storageType = defaultStorageType // longhorn or harvester-longhorn ?
-	}
-
-	dvName, err := r.Harvester.CreateDataVolume(ctx, id, ns, inst.Spec.AllocatedStorage, storageType)
-	if err != nil {
-		return r.fail(ctx, inst, "StorageFailed", err)
-	}
-
-	inst.Status.Resources.DataVolumeName = dvName
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseStorageProvisioned
-	inst.Status.Message = "Encrypted storage provisioned" // Enctyption ? longhorn and harvester-longhorn storage class doesn't have volume encryption enabled by default.
-
-	return r.advance(ctx, inst)
-}
-
-func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	if inst.Status.Resources.VMName != "" {
-		inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
-	}
-
-	id := inst.Name
-	ns := inst.Namespace
-
-	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
-	if !ok {
-		return r.fail(ctx, inst, "InvalidClass", fmt.Errorf("unknown class: %s", inst.Spec.DBInstanceClass))
-	}
-
-	masterUser := inst.Spec.MasterUsername
-	if masterUser == "" {
-		masterUser = defaultMasterUser
-	}
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = id
-	}
-	osImage := inst.Spec.OSImage
-	if osImage == "" {
-		osImage = defaultOSImage
-	}
-	storageType := inst.Spec.StorageType
-	if storageType == "" {
-		storageType = defaultStorageType
-	}
-
-	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := r.Harvester.CreatePostgresVM(ctx, harvester.VMCreateParams{
-		ID:                     id,
-		Namespace:              ns,
-		CPUCores:               classSpec.CPUCores,
-		MemoryMB:               classSpec.MemoryMB,
-		OSImage:                osImage,
-		DataVolumeRef:          inst.Status.Resources.DataVolumeName,
-		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
-		DataVolumeStorageClass: storageType,
-		NADName:                inst.Status.Resources.NADName,
-		MasterUser:             masterUser,
-		DBName:                 dbName,
-		Port:                   specPort(inst.Spec.Port),
-		MaxConnections:         classSpec.MaxConnections,
-		BackupEnabled:          inst.Spec.BackupRetentionPeriod > 0,
-		BackupWindow:           inst.Spec.PreferredBackupWindow,
-		S3Config:               inst.Spec.S3BackupConfig,
-		VMPassword:             inst.Spec.VMPassword,
-		StaticNetwork:          inst.Spec.StaticNetwork,
-		DNSServerIP:            inst.Spec.DNSServerIP,
-	})
-	// Record resource refs even on partial failure: the names are deterministic
-	// and returned regardless of err, so persisting them here lets the finalizer
-	// (TeardownAll) clean up any Secret/VM created before the error instead of
-	// leaking them. Deleting a not-yet-created name is a no-op (NotFound ignored).
-	inst.Status.Resources.VMName = vmName
-	inst.Status.Resources.SecretName = credSecretName
-	inst.Status.Resources.CloudInitSecretName = cloudInitSecretName
-	if err != nil {
-		return r.fail(ctx, inst, "VMCreateFailed", err)
-	}
-
-	inst.Status.CACertPEM = caCertPEM
-	inst.Status.MasterUserSecret = &dbaasv1.MasterUserSecretRef{
-		Name:   credSecretName,
-		Status: dbaasv1.SecretStatusActive,
-	}
-	// Snapshot the immutable fields as they were applied. reconcileModify
-	// later refuses any spec change that drifts from this snapshot, so the
-	// CR never reports observedGeneration=current for changes we silently
-	// couldn't carry through to the running VM.
-	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{
-		NetworkRef:     inst.Spec.NetworkRef,
-		OSImage:        osImage,
-		DBName:         dbName,
-		MasterUsername: masterUser,
-		EngineVersion:  inst.Spec.EngineVersion,
-		Port:           specPort(inst.Spec.Port),
-		StorageType:    storageType,
-	}
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
-	inst.Status.Message = "VM created, waiting for PostgreSQL to initialize"
-
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
-}
-
-// phaseWaitReady is a single "waiting for the VM to become ready" phase: the
-// instance stays in PhaseVMCreated throughout and the two readiness gates are
-// distinguished only by status.Message, not by a separate provisioning phase.
-// (PhaseWaitingForCloudInit is no longer written — it is still recognised by the
-// dispatcher so any in-flight CR carrying the old value still routes here — and
-// the name was misleading anyway: this phase is also re-entered on restarts,
-// where cloud-init never re-runs.)
-func (r *DBInstanceReconciler) phaseWaitReady(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	ns := inst.Namespace
-
-	// First gate: VMI is Running and the qemu-guest-agent has reported a data-net IP.
-	readiness, err := r.Harvester.GetVMIReadiness(ctx, ns, inst.Status.Resources.VMName)
-	if err != nil || !readiness.Running || readiness.IP == "" {
-		inst.Status.Message = "VM booting; waiting for guest agent and data-net IP"
-		_ = r.statusUpdate(ctx, inst)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-
-	port := specPort(inst.Spec.Port)
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
-
-	// Second gate: KubeVirt's VMI readiness probe (pg_isready via QGA virtio
-	// channel) has passed. The probe is defined on the VM spec and runs inside
-	// the guest — no pod-network port exposure required.
-	if !readiness.Ready {
-		inst.Status.Message = fmt.Sprintf("PostgreSQL initializing; readiness probe not passing at %s:%d", readiness.IP, port)
-		_ = r.statusUpdate(ctx, inst)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-
-	inst.Status.Endpoint = &dbaasv1.Endpoint{
-		Address: readiness.IP,
-		Port:    port,
-		JDBCURL: fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-ca", readiness.IP, port, dbName),
-	}
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseDatabaseReady
-	inst.Status.Message = "PostgreSQL is ready"
-
-	return r.advance(ctx, inst)
-}
-
-func (r *DBInstanceReconciler) phaseMonitoring(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	if inst.Status.Resources.ServiceMonitor != "" {
-		inst.Status.ProvisioningPhase = dbaasv1.PhaseMonitoringDeployed
-		return r.advance(ctx, inst)
-	}
-
-	id := inst.Name
-	ns := inst.Namespace
-
-	if inst.Status.Endpoint == nil || inst.Status.Endpoint.Address == "" {
-		inst.Status.Message = "Waiting for database endpoint before monitoring setup"
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
-	}
-
-	svcName, smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, id, ns, inst.Status.Endpoint.Address)
-	if err != nil {
-		// Non-fatal — DB works without monitoring. Track the Service name
-		// regardless: DeployMonitoring creates the Service first, so a
-		// partial failure may leave the Service behind for the finalizer
-		// to clean up.
-		log.FromContext(ctx).Error(err, "monitoring setup failed (non-fatal)")
-		inst.Status.Message = "Available (monitoring setup failed, will retry)"
-		inst.Status.Resources.MetricsServiceName = svcName
-	} else {
-		inst.Status.Resources.ServiceMonitor = smName
-		inst.Status.Resources.MetricsServiceName = svcName
-		inst.Status.GrafanaURL = grafanaURL
-		inst.Status.PrometheusTarget = promTarget
-	}
-
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseMonitoringDeployed
-	return r.advance(ctx, inst)
-}
 
 func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	// Snapshot before any mutation so we can skip the kube-apiserver round-trip when nothing changed. This runs on every ~60 s requeue for every Available DBInstance.
@@ -842,10 +621,6 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 // ============================================================
 // Helpers
 // ============================================================
-
-func (r *DBInstanceReconciler) advance(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	return ctrl.Result{Requeue: true}, r.statusUpdate(ctx, inst) // Requeue : true is depreceated need to decide on timing.
-}
 
 func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstance, reason string, err error) (ctrl.Result, error) {
 	inst.Status.Phase = dbaasv1.StatusFailed
