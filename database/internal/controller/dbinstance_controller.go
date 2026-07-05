@@ -24,7 +24,6 @@ import (
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -43,30 +42,15 @@ import (
 )
 
 // Controller-side defaults for fields the user can leave blank on the
-// DBInstance spec. Centralised here so phaseStorage, phaseVM, and
-// immutableDrift can't drift apart over time. A change here should be
-// rare and accompanied by docs/USAGE updates.
+// DBInstance spec. Centralised here so the ensure steps and immutableDrift
+// can't drift apart over time. A change here should be rare and accompanied
+// by docs/USAGE updates. (Crash-loop detection constants live with their
+// logic in ensure_health.go.)
 const (
 	defaultOSImage     = "ubuntu-22.04-server-cloudimg-amd64.img"
 	defaultStorageType = "longhorn"
 	defaultMasterUser  = "dbadmin"
 	defaultPort        = 5432
-
-	// Liveness for phaseAvailable is report-only: the controller reacts to the
-	// KubeVirt readiness probe's already-debounced Ready condition (tuned via
-	// FailureThreshold/SuccessThreshold on the VM probe) and surfaces a Degraded
-	// condition. It does NOT restart the VM on readiness failure — sustained
-	// outages are an operator concern, and flap-rate detection belongs in
-	// Prometheus alerting on the exporter metrics, not in this 60s loop. The
-	// only controller-initiated halt is the crash-loop guard below.
-
-	// Crash-loop detection for unplanned restarts (KI-006 Problem A). Under
-	// RunStrategyAlways KubeVirt recreates the VMI on every guest exit, so a
-	// crash-looping VM "recovers" forever on its own. A chain of unplanned
-	// restarts (VMI UID changes), each within crashLoopWindow of the previous,
-	// reaching crashLoopThreshold halts the VM and fails the instance.
-	crashLoopThreshold = 3                // chained unplanned restarts before giving up
-	crashLoopWindow    = 10 * time.Minute // max gap between restarts to extend the chain
 )
 
 // DBInstanceReconciler reconciles DBInstance CRDs.
@@ -138,228 +122,13 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// --- Dispatch (PR5). Only two states stay on legacy handlers: parked-failed
-	// (crash-loop recovery probing) and pure steady-state on a fully converged
-	// generation (liveness / crash-loop detection / endpoint refresh) — both fold
-	// into ensure steps in PR6. Everything else, including stopped instances and
-	// ANY spec change on an Available instance (stop/start toggles, resizes,
-	// drift), runs the bounded ensure-step runner: power and resize converge from
-	// observed VM/VMI state, with no pre-dispatcher lifecycle branches. ---
-	switch {
-	case inst.Status.ProvisioningPhase == dbaasv1.PhaseFailed:
-		return r.phaseFailed(ctx, &inst)
-	case inst.Status.ProvisioningPhase == dbaasv1.PhaseAvailable &&
-		inst.Generation == inst.Status.ObservedGeneration:
-		return r.phaseAvailable(ctx, &inst)
-	default:
-		// Provisioning window ("", Pending, ..., MonitoringDeployed — any value
-		// the runner re-derives from observed state), PhaseStopped (idles cold:
-		// all steps Satisfied, no writes), and Available with a pending spec
-		// change (generation != observedGeneration).
-		return r.runProvisioning(ctx, &inst)
-	}
-}
-
-// ============================================================
-// Steady-state and lifecycle phases (legacy dispatch)
-//
-// Provisioning (network/storage/VM create/readiness/monitoring) moved to the
-// bounded ensure-step runner — see ensure_steps.go and the ensure_*.go files.
-// ============================================================
-
-func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	// Snapshot before any mutation so we can skip the kube-apiserver round-trip when nothing changed. This runs on every ~60 s requeue for every Available DBInstance.
-	prev := inst.Status.DeepCopy()
-	ns := inst.Namespace
-	vmName := inst.Status.Resources.VMName
-
-	inst.Status.Phase = dbaasv1.StatusAvailable
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseAvailable
-	inst.Status.ObservedGeneration = inst.Generation
-	inst.Status.Message = "Database instance is available"
-
-	// On first entry to Available, scrub the ephemeral cloud-init Secret to prevent failed mount scenario
-	// If disk removal fails we leave the secret in place and retry next reconcile.
-	if ciName := inst.Status.Resources.CloudInitSecretName; ciName != "" {
-		if removeErr := r.Harvester.RemoveCloudInitDisk(ctx, ns, vmName); removeErr != nil {
-			log.FromContext(ctx).Error(removeErr, "failed to remove cloud-init disk from VM spec (will retry)", "vm", vmName)
-		} else if delErr := r.Harvester.DeleteSecret(ctx, ns, ciName); delErr != nil {
-			log.FromContext(ctx).Error(delErr, "failed to delete cloud-init secret (non-fatal)", "secret", ciName)
-		} else {
-			inst.Status.Resources.CloudInitSecretName = ""
-		}
-	}
-
-	// Single VMI fetch used for both liveness monitoring and endpoint refresh.
-	readiness, readinessErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
-	if readinessErr != nil {
-		log.FromContext(ctx).Error(readinessErr, "GetVMIReadiness failed (non-fatal)")
-	}
-
-	// -------------------------------------------------------------------------
-	// Liveness monitoring
-	// -------------------------------------------------------------------------
-
-	// UID check: detect unplanned restarts. A new UID means the VMI object was
-	// deleted and recreated (QEMU crash, OS panic, RunStrategyAlways auto-recovery).
-	// This is distinct from a live migration, which does not change the UID.(Evidence ?)
-	if readiness.VMIUID != "" {
-		if inst.Status.LastKnownVMIUID == "" {
-			// First entry to phaseAvailable — snapshot the running VMI's UID.
-			inst.Status.LastKnownVMIUID = readiness.VMIUID
-
-		} else if inst.Status.LastKnownVMIUID != readiness.VMIUID {
-			log.FromContext(ctx).Info("unplanned VMI restart detected", "oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
-			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting, "Unplanned VMI restart detected (UID %s → %s)", inst.Status.LastKnownVMIUID, readiness.VMIUID)
-			inst.Status.RestartCount++ //for observerability only , no-op
-			inst.Status.LastKnownVMIUID = readiness.VMIUID
-
-			// Crash-loop detection: chain-count unplanned restarts
-			// Each one within crashLoopWindow of the previous extends the chain.
-			// quiet gap longer than the window starts a new chain.
-			now := metav1.Now()
-			if inst.Status.LastUnplannedRestartTime != nil &&
-				now.Sub(inst.Status.LastUnplannedRestartTime.Time) < crashLoopWindow {
-				inst.Status.RecentUnplannedRestarts++
-			} else {
-				inst.Status.RecentUnplannedRestarts = 1
-			}
-			inst.Status.LastUnplannedRestartTime = &now
-
-			if inst.Status.RecentUnplannedRestarts >= crashLoopThreshold {
-				termMsg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
-					inst.Status.RecentUnplannedRestarts, crashLoopWindow)
-				// Halt the VM before declaring failed: under RunStrategyAlways KubeVirt keep restarting it forever.
-				// If StopVM fails , return without no status update , retry with next reconcile.
-				if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
-					log.FromContext(ctx).Error(err, "StopVM failed during crash-loop halt (will retry)")
-					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-				}
-				r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonCrashLoopDetected, "%s", termMsg)
-				setCondition(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue,
-					dbaasv1.ReasonCrashLoopDetected, termMsg)
-				removeCondition(inst, dbaasv1.ConditionDegraded)
-				inst.Status.Phase = dbaasv1.StatusFailed
-				inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
-				inst.Status.Message = termMsg
-				_ = r.statusUpdate(ctx, inst)
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-
-			inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
-			inst.Status.Message = "Unplanned VM restart detected; waiting for readiness"
-			_ = r.statusUpdate(ctx, inst)                           // go back to phaseVMCreated -> phaseWaitReady
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil // Do we need to requeueAfter ? or just watch ?
-		}
-	}
-
-	// Liveness (report-only). The KubeVirt readiness probe (pg_isready via the
-	// guest agent, FailureThreshold=12 @ 10s ≈ 2 min) already debounces transient
-	// failures, so Ready is authoritative — no controller-side counting. We never
-	// restart the VM here.
-	//
-	// ASSUMPTION (must hold for this design): our readiness probe is an Exec
-	// probe, which KubeVirt runs *inside the guest via the qemu-guest-agent*.
-	// So when AgentConnected=False the probe physically cannot execute, KubeVirt
-	// scores those attempts as failures, and Ready flips False after
-	// FailureThreshold. We therefore treat Ready as the single health signal and
-	// use AgentConnected only to *attribute* a failure (agent fault vs DB fault),
-	// never as a separately-debounced signal. If a future KubeVirt version froze
-	// Ready stale-True (or "Unknown") on agent loss instead of failing the probe,
-	// this block would under-report a pure guest-agent outage and would need an
-	// AgentConnected-based debounce of its own. Verify on cluster: kill
-	// qemu-guest-agent in a Ready VM and confirm .status.conditions[Ready] flips
-	// False within ~FailureThreshold*PeriodSeconds.
-	//
-	// Skip entirely when the VMI fetch failed: a missing observation is not a
-	// health signal, so we leave any existing Degraded condition untouched.
-	if readinessErr == nil {
-		if readiness.Ready {
-			removeCondition(inst, dbaasv1.ConditionDegraded) // healthy — clear Degraded if it was set
-		} else {
-			reason := dbaasv1.ReasonPostgresUnreachable
-			unhealthyMsg := "PostgreSQL readiness probe failing; database not accepting connections"
-			if !readiness.AgentConnected {
-				reason = dbaasv1.ReasonGuestAgentDisconnected
-				unhealthyMsg = "Guest agent disconnected; cannot run readiness probe — database health unknown"
-			}
-			// Emit a Warning only when entering Degraded or when the cause changes,
-			// not on every reconcile. The condition (and its LastTransitionTime)
-			// carries the persistent signal; spamming events/status each pass would
-			// also defeat the DeepEqual write-skip and self-trigger reconciles.
-			if !hasConditionReason(inst, dbaasv1.ConditionDegraded, reason) {
-				r.Recorder.Eventf(inst, corev1.EventTypeWarning, reason, "%s", unhealthyMsg)
-			}
-			setCondition(inst, dbaasv1.ConditionDegraded, metav1.ConditionTrue, reason, unhealthyMsg)
-			inst.Status.Message = unhealthyMsg
-		}
-	}
-
-	// -------------------------------------------------------------------------
-	// Endpoint refresh and Prometheus monitoring
-	// -------------------------------------------------------------------------
-
-	// Re-check the data-net IP on every requeue — it can change after a VM
-	// restart or live migration. update the Endpoint if it changed.
-	if readiness.IP != "" && (inst.Status.Endpoint == nil || inst.Status.Endpoint.Address != readiness.IP) {
-		port := specPort(inst.Spec.Port)
-		dbName := inst.Spec.DBName
-		if dbName == "" {
-			dbName = inst.Name
-		}
-		inst.Status.Endpoint = &dbaasv1.Endpoint{
-			Address: readiness.IP,
-			Port:    port,
-			JDBCURL: fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-ca", readiness.IP, port, dbName),
-		}
-		log.FromContext(ctx).Info("endpoint updated", "ip", readiness.IP)
-	}
-
-	if inst.Status.Endpoint != nil && inst.Status.Endpoint.Address != "" {
-		// update the monitoring stack with the new endpoint IP if it changed. DeployMonitoring is idempotent and handles the case where the Service already exists, so we can call it on every Available reconcile to ensure the monitoring stack tracks the current endpoint.
-		svcName, smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, inst.Name, ns, inst.Status.Endpoint.Address)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "monitoring refresh failed (non-fatal)")
-		} else {
-			inst.Status.Resources.MetricsServiceName = svcName
-			inst.Status.Resources.ServiceMonitor = smName
-			inst.Status.GrafanaURL = grafanaURL
-			inst.Status.PrometheusTarget = promTarget
-		}
-	}
-
-	if equality.Semantic.DeepEqual(prev, &inst.Status) {
-		// No status drift this cycle — skip the Update entirely.
-		return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
-	}
-	return ctrl.Result{RequeueAfter: 60 * time.Second}, r.statusUpdate(ctx, inst)
-}
-
-// ============================================================
-// Stop / Start / Modify / Delete
-// ============================================================
-
-// phaseFailed parks an instance that gave up (crash-loop halt, or a fatal
-// provisioning/lifecycle error via fail()). Instead of dead-ending (RF-6), it
-// probes the VMI every 30s: if an operator repairs the guest or starts the VM
-// out-of-band and it comes back fully healthy, the instance clears Failed and
-// re-enters the provisioning chain. A crash-loop-halted VM stays halted until
-// that out-of-band start, by design. No status writes happen while still
-// unhealthy, so the loop stays cold (30s requeues only).
-func (r *DBInstanceReconciler) phaseFailed(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	readiness, err := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, inst.Status.Resources.VMName)
-	if err != nil || !readiness.Running || !readiness.Ready || !readiness.AgentConnected {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	r.Recorder.Eventf(inst, corev1.EventTypeNormal, dbaasv1.ReasonRecovered,
-		"VM healthy again after failed state; re-entering provisioning chain")
-	removeCondition(inst, dbaasv1.ConditionFailed)
-	inst.Status.LastKnownVMIUID = "" // re-snapshot the recovered VMI on Available re-entry
-	inst.Status.Phase = dbaasv1.StatusStarting
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
-	inst.Status.Message = "VM healthy again; re-validating readiness"
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
+	// --- Dispatch (PR6): everything runs the bounded ensure-step runner. Legacy
+	// phaseAvailable/phaseFailed are gone — steady-state liveness, crash-loop
+	// halt/park/recovery, and Degraded reporting live in ensureDatabaseHealth;
+	// bootstrap cleanup in ensureBootstrapCleanup. Steady state is event-driven
+	// off the VMI watch: an all-Satisfied pass writes nothing (DeepEqual skip)
+	// and requeues nothing. ---
+	return r.runProvisioning(ctx, &inst)
 }
 
 // immutableDrift returns a comma-separated list of immutable spec fields
@@ -490,30 +259,6 @@ func specPort(port int) int {
 		return defaultPort
 	}
 	return port
-}
-
-// setCondition adds or updates a condition in inst.Status.Conditions.
-// LastTransitionTime is only bumped when Status changes.
-func setCondition(inst *dbaasv1.DBInstance, condType string, status metav1.ConditionStatus, reason, msg string) {
-	now := metav1.Now()
-	for i, c := range inst.Status.Conditions {
-		if c.Type == condType {
-			if c.Status != status {
-				inst.Status.Conditions[i].LastTransitionTime = now
-			}
-			inst.Status.Conditions[i].Status = status
-			inst.Status.Conditions[i].Reason = reason
-			inst.Status.Conditions[i].Message = msg
-			return
-		}
-	}
-	inst.Status.Conditions = append(inst.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		Reason:             reason,
-		Message:            msg,
-		LastTransitionTime: now,
-	})
 }
 
 // hasConditionReason reports whether a condition of condType is present, True,

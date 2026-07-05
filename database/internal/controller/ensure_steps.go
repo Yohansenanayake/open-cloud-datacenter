@@ -51,6 +51,7 @@ func (r *DBInstanceReconciler) provisioningSteps() []ensureStep {
 		{"resize", r.ensureStorageResize},
 		{"power", r.ensurePowerState},
 		{"health", r.ensureDatabaseHealth},
+		{"bootstrap-cleanup", r.ensureBootstrapCleanup},
 		{"monitoring", r.ensureMonitoring},
 		{"ready", r.ensureReady},
 	}

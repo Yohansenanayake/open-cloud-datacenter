@@ -20,6 +20,8 @@ import (
 	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
@@ -27,6 +29,8 @@ func TestEnsureReadyStampsAvailableAndObservedGeneration(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
 	inst.Generation = 5
+	// In the real flow ensureDatabaseHealth sets this before ready runs.
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
 
 	res := r.ensureReady(context.Background(), inst)
 
@@ -79,5 +83,35 @@ func TestEnsureReadyStampsStoppedWhenNotRunning(t *testing.T) {
 	}
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
 		t.Fatal("Ready must be False on a stopped instance")
+	}
+}
+
+// A caught-up degraded blip reaches ready as report-only: Ready must read False
+// (never stale-True) and phase must stay "degraded" as health set it.
+func TestEnsureReadyReflectsDegraded(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	inst.Generation = 6
+	inst.Status.Phase = dbaasv1.StatusDegraded // set by health's report-only branch
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+		"PostgresUnreachable", "probe failing")
+
+	res := r.ensureReady(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
+	}
+	if inst.Status.Phase != dbaasv1.StatusDegraded {
+		t.Fatalf("Phase = %q, want %q (must not overwrite with available)", inst.Status.Phase, dbaasv1.StatusDegraded)
+	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+		t.Fatal("Ready must be False while degraded")
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
+	if cond == nil || cond.Reason != "Degraded" {
+		t.Fatalf("Ready condition = %+v, want False/Degraded", cond)
+	}
+	if inst.Status.ObservedGeneration != 6 {
+		t.Fatalf("ObservedGeneration = %d, want 6 (generation converged; degradation is runtime)", inst.Status.ObservedGeneration)
 	}
 }

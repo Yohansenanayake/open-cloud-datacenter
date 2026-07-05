@@ -21,29 +21,53 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
-// healthRequeue is the timer fallback while waiting for the VM/PostgreSQL to come
-// up. The VMI watch (PR1) usually re-triggers sooner; the timer covers windows
-// with no VMI events (e.g. before the VMI object exists).
-const healthRequeue = 10 * time.Second
+const (
+	// healthRequeue is the timer fallback while waiting for the VM/PostgreSQL to
+	// come up. The VMI watch (PR1) usually re-triggers sooner; the timer covers
+	// windows with no VMI events (e.g. before the VMI object exists).
+	healthRequeue = 10 * time.Second
 
-// ensureDatabaseHealth is the provisioning readiness gate (ported from
-// phaseWaitReady): two observed gates, both from GetVMIReadiness.
+	// crashLoopParkRequeue is the cold re-probe cadence while parked under
+	// CrashLoopHalted, replacing the legacy phaseFailed 30s loop. Status is
+	// unchanged between probes, so the DeepEqual skip keeps the loop write-free.
+	crashLoopParkRequeue = 30 * time.Second
+
+	// Crash-loop detection for unplanned restarts (KI-006 Problem A). Under
+	// RunStrategyAlways KubeVirt recreates the VMI on every guest exit, so a
+	// crash-looping VM "recovers" forever on its own. A chain of unplanned
+	// restarts (VMI UID changes), each within crashLoopWindow of the previous,
+	// reaching crashLoopThreshold halts the VM and parks the instance under the
+	// CrashLoopHalted condition.
+	crashLoopThreshold = 3                // chained unplanned restarts before giving up
+	crashLoopWindow    = 10 * time.Minute // max gap between restarts to extend the chain
+)
+
+// ensureDatabaseHealth is both the provisioning readiness gate and (since PR6)
+// the steady-state liveness monitor, all from one VMI observation per pass:
 //
-//	gate 1: VMI Running and the guest agent has reported a data-net IP;
-//	gate 2: KubeVirt's VMI readiness probe (pg_isready inside the guest) passes.
+//  1. crash-loop guard runs FIRST and unconditionally (plan §8.3) — a gate can
+//     never starve it;
+//  2. while parked under CrashLoopHalted it re-probes cold every 30s and
+//     auto-recovers when an operator brings the VM back healthy out-of-band;
+//  3. while catching up (observedGeneration != generation) it GATES: booting /
+//     probe-not-passing → Pending;
+//  4. once caught up, a probe blip is REPORT-ONLY: Degraded is set with
+//     attribution, phase turns "degraded", and the step returns Satisfied so the
+//     pass finishes and Ready is re-derived (never left stale-True).
 //
-// Both layers are runtime-only — this step writes nothing to the platform, so its
-// Pending is always the timer flavor. When Ready, it publishes the Endpoint and
-// returns Satisfied.
-//
-// PR6 expands this step with steady-state liveness: crash-loop tracking (first,
-// unconditionally), report-only Degraded once caught up, and endpoint refresh.
+// Liveness is report-only by design: the KubeVirt readiness probe (pg_isready via
+// the guest agent, already debounced by its FailureThreshold) is authoritative,
+// and the controller never restarts on readiness failure — the only
+// controller-initiated halt is the crash-loop guard.
 func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	// Desired stopped: there is nothing to gate on — a stopped database is
 	// "converged", not "booting" (plan §5: Satisfied when desired stopped).
@@ -54,28 +78,70 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	}
 
 	readiness, err := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, inst.Status.Resources.VMName)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return transient(err)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			// An unobserved VMI is not a health signal: Degraded is left untouched
+			// and no VM operation is issued — the error just backs off (§8.2).
+			return transient(err)
+		}
+		readiness = harvester.VMIReadiness{} // VMI object gone: boot gate / parked
 	}
 
-	// Gate 1 — NotFound (VMI not created yet), not Running, or no data-net IP.
-	if err != nil || !readiness.Running || readiness.IP == "" {
+	// Crash-loop guard: first, unconditionally.
+	if res, halted := r.trackRestarts(ctx, inst, readiness); halted {
+		return res
+	}
+
+	// Parked under CrashLoopHalted (replaces legacy phaseFailed): recovery is an
+	// out-of-band operator start — when the VMI comes back fully healthy, clear
+	// the halt and let this pass converge normally.
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
+		if readiness.Running && readiness.Ready && readiness.AgentConnected {
+			r.Recorder.Eventf(inst, corev1.EventTypeNormal, dbaasv1.ReasonRecovered,
+				"VM healthy again after crash-loop halt; resuming reconciliation")
+			removeCondition(inst, dbaasv1.ConditionCrashLoopHalted)
+			// Re-snapshot the recovered VMI so its UID is not counted as another
+			// unplanned restart.
+			inst.Status.LastKnownVMIUID = readiness.VMIUID
+		} else {
+			msg := "crash-loop halted; VM kept down — start the VM out-of-band once repaired to recover"
+			inst.Status.Message = msg
+			return pendingAfter("CrashLoopHalted", msg, crashLoopParkRequeue)
+		}
+	}
+
+	port := specPort(inst.Spec.Port)
+
+	// While catching up (spec change / provisioning in flight) the step GATES so
+	// downstream steps and Ready wait for real readiness. Once caught up, blips
+	// are report-only (below) so the pass always finishes.
+	caughtUp := inst.Status.ObservedGeneration == inst.Generation
+
+	if !readiness.Running || readiness.IP == "" {
+		if caughtUp {
+			r.reportDegraded(inst, readiness)
+			return satisfied()
+		}
 		msg := "VM booting; waiting for guest agent and data-net IP"
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "VMBooting", msg)
 		inst.Status.Message = msg
 		return pendingAfter("VMBooting", msg, healthRequeue)
 	}
 
-	port := specPort(inst.Spec.Port)
-
-	// Gate 2 — the in-guest readiness probe has not passed yet.
 	if !readiness.Ready {
+		if caughtUp {
+			r.reportDegraded(inst, readiness)
+			return satisfied()
+		}
 		msg := fmt.Sprintf("PostgreSQL initializing; readiness probe not passing at %s:%d", readiness.IP, port)
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "PostgresInitializing", msg)
 		inst.Status.Message = msg
 		return pendingAfter("PostgresInitializing", msg, healthRequeue)
 	}
 
+	// Healthy: clear any Degraded, refresh the endpoint (the data-net IP can
+	// change after a restart or live migration), report ready.
+	removeCondition(inst, dbaasv1.ConditionDegraded)
 	dbName := inst.Spec.DBName
 	if dbName == "" {
 		dbName = inst.Name
@@ -88,4 +154,99 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
 		"PostgresReady", "PostgreSQL is ready")
 	return satisfied()
+}
+
+// trackRestarts detects unplanned restarts (VMI UID changes — distinct from live
+// migration, which preserves the UID) and chain-counts them into the crash-loop
+// guard. It runs before any gate so a Pending return can never starve it. The
+// restart history lives in status because it cannot be reconstructed from one VMI
+// snapshot (plan §8.3) — it is an accumulated observation, never a step gate.
+//
+// At the threshold the VM is halted HERE, at detection (under RunStrategyAlways
+// KubeVirt would otherwise restart it forever); ensurePowerState then refuses to
+// start it while CrashLoopHalted but never fights an out-of-band recovery start.
+func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.DBInstance, readiness harvester.VMIReadiness) (StepResult, bool) {
+	if readiness.VMIUID == "" {
+		return StepResult{}, false
+	}
+	if inst.Status.LastKnownVMIUID == "" {
+		// First observation of a running VMI — snapshot the baseline.
+		inst.Status.LastKnownVMIUID = readiness.VMIUID
+		return StepResult{}, false
+	}
+	if inst.Status.LastKnownVMIUID == readiness.VMIUID {
+		return StepResult{}, false
+	}
+
+	log.FromContext(ctx).Info("unplanned VMI restart detected",
+		"oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
+	r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
+		"Unplanned VMI restart detected (UID %s → %s)", inst.Status.LastKnownVMIUID, readiness.VMIUID)
+	inst.Status.RestartCount++ // observability only
+	inst.Status.LastKnownVMIUID = readiness.VMIUID
+
+	// Chain arithmetic: each restart within crashLoopWindow of the previous
+	// extends the chain; a longer quiet gap starts a new one.
+	now := metav1.Now()
+	if inst.Status.LastUnplannedRestartTime != nil &&
+		now.Sub(inst.Status.LastUnplannedRestartTime.Time) < crashLoopWindow {
+		inst.Status.RecentUnplannedRestarts++
+	} else {
+		inst.Status.RecentUnplannedRestarts = 1
+	}
+	inst.Status.LastUnplannedRestartTime = &now
+
+	if inst.Status.RecentUnplannedRestarts < crashLoopThreshold {
+		return StepResult{}, false // absorbed; gates/Degraded reflect the reboot
+	}
+
+	// Threshold reached: halt now, then park under CrashLoopHalted. If the halt
+	// fails nothing is recorded — the whole detection re-runs next pass.
+	if err := r.Harvester.StopVM(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
+		log.FromContext(ctx).Error(err, "StopVM failed during crash-loop halt (will retry)")
+		return transient(err), true
+	}
+	msg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
+		inst.Status.RecentUnplannedRestarts, crashLoopWindow)
+	r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonCrashLoopDetected, "%s", msg)
+	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+		dbaasv1.ReasonCrashLoopDetected, msg)
+	removeCondition(inst, dbaasv1.ConditionDegraded)
+	inst.Status.Phase = dbaasv1.StatusFailed
+	inst.Status.Message = msg
+	return pendingAfter("CrashLoopHalted", msg, crashLoopParkRequeue), true
+}
+
+// reportDegraded records a report-only degradation on a caught-up instance.
+//
+// ASSUMPTION (must hold for this design): our readiness probe is an Exec probe,
+// which KubeVirt runs *inside the guest via the qemu-guest-agent*. So when
+// AgentConnected=False the probe physically cannot execute, KubeVirt scores those
+// attempts as failures, and Ready flips False after FailureThreshold. We therefore
+// treat Ready as the single health signal and use AgentConnected / Running only to
+// *attribute* a failure, never as separately-debounced signals. If a future
+// KubeVirt version froze Ready stale-True (or "Unknown") on agent loss instead of
+// failing the probe, this would under-report a pure guest-agent outage and would
+// need an AgentConnected-based debounce of its own.
+func (r *DBInstanceReconciler) reportDegraded(inst *dbaasv1.DBInstance, readiness harvester.VMIReadiness) {
+	reason := dbaasv1.ReasonPostgresUnreachable
+	msg := "PostgreSQL readiness probe failing; database not accepting connections"
+	switch {
+	case !readiness.Running:
+		reason = dbaasv1.ReasonVMRestarting
+		msg = "VMI not running; VM restarting or halted out-of-band"
+	case !readiness.AgentConnected:
+		reason = dbaasv1.ReasonGuestAgentDisconnected
+		msg = "Guest agent disconnected; cannot run readiness probe — database health unknown"
+	}
+	// Emit a Warning only when entering Degraded or when the cause changes, not on
+	// every pass: the condition carries the persistent signal, and spamming status
+	// would defeat the DeepEqual write-skip and self-trigger reconciles.
+	if !hasConditionReason(inst, dbaasv1.ConditionDegraded, reason) {
+		r.Recorder.Eventf(inst, corev1.EventTypeWarning, reason, "%s", msg)
+	}
+	setStepCond(inst, dbaasv1.ConditionDegraded, metav1.ConditionTrue, reason, msg)
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, reason, msg)
+	inst.Status.Phase = dbaasv1.StatusDegraded
+	inst.Status.Message = msg
 }

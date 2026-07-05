@@ -43,9 +43,19 @@ func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBIn
 		return satisfied()
 	}
 
-	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseAvailable
 	inst.Status.ObservedGeneration = inst.Generation
+
+	// A caught-up probe blip reaches here as report-only (health returned
+	// Satisfied with DatabaseReady=False and Phase=degraded). Ready must reflect
+	// that — never stale-True — and phase stays "degraded" as health set it.
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse,
+			"Degraded", "database degraded; see the Degraded condition for attribution")
+		return satisfied() // why satisfied()?
+	}
+
+	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.Message = "Database instance is available"
 	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue,
 		"DBInstanceReady", "all ensure steps satisfied")

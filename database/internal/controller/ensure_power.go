@@ -50,14 +50,20 @@ func wantRunning(inst *dbaasv1.DBInstance) bool {
 //
 // declared wrong → request start/stop → Pending (event-driven: the status write
 // re-triggers). declared right but runtime catching up → Pending (timer). Both
-// agree → Satisfied. A CrashLoopHalted condition overrides spec.running to
-// stopped, so a crash-looping VM stays down even when the user asked for running
-// (set by PR6; honored here).
+// agree → Satisfied.
 func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
-	desiredRunning := wantRunning(inst)
+	// Crash-loop halt: ensureDatabaseHealth halted the VM at detection and owns
+	// park + recovery. This step only REFUSES TO START (spec.running=true must not
+	// resurrect a crash-looper) — it must not actively stop either, because
+	// recovery is an out-of-band operator start that power would otherwise fight
+	// before health can observe it healthy. Satisfied lets the pass reach health.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
-		desiredRunning = false
+		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse,
+			"CrashLoopHalted", "power management suspended during crash-loop halt")
+		return satisfied()
 	}
+
+	desiredRunning := wantRunning(inst)
 
 	// OBSERVE the declared layer: the VM's runStrategy.
 	var vm kubevirtv1.VirtualMachine

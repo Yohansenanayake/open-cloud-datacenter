@@ -65,6 +65,8 @@ func DerivePhase(inst *DBInstance) string {
 		return StatusDeleting
 	case s.IsConditionTrue(ConditionFailed) || s.IsConditionTrue(ConditionCrashLoopHalted):
 		return StatusFailed
+	case s.IsConditionTrue(ConditionDegraded):
+		return StatusDegraded
 	case s.IsConditionTrue(ConditionReady):
 		return StatusAvailable
 	case inst.Spec.Running != nil && !*inst.Spec.Running:

@@ -170,18 +170,25 @@ func TestEnsurePowerStateStoppedSatisfiedAndClearsDegraded(t *testing.T) {
 	}
 }
 
-// CrashLoopHalted overrides spec.running=true: the VM is kept down.
+// CrashLoopHalted suspends power management entirely: no StartVM (spec.running
+// must not resurrect a crash-looper) and no StopVM (health halted it at
+// detection; an out-of-band recovery start must not be fought). Satisfied so the
+// pass reaches health, which owns park/recovery.
 func TestEnsurePowerStateHonoursCrashLoopHalt(t *testing.T) {
 	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, "CrashLoopDetected", "3 restarts in 10m")
 
 	res := r.ensurePowerState(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "Stopping" {
-		t.Fatalf("res = %+v, want Pending/Stopping (crash-loop halt)", res)
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied (power suspended, pass continues to health)", res)
 	}
-	if stub.StopVMCalls != 1 || stub.StartVMCalls != 0 {
-		t.Fatalf("calls = stop:%d start:%d, want stop:1 start:0", stub.StopVMCalls, stub.StartVMCalls)
+	if stub.StopVMCalls != 0 || stub.StartVMCalls != 0 {
+		t.Fatalf("calls = stop:%d start:%d, want none while crash-loop halted", stub.StopVMCalls, stub.StartVMCalls)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "CrashLoopHalted" {
+		t.Fatalf("PowerStateReady = %+v, want False/CrashLoopHalted", cond)
 	}
 }
 

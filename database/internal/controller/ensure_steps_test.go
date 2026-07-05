@@ -258,17 +258,40 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		t.Fatalf("create vm: %v", err)
 	}
 
-	// Pass 2: VM observed, VMI ready → walk to Available.
+	// Pass 2: VM observed, VMI ready → health passes, then the bootstrap-cleanup
+	// step scrubs the consumed cloud-init secret and stops the pass (one
+	// meaningful mutation per reconcile).
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch: %v", err)
 	}
 	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 2 = (%+v, %v), want zero Result and nil error", result, err)
 	}
+	after2 := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, after2); err != nil {
+		t.Fatalf("get after pass 2: %v", err)
+	}
+	if after2.Status.Resources.CloudInitSecretName != "" {
+		t.Fatalf("cloud-init ref = %q after pass 2, want scrubbed", after2.Status.Resources.CloudInitSecretName)
+	}
+	if len(stub.OpsLog) != 2 || stub.OpsLog[0] != "RemoveCloudInitDisk" || stub.OpsLog[1] != "DeleteSecret" {
+		t.Fatalf("OpsLog = %v, want [RemoveCloudInitDisk DeleteSecret]", stub.OpsLog)
+	}
+	if after2.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+		t.Fatal("Ready must not be True yet — the scrub stopped pass 2")
+	}
+
+	// Pass 3: nothing left to scrub → walk to Available.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 3: %v", err)
+	}
+	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 3 = (%+v, %v), want zero Result and nil error", result, err)
+	}
 
 	got := &dbaasv1.DBInstance{}
 	if err := r.Get(ctx, key, got); err != nil {
-		t.Fatalf("get after pass 2: %v", err)
+		t.Fatalf("get after pass 3: %v", err)
 	}
 	if got.Status.Phase != dbaasv1.StatusAvailable || got.Status.ProvisioningPhase != dbaasv1.PhaseAvailable {
 		t.Fatalf("phase = %q/%q, want available/Available", got.Status.Phase, got.Status.ProvisioningPhase)

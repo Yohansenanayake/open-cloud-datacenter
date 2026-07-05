@@ -55,6 +55,7 @@ func TestDerivePhase(t *testing.T) {
 		{"creating", &DBInstance{}, StatusCreating},
 		{"ready", withCond(DBInstanceSpec{}, metav1.Condition{Type: ConditionReady, Status: metav1.ConditionTrue, Reason: "DBInstanceReady"}), StatusAvailable},
 		{"failed", withCond(DBInstanceSpec{}, metav1.Condition{Type: ConditionFailed, Status: metav1.ConditionTrue, Reason: "InvalidClass"}), StatusFailed},
+		{"degraded", withCond(DBInstanceSpec{}, metav1.Condition{Type: ConditionDegraded, Status: metav1.ConditionTrue, Reason: "PostgresUnreachable"}), StatusDegraded},
 		{"crashloop-is-failed", withCond(DBInstanceSpec{}, metav1.Condition{Type: ConditionCrashLoopHalted, Status: metav1.ConditionTrue, Reason: "CrashLoopDetected"}), StatusFailed},
 		{"stopped", &DBInstance{Spec: DBInstanceSpec{Running: &stopped}}, StatusStopped},
 		{"modifying", func() *DBInstance {

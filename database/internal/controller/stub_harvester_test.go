@@ -29,12 +29,14 @@ import (
 // methods derive the same deterministic names as the typed client ("pg-<id>",
 // "pg-<id>-credentials", ...) so step tests can assert recorded refs.
 type stubHarvester struct {
-	readiness    harvester.VMIReadiness
-	readinessErr error
-	stopVMErr    error
-	startVMErr   error
-	createVMErr  error
-	deployMonErr error
+	readiness          harvester.VMIReadiness
+	readinessErr       error
+	stopVMErr          error
+	startVMErr         error
+	createVMErr        error
+	deployMonErr       error
+	removeCloudInitErr error
+	deleteSecretErr    error
 
 	// Optional DeployMonitoring return values; zero values match the legacy
 	// stub behavior so steady-state tests are unaffected.
@@ -46,6 +48,10 @@ type stubHarvester struct {
 	DeployMonitoringCalls int
 	ResizeVMCalls         int
 	ResizeDVCalls         int
+
+	// OpsLog records the order of cleanup-relevant calls so tests can assert
+	// sequencing (e.g. cloud-init disk removal MUST precede secret deletion).
+	OpsLog []string
 }
 
 func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
@@ -77,8 +83,14 @@ func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error
 	s.ResizeVMCalls++
 	return nil
 }
-func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error        { return nil }
-func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
+func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error {
+	s.OpsLog = append(s.OpsLog, "DeleteSecret")
+	return s.deleteSecretErr
+}
+func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error {
+	s.OpsLog = append(s.OpsLog, "RemoveCloudInitDisk")
+	return s.removeCloudInitErr
+}
 func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (string, string, string, string, error) {
 	s.DeployMonitoringCalls++
 	if s.deployMonErr != nil {
