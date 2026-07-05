@@ -83,6 +83,24 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	}
 }
 
+// An edit to an immutable field (vs the create-time AppliedSpec snapshot) is
+// refused loudly — the guard that sat on the legacy stop/start/modify paths now
+// covers every runner entry.
+func TestEnsurePreflightImmutableDriftIsTerminal(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{NetworkRef: "tenant-a/old-net"} // spec now says tenant-a/data-net
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTerminal || res.Reason != "ImmutableFieldChanged" {
+		t.Fatalf("res = %+v, want Terminal/ImmutableFieldChanged", res)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
+		t.Fatal("Failed condition not set on drift")
+	}
+}
+
 // A user fixing the spec after a terminal park must clear the failure.
 func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
 	r := &DBInstanceReconciler{}

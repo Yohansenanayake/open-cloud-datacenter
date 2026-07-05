@@ -58,7 +58,7 @@ func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemp
 	if err != nil {
 		t.Fatalf("get VM: %v", err)
 	}
-	templates, err := typedVolumeClaimTemplates(vm)
+	templates, err := VolumeClaimTemplates(vm)
 	if err != nil {
 		t.Fatalf("volume claim templates: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemp
 	if err != nil {
 		t.Fatalf("get resized VM: %v", err)
 	}
-	templates, err = typedVolumeClaimTemplates(vm)
+	templates, err = VolumeClaimTemplates(vm)
 	if err != nil {
 		t.Fatalf("resized volume claim templates: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if got := len(vm.Spec.DataVolumeTemplates); got != 0 {
 		t.Fatalf("dataVolumeTemplates = %d, want 0 for Harvester-native volumeClaimTemplates path", got)
 	}
-	templates, err := typedVolumeClaimTemplates(vm)
+	templates, err := VolumeClaimTemplates(vm)
 	if err != nil {
 		t.Fatalf("volume claim templates: %v", err)
 	}

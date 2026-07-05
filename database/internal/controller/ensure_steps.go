@@ -34,17 +34,22 @@ type ensureStep struct {
 	run  func(ctx context.Context, inst *dbaasv1.DBInstance) StepResult
 }
 
-// provisioningSteps is the ordered ensure-step chain the runner walks while an
-// instance is provisioning (creation → Available). Power/resize and steady-state
-// health/crash-loop remain in the legacy dispatch during PR4 (plan §12 steps 2–3);
-// they land as ensure_power.go / ensure_resize.go and an expanded ensure_health.go
-// in PR5/PR6.
+// provisioningSteps is the ordered ensure-step chain the runner walks for
+// everything except pure steady-state (phaseAvailable) and parked-failed
+// (phaseFailed) instances — those stay legacy until PR6.
+//
+// resize runs BEFORE power deliberately: cold resize halts the VM itself and
+// stays non-Satisfied while shape drift exists, so the power step never fights
+// it; once the shape converges, power observes "desired running, declared
+// Halted" and restarts. No cross-step coupling or persisted operation state.
 func (r *DBInstanceReconciler) provisioningSteps() []ensureStep {
 	return []ensureStep{
 		{"finalizer", r.ensureFinalizer},
 		{"preflight", r.ensurePreflight},
 		{"credentials", r.ensureCredentials},
 		{"vm", r.ensureVM},
+		{"resize", r.ensureStorageResize},
+		{"power", r.ensurePowerState},
 		{"health", r.ensureDatabaseHealth},
 		{"monitoring", r.ensureMonitoring},
 		{"ready", r.ensureReady},

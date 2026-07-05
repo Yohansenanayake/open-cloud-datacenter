@@ -44,6 +44,8 @@ type stubHarvester struct {
 	StartVMCalls          int
 	CreateVMCalls         int
 	DeployMonitoringCalls int
+	ResizeVMCalls         int
+	ResizeDVCalls         int
 }
 
 func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
@@ -52,7 +54,10 @@ func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvest
 func (s *stubHarvester) CreateDataVolume(_ context.Context, id, _ string, _ int, _ string) (string, error) {
 	return "pg-" + id + "-data", nil
 }
-func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ int) error { return nil }
+func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ int) error {
+	s.ResizeDVCalls++
+	return nil
+}
 func (s *stubHarvester) CreatePostgresVM(_ context.Context, p harvester.VMCreateParams) (string, string, string, string, error) {
 	s.CreateVMCalls++
 	// Names are deterministic and returned even on error, matching the real
@@ -68,7 +73,10 @@ func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error {
 	s.StartVMCalls++
 	return s.startVMErr
 }
-func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error  { return nil }
+func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error {
+	s.ResizeVMCalls++
+	return nil
+}
 func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error        { return nil }
 func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
 func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (string, string, string, string, error) {

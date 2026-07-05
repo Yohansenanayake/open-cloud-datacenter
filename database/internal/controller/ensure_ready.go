@@ -26,10 +26,23 @@ import (
 
 // ensureReady runs only when every prior ensure step returned Satisfied for this
 // pass. It is the single place the top-level status.observedGeneration advances
-// (plan §8.1) and where Ready=True is stamped. Setting ProvisioningPhase=Available
-// hands steady-state ownership to the legacy phaseAvailable dispatch (liveness,
-// crash-loop, endpoint refresh) until PR6 folds that into ensureDatabaseHealth.
+// (plan §8.1) and where Ready is stamped for the converged state — Available for a
+// running instance, Stopped for a deliberately stopped one (Ready=False, never
+// stale-True). Setting ProvisioningPhase=Available hands steady-state ownership to
+// the legacy phaseAvailable dispatch (liveness, crash-loop, endpoint refresh)
+// until PR6 folds that into ensureDatabaseHealth; PhaseStopped keeps routing
+// through the runner, which idles cold (all steps Satisfied, no writes).
 func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBInstance) StepResult {
+	if !wantRunning(inst) {
+		inst.Status.Phase = dbaasv1.StatusStopped
+		inst.Status.ProvisioningPhase = dbaasv1.PhaseStopped
+		inst.Status.ObservedGeneration = inst.Generation
+		inst.Status.Message = "Stopped. Storage preserved."
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse,
+			"Stopped", "instance is deliberately stopped")
+		return satisfied()
+	}
+
 	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseAvailable
 	inst.Status.ObservedGeneration = inst.Generation

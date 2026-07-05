@@ -18,12 +18,18 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/harvester/harvester/pkg/util"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -71,8 +77,56 @@ func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Ob
 	return &DBInstanceReconciler{Client: fakeClient, Harvester: stub}
 }
 
+// testVM returns a VirtualMachine shaped the way CreatePostgresVM builds it for
+// newProvisionInst (db.t3.small, 20Gi): runStrategy Always, class cpu/mem in
+// resources.limits, data-disk PVC in the volumeClaimTemplates annotation. The
+// resize and power steps observe this shape.
 func testVM(name, ns string) *kubevirtv1.VirtualMachine {
-	return &kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	return shapedVM(name, ns, "db.t3.small", 20, name+"-data", kubevirtv1.RunStrategyAlways)
+}
+
+func shapedVM(name, ns, class string, storageGB int, dvName string, rs kubevirtv1.VirtualMachineRunStrategy) *kubevirtv1.VirtualMachine {
+	classSpec := dbaasv1.InstanceClasses[class]
+	pvcs := []*corev1.PersistentVolumeClaim{{
+		ObjectMeta: metav1.ObjectMeta{Name: dvName},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", storageGB)),
+				},
+			},
+		},
+	}}
+	raw, _ := json.Marshal(pvcs)
+
+	vm := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   ns,
+			Annotations: map[string]string{util.AnnotationVolumeClaimTemplates: string(raw)},
+		},
+	}
+	vm.Spec.RunStrategy = &rs
+	vm.Spec.Template = &kubevirtv1.VirtualMachineInstanceTemplateSpec{}
+	vm.Spec.Template.Spec.Domain.Resources.Limits = corev1.ResourceList{
+		corev1.ResourceCPU:    *resource.NewQuantity(int64(classSpec.CPUCores), resource.DecimalSI),
+		corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", classSpec.MemoryMB)),
+	}
+	return vm
+}
+
+// setVMRunStrategy simulates the effect of a StartVM/StopVM provider call on the
+// fake cluster (the stub does not touch the fake client's VM object).
+func setVMRunStrategy(t *testing.T, c client.Client, name, ns string, rs kubevirtv1.VirtualMachineRunStrategy) {
+	t.Helper()
+	var vm kubevirtv1.VirtualMachine
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: name}, &vm); err != nil {
+		t.Fatalf("get vm: %v", err)
+	}
+	vm.Spec.RunStrategy = &rs
+	if err := c.Update(context.Background(), &vm); err != nil {
+		t.Fatalf("update vm: %v", err)
+	}
 }
 
 // --- runner mechanics (injected steps) ---

@@ -32,6 +32,13 @@ import (
 // returns Satisfied so provisioning completes; the next pass retries. PR7 replaces
 // the provider call with ResourceBuilders + owner refs.
 func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+	// Desired stopped: nothing to scrape; don't deploy against a dead endpoint.
+	if !wantRunning(inst) {
+		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+			"InstanceStopped", "instance is stopped")
+		return satisfied()
+	}
+
 	// Ordered after ensureDatabaseHealth, so an endpoint is normally present;
 	// defensive wait if not.
 	if inst.Status.Endpoint == nil || inst.Status.Endpoint.Address == "" {

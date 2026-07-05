@@ -101,13 +101,13 @@ func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName s
 		if err != nil {
 			return err
 		}
-		pvcs, err := typedVolumeClaimTemplates(vm)
+		pvcs, err := VolumeClaimTemplates(vm)
 		if err != nil {
 			return err
 		}
 		// Index into the slice rather than range-copy: the mutation below must
 		// reach the element that gets re-marshalled, independent of whether
-		// typedVolumeClaimTemplates returns pointers or values.
+		// VolumeClaimTemplates returns pointers or values.
 		found := false
 		for i := range pvcs {
 			if pvcs[i].Name != dvName {
@@ -821,11 +821,11 @@ func typedVMNetworkName(namespace, nadName string) string {
 	return fmt.Sprintf("%s/%s", namespace, nadName)
 }
 
-// typedVolumeClaimTemplates parses the VM's volumeClaimTemplates annotation
+// VolumeClaimTemplates parses the VM's volumeClaimTemplates annotation
 // into PVC templates. It returns pointers so callers can mutate entries in
 // place, but callers should still index the slice (pvcs[i]) rather than
 // range-copy so the mutation stays correct if this ever returns values.
-func typedVolumeClaimTemplates(vm *kubevirtv1.VirtualMachine) ([]*corev1.PersistentVolumeClaim, error) {
+func VolumeClaimTemplates(vm *kubevirtv1.VirtualMachine) ([]*corev1.PersistentVolumeClaim, error) {
 	raw := vm.Annotations[util.AnnotationVolumeClaimTemplates]
 	if raw == "" {
 		return nil, fmt.Errorf("VM %s/%s has no %s annotation", vm.Namespace, vm.Name, util.AnnotationVolumeClaimTemplates)

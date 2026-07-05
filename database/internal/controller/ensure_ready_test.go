@@ -50,3 +50,34 @@ func TestEnsureReadyStampsAvailableAndObservedGeneration(t *testing.T) {
 		t.Fatal("Ready should be True")
 	}
 }
+
+// A deliberately stopped instance converges to phase=stopped with Ready=False —
+// stopped is a converged state, and Ready is never left stale-True.
+func TestEnsureReadyStampsStoppedWhenNotRunning(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	inst.Generation = 4
+	stopped := false
+	inst.Spec.Running = &stopped
+
+	res := r.ensureReady(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
+	}
+	if inst.Status.Phase != dbaasv1.StatusStopped {
+		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopped)
+	}
+	if inst.Status.ProvisioningPhase != dbaasv1.PhaseStopped {
+		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseStopped)
+	}
+	if inst.Status.ObservedGeneration != 4 {
+		t.Fatalf("ObservedGeneration = %d, want 4 (stop observed)", inst.Status.ObservedGeneration)
+	}
+	if inst.Status.GetCondition(dbaasv1.ConditionReady) == nil {
+		t.Fatal("Ready condition missing")
+	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+		t.Fatal("Ready must be False on a stopped instance")
+	}
+}

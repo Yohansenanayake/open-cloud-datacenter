@@ -138,38 +138,24 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// --- Handle stop/start ---
-	// spec.running is set by users
-	if inst.Spec.Running != nil && !*inst.Spec.Running && inst.Status.Phase == dbaasv1.StatusAvailable {
-		return r.reconcileStop(ctx, &inst)
-	}
-	if inst.Spec.Running != nil && *inst.Spec.Running && inst.Status.Phase == dbaasv1.StatusStopped {
-		return r.reconcileStart(ctx, &inst)
-	}
-
-	// --- Handle spec changes on available or in-progress-modifying instance ---
-	if (inst.Status.Phase == dbaasv1.StatusAvailable || inst.Status.Phase == dbaasv1.StatusModifying) &&
-		inst.Generation != inst.Status.ObservedGeneration {
-		return r.reconcileModify(ctx, &inst)
-	}
-
-	// --- Dispatch. Steady-state and parked instances stay on the legacy
-	// handlers; the whole provisioning window runs the bounded ensure-step
-	// runner (PR4). Legacy paths that need re-readiness (start, resize,
-	// restart/failed recovery) set ProvisioningPhase=VMCreated, which lands in
-	// the runner's health gate naturally. ---
-	switch inst.Status.ProvisioningPhase {
-	case dbaasv1.PhaseAvailable:
-		return r.phaseAvailable(ctx, &inst)
-	case dbaasv1.PhaseStopped:
-		return r.phaseStopped(ctx, &inst)
-	case dbaasv1.PhaseFailed:
+	// --- Dispatch (PR5). Only two states stay on legacy handlers: parked-failed
+	// (crash-loop recovery probing) and pure steady-state on a fully converged
+	// generation (liveness / crash-loop detection / endpoint refresh) — both fold
+	// into ensure steps in PR6. Everything else, including stopped instances and
+	// ANY spec change on an Available instance (stop/start toggles, resizes,
+	// drift), runs the bounded ensure-step runner: power and resize converge from
+	// observed VM/VMI state, with no pre-dispatcher lifecycle branches. ---
+	switch {
+	case inst.Status.ProvisioningPhase == dbaasv1.PhaseFailed:
 		return r.phaseFailed(ctx, &inst)
+	case inst.Status.ProvisioningPhase == dbaasv1.PhaseAvailable &&
+		inst.Generation == inst.Status.ObservedGeneration:
+		return r.phaseAvailable(ctx, &inst)
 	default:
-		// "", Pending, NetworkProvisioned, StorageProvisioned, VMCreated,
-		// WaitingForCloudInit (legacy value), DatabaseReady, MonitoringDeployed.
-		// The runner re-derives where it is from observed state, so any
-		// intermediate phase value routes here safely.
+		// Provisioning window ("", Pending, ..., MonitoringDeployed — any value
+		// the runner re-derives from observed state), PhaseStopped (idles cold:
+		// all steps Satisfied, no writes), and Available with a pending spec
+		// change (generation != observedGeneration).
 		return r.runProvisioning(ctx, &inst)
 	}
 }
@@ -353,45 +339,6 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 // Stop / Start / Modify / Delete
 // ============================================================
 
-func (r *DBInstanceReconciler) reconcileStop(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	// A user who flips spec.running and also edits an immutable field in
-	// the same kubectl apply hits this path before reconcileModify (the
-	// dispatcher routes running-toggles first). Without this guard,
-	// observedGeneration silently catches up — same lie reconcileModify
-	// used to tell. Refuse the whole change with a clear message.
-	if drift := immutableDrift(inst); drift != "" {
-		return r.fail(ctx, inst, "ImmutableFieldChanged",
-			fmt.Errorf("cannot modify field(s) %s while stopping; revert or recreate the DBInstance", drift))
-	}
-
-	if err := r.Harvester.StopVM(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
-		return r.fail(ctx, inst, "StopFailed", err)
-	}
-
-	// Single atomic status write — no persistent phase=stopping intermediate.
-	// KI-005: a stale "stopping" snapshot in statusUpdate's retry loop could
-	// overwrite "stopped" and leave the dispatcher with no matching branch.
-	// ProvisioningPhase=Stopped moves the instance out of phaseAvailable's
-	// dispatch domain, so the RF-1 resurrection loop cannot fire.
-	inst.Status.Phase = dbaasv1.StatusStopped
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseStopped
-	inst.Status.Message = "Stopped. Storage preserved."
-	inst.Status.ObservedGeneration = inst.Generation
-	removeCondition(inst, dbaasv1.ConditionDegraded)
-	return ctrl.Result{}, r.statusUpdate(ctx, inst)
-}
-
-// phaseStopped is the idle state for a halted instance. The only exit is
-// spec.running flipping back to true, which re-enters the provisioning chain
-// via reconcileStart. No requeue while halted — spec edits trigger
-// event-driven reconciles.
-func (r *DBInstanceReconciler) phaseStopped(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	if inst.Spec.Running == nil || *inst.Spec.Running {
-		return r.reconcileStart(ctx, inst)
-	}
-	return ctrl.Result{}, nil
-}
-
 // phaseFailed parks an instance that gave up (crash-loop halt, or a fatal
 // provisioning/lifecycle error via fail()). Instead of dead-ending (RF-6), it
 // probes the VMI every 30s: if an operator repairs the guest or starts the VM
@@ -412,105 +359,6 @@ func (r *DBInstanceReconciler) phaseFailed(ctx context.Context, inst *dbaasv1.DB
 	inst.Status.Phase = dbaasv1.StatusStarting
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.Message = "VM healthy again; re-validating readiness"
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
-}
-
-func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	// See reconcileStop above — same drift guard for the start path.
-	if drift := immutableDrift(inst); drift != "" {
-		return r.fail(ctx, inst, "ImmutableFieldChanged",
-			fmt.Errorf("cannot modify field(s) %s while starting; revert or recreate the DBInstance", drift))
-	}
-
-	ns := inst.Namespace
-	vmName := inst.Status.Resources.VMName
-
-	// StopVM only sets RunStrategy=Halted; the VMI tears down asynchronously
-	// and KubeVirt's start subresource rejects calls while a VMI object still
-	// exists. Wait for teardown to finish (same guard as reconcileModify).
-	// Phase stays stopped/Stopped so the dispatcher re-enters here.
-	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
-	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-	if readiness.Running {
-		inst.Status.Message = "Waiting for VM to finish stopping before start"
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
-	}
-
-	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
-		return r.fail(ctx, inst, "StartFailed", err)
-	}
-
-	// Re-enter the provisioning chain instead of declaring available here:
-	// phaseWaitReady gates on VMI readiness + the PostgreSQL probe, and
-	// phaseAvailable stamps phase=available only once the DB is actually up.
-	inst.Status.Phase = dbaasv1.StatusStarting
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
-	inst.Status.ObservedGeneration = inst.Generation
-	inst.Status.LastKnownVMIUID = "" // planned start — don't count it as an unplanned restart
-	inst.Status.Message = "Starting; waiting for VM to become ready"
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
-}
-
-func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	ns := inst.Namespace
-
-	// Refuse the modify if any field we can't re-apply has drifted from the
-	// snapshot taken at create time. Without this guard we silently set
-	// observedGeneration = generation even when a user changed networkRef
-	// or dbName, leaving them to believe the controller honoured it.
-	if drift := immutableDrift(inst); drift != "" {
-		return r.fail(ctx, inst, "ImmutableFieldChanged",
-			fmt.Errorf("cannot modify field(s) %s after create; revert or recreate the DBInstance", drift))
-	}
-
-	inst.Status.Phase = dbaasv1.StatusModifying
-	_ = r.statusUpdate(ctx, inst)
-
-	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
-	if !ok {
-		return r.fail(ctx, inst, "InvalidClass", fmt.Errorf("unknown class: %s", inst.Spec.DBInstanceClass))
-	}
-
-	vmName := inst.Status.Resources.VMName
-
-	// Cold resize: ensure VM is halted (idempotent — safe to call on an already-halted VM).
-	if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
-		return r.fail(ctx, inst, "ResizeStopFailed", err)
-	}
-
-	// Wait for the VMI to actually terminate before applying spec changes.
-	// Setting RunStrategy=Halted is asynchronous: the VMI can take 5–30s to
-	// stop. KubeVirt's start subresource rejects calls while a VMI object
-	// exists. StopVM is idempotent so re-calling on each re-queue is safe.
-	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
-	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
-		// Transient API error — re-queue without failing.
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-	if readiness.Running {
-		inst.Status.Phase = dbaasv1.StatusModifying
-		inst.Status.Message = fmt.Sprintf("Waiting for VM to stop before resize to %s", inst.Spec.DBInstanceClass)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
-	}
-
-	if err := r.Harvester.ResizeVM(ctx, ns, vmName, classSpec.CPUCores, classSpec.MemoryMB); err != nil {
-		return r.fail(ctx, inst, "ResizeVMFailed", fmt.Errorf("VM is halted; %w", err))
-	}
-	if err := r.Harvester.ResizeDataVolume(ctx, ns, vmName, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage); err != nil {
-		return r.fail(ctx, inst, "ResizeStorageFailed", fmt.Errorf("VM is halted; %w", err))
-	}
-
-	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
-		return r.fail(ctx, inst, "ResizeStartFailed", fmt.Errorf("resize applied but VM failed to start; %w", err))
-	}
-
-	// Wait for the VM to become ready via the normal provisioning path.
-	inst.Status.ObservedGeneration = inst.Generation
-	inst.Status.LastKnownVMIUID = ""
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
-	inst.Status.Message = fmt.Sprintf("Resized to %s, %dGiB; waiting for VM", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
@@ -621,16 +469,6 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 // ============================================================
 // Helpers
 // ============================================================
-
-func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstance, reason string, err error) (ctrl.Result, error) {
-	inst.Status.Phase = dbaasv1.StatusFailed
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
-	inst.Status.Message = fmt.Sprintf("%s: %v", reason, err)
-	_ = r.statusUpdate(ctx, inst)
-	// Return zero Result: controller-runtime ignores Result when error is
-	// non-nil and applies exponential backoff requeue instead.
-	return ctrl.Result{}, err
-}
 
 func (r *DBInstanceReconciler) statusUpdate(ctx context.Context, inst *dbaasv1.DBInstance) error {
 	desired := inst.Status.DeepCopy()

@@ -41,7 +41,7 @@ func hasCondition(inst *dbaasv1.DBInstance, condType string) bool {
 // re-entering phaseAvailable on every status-write event.
 func TestFailedStateDoesNotHotLoop(t *testing.T) {
 	stub := &stubHarvester{} // VMI unhealthy (zero readiness)
-	r, req := newStopStartReconciler(stub, true)
+	r, req := newLifecycleFixture(t, true, stub)
 	ctx := context.Background()
 
 	inst := getInst(t, r.Client)
@@ -77,7 +77,7 @@ func TestPhaseFailedRecoversWhenHealthy(t *testing.T) {
 	stub := &stubHarvester{
 		readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-uid-new"},
 	}
-	r, req := newStopStartReconciler(stub, true)
+	r, req := newLifecycleFixture(t, true, stub)
 	ctx := context.Background()
 
 	inst := getInst(t, r.Client)

@@ -45,6 +45,14 @@ const healthRequeue = 10 * time.Second
 // PR6 expands this step with steady-state liveness: crash-loop tracking (first,
 // unconditionally), report-only Degraded once caught up, and endpoint refresh.
 func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+	// Desired stopped: there is nothing to gate on — a stopped database is
+	// "converged", not "booting" (plan §5: Satisfied when desired stopped).
+	if !wantRunning(inst) {
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+			"Stopped", "instance is stopped")
+		return satisfied()
+	}
+
 	readiness, err := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, inst.Status.Resources.VMName)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return transient(err)

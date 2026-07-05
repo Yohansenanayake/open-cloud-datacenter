@@ -16,6 +16,13 @@ limitations under the License.
 
 package controller
 
+// Stop/start lifecycle through the bounded runner (PR5). The legacy
+// reconcileStop/reconcileStart/phaseStopped pre-dispatcher paths are gone: the
+// power step converges spec.running from observed runStrategy + VMI state across
+// multiple reconciles. The stubHarvester does not mutate the fake cluster, so
+// tests simulate each provider call's side effect (runStrategy flip, VMI
+// teardown) between passes — exactly what Harvester/KubeVirt would do.
+
 import (
 	"context"
 	"testing"
@@ -23,48 +30,45 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func boolPtr(b bool) *bool { return &b }
 
-// newStopStartReconciler builds a reconciler around a fake client holding an
-// Available instance with the finalizer already present, so Reconcile goes
-// straight to the dispatcher branches.
-func newStopStartReconciler(stub *stubHarvester, running bool) (*DBInstanceReconciler, ctrl.Request) {
+// newLifecycleFixture builds an Available instance whose spec.running was just
+// flipped (generation 2 vs observedGeneration 1 — the edit is unobserved), with a
+// shaped running VM in the fake cluster, wired through the full Reconcile path.
+func newLifecycleFixture(t *testing.T, running bool, stub *stubHarvester) (*DBInstanceReconciler, ctrl.Request) {
+	t.Helper()
 	inst := &dbaasv1.DBInstance{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "orders",
 			Namespace:  "tenant-a",
+			Generation: 2,
 			Finalizers: []string{dbaasv1.FinalizerName},
 		},
-		Spec: dbaasv1.DBInstanceSpec{Running: boolPtr(running)},
+		Spec: dbaasv1.DBInstanceSpec{
+			Running:          boolPtr(running),
+			DBInstanceClass:  "db.t3.small",
+			AllocatedStorage: 20,
+			NetworkRef:       "tenant-a/data-net",
+		},
 		Status: dbaasv1.DBInstanceStatus{
-			Phase:             dbaasv1.StatusAvailable,
-			ProvisioningPhase: dbaasv1.PhaseAvailable,
-			LastKnownVMIUID:   "vmi-uid-abc",
-			Resources:         dbaasv1.ResourceRefs{VMName: "pg-orders"},
+			Phase:              dbaasv1.StatusAvailable,
+			ProvisioningPhase:  dbaasv1.PhaseAvailable,
+			ObservedGeneration: 1,
+			LastKnownVMIUID:    "vmi-uid-abc",
+			Resources:          dbaasv1.ResourceRefs{VMName: "pg-orders", DataVolumeName: "pg-orders-data"},
 		},
 	}
-	scheme := runtime.NewScheme()
-	_ = dbaasv1.AddToScheme(scheme)
-	fakeClient := ctrlfake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(inst).
-		WithObjects(inst).
-		Build()
-	r := &DBInstanceReconciler{
-		Client:    fakeClient,
-		Harvester: stub,
-		Recorder:  record.NewFakeRecorder(10),
-	}
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "orders", Namespace: "tenant-a"}}
-	return r, req
+	vm := testVM("pg-orders", "tenant-a") // shaped, runStrategy Always
+	r := newProvisionReconciler(t, stub, inst, vm)
+	r.Recorder = record.NewFakeRecorder(10)
+	return r, ctrl.Request{NamespacedName: types.NamespacedName{Name: "orders", Namespace: "tenant-a"}}
 }
 
 func getInst(t *testing.T, c client.Client) *dbaasv1.DBInstance {
@@ -76,19 +80,41 @@ func getInst(t *testing.T, c client.Client) *dbaasv1.DBInstance {
 	return &inst
 }
 
-// TestStopMovesToProvisioningPhaseStopped verifies reconcileStop writes
-// phase=stopped AND provisioningPhase=Stopped in one step — the KI-005 fix.
-func TestStopMovesToProvisioningPhaseStopped(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
-	r, req := newStopStartReconciler(stub, false)
+// stopConverged drives a running=false fixture through the stop sequence:
+// pass 1 requests the stop; the test simulates the provider effects; pass 2
+// observes full teardown and converges.
+func stopConverged(t *testing.T, r *DBInstanceReconciler, req ctrl.Request, stub *stubHarvester) {
+	t.Helper()
 	ctx := context.Background()
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("reconcile error: %v", err)
+		t.Fatalf("stop reconcile error: %v", err)
 	}
 	if stub.StopVMCalls != 1 {
 		t.Fatalf("StopVM called %d times, want 1", stub.StopVMCalls)
 	}
+	// Visible intermediate progress instead of a premature "stopped".
+	if inst := getInst(t, r.Client); inst.Status.Phase != dbaasv1.StatusStopping {
+		t.Fatalf("Phase after stop request = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopping)
+	}
+
+	// Simulate StopVM's effect and the VMI finishing teardown.
+	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyHalted)
+	stub.readiness = harvester.VMIReadiness{}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("converge reconcile error: %v", err)
+	}
+}
+
+// Port of TestStopMovesToProvisioningPhaseStopped: stopping converges to
+// phase=stopped + provisioningPhase=Stopped (now across observed passes).
+func TestStopConvergesToStopped(t *testing.T) {
+	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
+	r, req := newLifecycleFixture(t, false, stub)
+
+	stopConverged(t, r, req, stub)
+
 	inst := getInst(t, r.Client)
 	if inst.Status.Phase != dbaasv1.StatusStopped {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopped)
@@ -96,22 +122,22 @@ func TestStopMovesToProvisioningPhaseStopped(t *testing.T) {
 	if inst.Status.ProvisioningPhase != dbaasv1.PhaseStopped {
 		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseStopped)
 	}
+	if inst.Status.ObservedGeneration != 2 {
+		t.Fatalf("ObservedGeneration = %d, want 2 (stop observed)", inst.Status.ObservedGeneration)
+	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+		t.Fatal("Ready must not be True on a stopped instance")
+	}
 }
 
-// TestStoppedInstanceIsNotResurrected verifies the RF-1 loop is dead: further
-// reconciles of a stopped instance must not re-enter phaseAvailable, stamp
-// phase=available, or start the VM.
+// Port of TestStoppedInstanceIsNotResurrected (RF-1): idle reconciles of a
+// stopped instance must not restart the VM, re-stop it, or flip the phase.
 func TestStoppedInstanceIsNotResurrected(t *testing.T) {
 	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
-	r, req := newStopStartReconciler(stub, false)
+	r, req := newLifecycleFixture(t, false, stub)
 	ctx := context.Background()
 
-	// First reconcile performs the stop.
-	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("stop reconcile error: %v", err)
-	}
-	// VMI is now gone — this used to make phaseAvailable escalate to a restart.
-	stub.readiness = harvester.VMIReadiness{}
+	stopConverged(t, r, req, stub)
 
 	for i := 0; i < 5; i++ {
 		if _, err := r.Reconcile(ctx, req); err != nil {
@@ -124,25 +150,20 @@ func TestStoppedInstanceIsNotResurrected(t *testing.T) {
 	if stub.StartVMCalls != 0 {
 		t.Fatalf("StartVM called %d times, want 0 (no liveness restart while stopped)", stub.StartVMCalls)
 	}
-	inst := getInst(t, r.Client)
-	if inst.Status.Phase != dbaasv1.StatusStopped {
+	if inst := getInst(t, r.Client); inst.Status.Phase != dbaasv1.StatusStopped {
 		t.Fatalf("Phase = %q after idle reconciles, want %q", inst.Status.Phase, dbaasv1.StatusStopped)
 	}
 }
 
-// TestStartReentersProvisioningChain verifies that flipping running back to
-// true starts the VM and hands off to phaseWaitReady (provisioningPhase=
-// VMCreated) instead of declaring available immediately.
-func TestStartReentersProvisioningChain(t *testing.T) {
+// Port of TestStartReentersProvisioningChain: running=true starts the VM, resets
+// the UID baseline (planned start), and converges to available only after the
+// health gate passes — not immediately.
+func TestStartReentersChainAndConverges(t *testing.T) {
 	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
-	r, req := newStopStartReconciler(stub, false)
+	r, req := newLifecycleFixture(t, false, stub)
 	ctx := context.Background()
 
-	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("stop reconcile error: %v", err)
-	}
-	// VMI finished terminating after the stop.
-	stub.readiness = harvester.VMIReadiness{}
+	stopConverged(t, r, req, stub)
 
 	// User flips running back to true.
 	inst := getInst(t, r.Client)
@@ -161,26 +182,40 @@ func TestStartReentersProvisioningChain(t *testing.T) {
 	if inst.Status.Phase != dbaasv1.StatusStarting {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStarting)
 	}
-	if inst.Status.ProvisioningPhase != dbaasv1.PhaseVMCreated {
-		t.Fatalf("ProvisioningPhase = %q, want %q (re-enter phaseWaitReady)", inst.Status.ProvisioningPhase, dbaasv1.PhaseVMCreated)
-	}
 	if inst.Status.LastKnownVMIUID != "" {
 		t.Fatalf("LastKnownVMIUID = %q, want cleared (planned start must not count as unplanned restart)", inst.Status.LastKnownVMIUID)
 	}
+
+	// Simulate the start subresource flipping runStrategy and the VM coming up.
+	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyAlways)
+	stub.readiness = harvester.VMIReadiness{Running: true, IP: "192.168.40.50", Ready: true, AgentConnected: true, VMIUID: "vmi-uid-new"}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("converge reconcile error: %v", err)
+	}
+	inst = getInst(t, r.Client)
+	if inst.Status.Phase != dbaasv1.StatusAvailable || inst.Status.ProvisioningPhase != dbaasv1.PhaseAvailable {
+		t.Fatalf("phase = %q/%q, want available/Available after health gate", inst.Status.Phase, inst.Status.ProvisioningPhase)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+		t.Fatal("Ready should be True after start converges")
+	}
 }
 
-// TestStartWaitsForVMITeardown verifies reconcileStart does not call StartVM
-// while the previous VMI is still terminating (KubeVirt rejects start while a
-// VMI object exists).
+// Port of TestStartWaitsForVMITeardown: StartVM must not be called while the
+// previous VMI still exists (the start subresource would reject it).
 func TestStartWaitsForVMITeardown(t *testing.T) {
 	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
-	r, req := newStopStartReconciler(stub, false)
+	r, req := newLifecycleFixture(t, false, stub)
 	ctx := context.Background()
 
+	// Stop requested; runStrategy flipped, but the VMI is STILL tearing down.
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("stop reconcile error: %v", err)
 	}
-	// VMI still reports Running (teardown in flight).
+	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyHalted)
+
+	// User immediately flips running back to true.
 	inst := getInst(t, r.Client)
 	inst.Spec.Running = boolPtr(true)
 	if err := r.Update(ctx, inst); err != nil {
@@ -193,10 +228,6 @@ func TestStartWaitsForVMITeardown(t *testing.T) {
 	if stub.StartVMCalls != 0 {
 		t.Fatalf("StartVM called %d times while VMI still running, want 0", stub.StartVMCalls)
 	}
-	inst = getInst(t, r.Client)
-	if inst.Status.Phase != dbaasv1.StatusStopped {
-		t.Fatalf("Phase = %q during teardown wait, want %q", inst.Status.Phase, dbaasv1.StatusStopped)
-	}
 
 	// VMI finishes terminating — next reconcile starts the VM.
 	stub.readiness = harvester.VMIReadiness{}
@@ -208,32 +239,30 @@ func TestStartWaitsForVMITeardown(t *testing.T) {
 	}
 }
 
-// TestPhaseStoppedRecoversStuckStoppingPhase verifies the structural recovery
-// property for the KI-005 trap: even if a legacy instance persisted
-// phase=stopping (which the fixed reconcileStop can no longer produce), the
-// dispatcher reaches phaseStopped via provisioningPhase=Stopped and routes a
-// running=true spec to reconcileStart instead of dead-ending.
-func TestPhaseStoppedRecoversStuckStoppingPhase(t *testing.T) {
-	stub := &stubHarvester{}
-	r, req := newStopStartReconciler(stub, true)
+// Port of TestPhaseStoppedRecoversStuckStoppingPhase: a legacy instance stuck at
+// phase=stopping/provisioningPhase=Stopped with running=true routes through the
+// runner and starts, instead of dead-ending.
+func TestStuckStoppingShapeRecovers(t *testing.T) {
+	stub := &stubHarvester{} // VMI gone
+	r, req := newLifecycleFixture(t, true, stub)
 	ctx := context.Background()
 
-	// Force the historical stuck shape: phase=stopping, provisioningPhase=Stopped.
+	// Force the historical stuck shape.
 	inst := getInst(t, r.Client)
 	inst.Status.Phase = dbaasv1.StatusStopping
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseStopped
 	if err := r.Status().Update(ctx, inst); err != nil {
 		t.Fatalf("status seed: %v", err)
 	}
+	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyHalted)
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("reconcile error: %v", err)
 	}
 	if stub.StartVMCalls != 1 {
-		t.Fatalf("StartVM called %d times, want 1 (phaseStopped must route stuck instance to start)", stub.StartVMCalls)
+		t.Fatalf("StartVM called %d times, want 1 (stuck instance must route to start)", stub.StartVMCalls)
 	}
-	inst = getInst(t, r.Client)
-	if inst.Status.Phase != dbaasv1.StatusStarting {
+	if inst := getInst(t, r.Client); inst.Status.Phase != dbaasv1.StatusStarting {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStarting)
 	}
 }
