@@ -15,31 +15,57 @@
 #   NS       instance namespace                  (required)
 #   ID       DBInstance name — MUST match YAML's metadata.name (required)
 #   YAML     path to the DBInstance manifest     (stage1/stage3/all)
-#   DBNAME   database name for psql checks       (default: value of ID)
-#   PGUSER   master username                     (default: dbadmin)
+#   DBNAME   database name for psql checks       (default: auto-read from the
+#            live DBInstance's spec.dbName; the controller itself only falls
+#            back to the instance name when spec.dbName is unset — see the
+#            dbName default in dbinstance_controller.go — so a YAML with an
+#            explicit dbName: like "orders" is honored automatically)
+#   PGUSER   master username                     (default: auto-read from the
+#            credentials Secret's admin_user)
 #   SKIP_DB=1  skip psql-based data checks (no VLAN reach from this host)
 #   TIMEOUT  seconds to wait for phase changes   (default: 900)
+#
+# Results: every run tees full output to results/<ns>.<id>.log (next to this
+# script) and appends one row to results/summary.tsv — timestamp, ns, id,
+# stage, pass count, fail count, overall result. Useful for showing a
+# multi-run history without digging through terminal scrollback.
 set -uo pipefail
 
 case "${1:-}" in stage1|stage2|stage3|all) ;; *)
   echo "usage: NS=<ns> ID=<name> [YAML=<file>] [SKIP_DB=1] $0 {stage1|stage2|stage3|all}"; exit 2 ;;
 esac
 
+STAGE_ARG="$1"
 NS="${NS:?set NS}"; ID="${ID:?set ID}"
-DBNAME="${DBNAME:-$ID}"
-# PGUSER intentionally left unset here (not defaulted to "dbadmin"): db_exec
-# falls back to the credentials Secret's real admin_user so this works for
-# any masterUsername, not just instances that happen to use the default.
+# DBNAME and PGUSER intentionally left unset here — db_exec auto-resolves
+# both from the live DBInstance / its credentials Secret unless the caller
+# explicitly overrides them (see resolve_dbname and db_exec below).
 TIMEOUT="${TIMEOUT:-900}"
 STATE="/tmp/repave-e2e.${NS}.${ID}.state"
 ANNOT="dbaas.opencloud.wso2.com/repave-trigger=now"
 FAILED=0
+PASS_COUNT=0
+FAIL_COUNT=0
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESULTS_DIR="$SCRIPT_DIR/results"
+mkdir -p "$RESULTS_DIR"
+LOG="$RESULTS_DIR/${NS}.${ID}.log"
+SUMMARY="$RESULTS_DIR/summary.tsv"
+[ -f "$SUMMARY" ] || printf 'timestamp\tns\tid\tstage\tpass\tfail\tresult\n' > "$SUMMARY"
+{ echo; echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) :: $STAGE_ARG ==="; } >> "$LOG"
+exec > >(tee -a "$LOG") 2>&1
 
 # ---------- helpers ----------
 say()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
-pass() { printf '\033[1;32mPASS\033[0m  %s\n' "$*"; }
-fail() { printf '\033[1;31mFAIL\033[0m  %s\n' "$*"; FAILED=1; }
-die()  { printf '\033[1;31mABORT\033[0m %s\n' "$*"; exit 1; }
+pass() { printf '\033[1;32mPASS\033[0m  %s\n' "$*"; PASS_COUNT=$((PASS_COUNT+1)); }
+fail() { printf '\033[1;31mFAIL\033[0m  %s\n' "$*"; FAILED=1; FAIL_COUNT=$((FAIL_COUNT+1)); }
+die()  { printf '\033[1;31mABORT\033[0m %s\n' "$*"; record_summary "ABORT"; exit 1; }
+
+record_summary() { # record_summary <result>
+  printf '%s\t%s\t%s\t%s\t%d\t%d\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$NS" "$ID" "$STAGE_ARG" "$PASS_COUNT" "$FAIL_COUNT" "$1" >> "$SUMMARY"
+}
 
 phase() { kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.provisioningPhase}' 2>/dev/null; }
 
@@ -71,8 +97,18 @@ os_pvcs() { # list this instance's OS disk PVC names (exact or -suffixed)
     grep -E "^pg-${ID}-os(-|$)" || true
 }
 
+resolve_dbname() {
+  # Mirrors the controller's own fallback exactly (dbinstance_controller.go:
+  # dbName := inst.Spec.DBName; if dbName == "" { dbName = id }) — so a YAML
+  # with an explicit dbName (e.g. "orders") resolves correctly instead of
+  # incorrectly assuming the database is named after the instance.
+  local d
+  d=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.spec.dbName}' 2>/dev/null)
+  echo "${d:-$ID}"
+}
+
 db_exec() { # db_exec <sql>  (uses current endpoint + secret)
-  local ep pw user
+  local ep pw user dbname
   ep=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.endpoint.address}')
   # Secret keys are admin_user / admin_password (typed_client.go
   # ensureCredentialsSecret) — NOT "password". PGUSER, if the caller set it
@@ -80,11 +116,12 @@ db_exec() { # db_exec <sql>  (uses current endpoint + secret)
   # this works for any masterUsername, not just the "dbadmin" default.
   user=$(kubectl get secret "pg-${ID}-credentials" -n "$NS" -o jsonpath='{.data.admin_user}' | base64 -d)
   pw=$(kubectl get secret "pg-${ID}-credentials" -n "$NS" -o jsonpath='{.data.admin_password}' | base64 -d)
+  dbname="${DBNAME:-$(resolve_dbname)}"
   [ -n "$ep" ] || { fail "no endpoint address on DBInstance"; return 1; }
   [ -n "$pw" ] || { fail "empty admin_password from secret pg-${ID}-credentials — secret missing/wrong keys?"; return 1; }
   # Server's pg_hba.conf is hostssl-only (cloudinit.go bootstrap.sh); force SSL
   # explicitly instead of relying on libpq's "prefer" negotiation.
-  PGPASSWORD="$pw" PGSSLMODE=require psql -h "$ep" -U "${PGUSER:-$user}" -d "$DBNAME" -tAc "$1" 2>&1
+  PGPASSWORD="$pw" PGSSLMODE=require psql -h "$ep" -U "${PGUSER:-$user}" -d "$dbname" -tAc "$1" 2>&1
 }
 
 apply_yaml() {
@@ -238,7 +275,7 @@ stage3() {
   say "stage3 done"
 }
 
-case "$1" in
+case "$STAGE_ARG" in
   stage1) stage1 ;;
   stage2) stage2 ;;
   stage3) stage3 ;;
@@ -251,5 +288,12 @@ case "$1" in
     ;;
 esac
 
-[ "$FAILED" = "0" ] && { printf '\n\033[1;32mALL CHECKS PASSED\033[0m\n'; exit 0; } \
-  || { printf '\n\033[1;31mSOME CHECKS FAILED\033[0m\n'; exit 1; }
+if [ "$FAILED" = "0" ]; then
+  record_summary "PASS"
+  printf '\n\033[1;32mALL CHECKS PASSED\033[0m (results: %s)\n' "$LOG"
+  exit 0
+else
+  record_summary "FAIL"
+  printf '\n\033[1;31mSOME CHECKS FAILED\033[0m (results: %s)\n' "$LOG"
+  exit 1
+fi
