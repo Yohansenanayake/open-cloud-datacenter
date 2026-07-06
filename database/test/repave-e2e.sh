@@ -78,7 +78,7 @@ stage1() {
   say "T1: provision baseline"
   [ -n "${YAML:-}" ] || die "set YAML=<path to DBInstance manifest>"
   kubectl apply -f "$YAML" || die "apply failed"
-  wait_phase "Available" || die "instance never became Available"
+  wait_phase "available" || die "instance never became Available"
   echo
 
   local pvcs; pvcs=$(os_pvcs)
