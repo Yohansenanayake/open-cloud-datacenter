@@ -25,7 +25,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -65,6 +64,9 @@ var (
 	}
 	vmImageGVR = schema.GroupVersionResource{
 		Group: "harvesterhci.io", Version: "v1beta1", Resource: "virtualmachineimages",
+	}
+	pvcGVR = schema.GroupVersionResource{
+		Group: "", Version: "v1", Resource: "persistentvolumeclaims",
 	}
 )
 
@@ -606,8 +608,30 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 		{serviceGVR, ns, refs.MetricsServiceName},
 		{vmGVR, ns, refs.VMName},
 		{dvGVR, ns, refs.DataVolumeName},
+		{pvcGVR, ns, refs.DataVolumeName},
 		{secretGVR, ns, refs.SecretName},
 		{secretGVR, ns, refs.CloudInitSecretName},
+	}
+	// OS disk cleanup. The original fixed-name DV (pg-<id>-os) is VM-owned and
+	// cascade-deletes with the VM, but revision-suffixed disks from repaves —
+	// and any PVC that outlived its DV (e.g. via CDI claim adoption) — need
+	// explicit deletion. Scan the namespace for this instance's OS disk names;
+	// the exact-or-separator match (isOSDiskName) avoids collisions with
+	// instances whose name shares the prefix.
+	osPrefix := fmt.Sprintf("pg-%s-os", id)
+	osDiskNames := map[string]bool{osPrefix: true}
+	if list, err := c.Dynamic.Resource(pvcGVR).Namespace(ns).List(ctx, metav1.ListOptions{}); err == nil {
+		for i := range list.Items {
+			if name := list.Items[i].GetName(); isOSDiskName(name, osPrefix) {
+				osDiskNames[name] = true
+			}
+		}
+	}
+	for name := range osDiskNames {
+		tasks = append(tasks,
+			deleteTask{dvGVR, ns, name},
+			deleteTask{pvcGVR, ns, name},
+		)
 	}
 
 	var (
@@ -785,19 +809,29 @@ func (c *Client) DeleteDataVolume(ctx context.Context, ns, dvName string) error 
 	return err
 }
 
-// SwapVMOSDisk replaces the os-disk DataVolumeTemplate in the VM spec so the
-// next start uses the new baked image's BackingImage StorageClass. The old
-// DataVolume must already be deleted before calling this.
-func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) error {
+// SwapVMOSDisk replaces the os-disk DataVolumeTemplate in the VM spec with a
+// revision-suffixed one (pg-<id>-os-<rev>) backed by the new image's
+// BackingImage StorageClass, and repoints the os-disk volume at it. It
+// returns the name of the DataVolume it replaced ("" when the VM is already
+// on the target disk) so the caller can delete the old disk afterwards —
+// distinct old/new names are what make the swap race-free.
+//
+// The dynamic client builds VMs with real dataVolumeTemplates (unlike the
+// typed client's Harvester volumeClaimTemplates annotation), so the swap here
+// is a template replacement. NOTE: this client is legacy — kept correct and
+// compiling until it is removed; the typed client is the real implementation.
+func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, error) {
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
 	if err != nil {
-		return fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
+		return "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
 	}
+	osPrefix := fmt.Sprintf("pg-%s-os", instID)
+	newDVName := osDiskNameForImage(instID, imgName)
 	newTemplate := map[string]any{
 		"apiVersion": "cdi.kubevirt.io/v1beta1",
 		"kind":       "DataVolume",
 		"metadata": map[string]any{
-			"name": fmt.Sprintf("pg-%s-os", instID),
+			"name": newDVName,
 			"annotations": map[string]any{
 				"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
 			},
@@ -814,18 +848,71 @@ func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef st
 			},
 		},
 	}
-	patch := map[string]any{
-		"spec": map[string]any{
-			"dataVolumeTemplates": []any{newTemplate},
-		},
-	}
-	patchBytes, err := json.Marshal(patch)
+
+	vm, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("SwapVMOSDisk marshal: %w", err)
+		return "", fmt.Errorf("SwapVMOSDisk: get VM %s/%s: %w", ns, vmName, err)
 	}
-	_, err = c.Dynamic.Resource(vmGVR).Namespace(ns).Patch(
-		ctx, vmName, types.MergePatchType, patchBytes, metav1.PatchOptions{},
-	)
+
+	oldDVName := ""
+	templates, _, _ := unstructured.NestedSlice(vm.Object, "spec", "dataVolumeTemplates")
+	replaced := false
+	for i := range templates {
+		tpl, ok := templates[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(tpl, "metadata", "name")
+		if !isOSDiskName(name, osPrefix) {
+			continue
+		}
+		if name == newDVName {
+			// Already swapped (re-entered after a crash or requeue).
+			return "", nil
+		}
+		oldDVName = name
+		templates[i] = newTemplate
+		replaced = true
+		break
+	}
+	if !replaced {
+		templates = append(templates, newTemplate)
+	}
+	if err := unstructured.SetNestedSlice(vm.Object, templates, "spec", "dataVolumeTemplates"); err != nil {
+		return "", fmt.Errorf("SwapVMOSDisk: set dataVolumeTemplates: %w", err)
+	}
+
+	// Repoint the os-disk volume at the new DataVolume.
+	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
+	for i := range volumes {
+		vol, ok := volumes[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		dv, ok := vol["dataVolume"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := dv["name"].(string); isOSDiskName(name, osPrefix) {
+			dv["name"] = newDVName
+		}
+	}
+	if err := unstructured.SetNestedSlice(vm.Object, volumes, "spec", "template", "spec", "volumes"); err != nil {
+		return "", fmt.Errorf("SwapVMOSDisk: set volumes: %w", err)
+	}
+
+	if _, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Update(ctx, vm, metav1.UpdateOptions{}); err != nil {
+		return "", fmt.Errorf("SwapVMOSDisk: update VM %s/%s: %w", ns, vmName, err)
+	}
+	return oldDVName, nil
+}
+
+// DeletePVC deletes a PersistentVolumeClaim by name, ignoring NotFound.
+func (c *Client) DeletePVC(ctx context.Context, ns, name string) error {
+	err := c.Dynamic.Resource(pvcGVR).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 	return err
 }
 

@@ -499,6 +499,14 @@ func (c *TypedClient) DeployMonitoring(ctx context.Context, id, ns, vmIP string)
 }
 
 func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error {
+	// Disk PVCs are created by Harvester from the VM's volumeClaimTemplates
+	// annotation with no ownerReferences, so deleting the VM does NOT delete
+	// them — they must be deleted explicitly here or they orphan (and a
+	// later same-named DBInstance silently reattaches the old OS disk).
+	// Collect their names from the live VM first; if the VM is already gone,
+	// fall back to the naming conventions.
+	diskPVCs := c.collectDiskPVCNames(ctx, id, ns, refs)
+
 	type deleteTask struct {
 		resource string
 		name     string
@@ -523,6 +531,20 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 		{"secrets", refs.CloudInitSecretName, func() error {
 			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.CloudInitSecretName, metav1.DeleteOptions{})
 		}},
+	}
+	for _, pvcName := range diskPVCs {
+		name := pvcName
+		// Stray DataVolume first: the buggy DVT-based repave may have left a DV
+		// that adopted the PVC; deleting the DV releases/cascades it, and the
+		// direct PVC delete below covers the ownerless case. Both ignore NotFound.
+		tasks = append(tasks,
+			deleteTask{"datavolumes", name, func() error {
+				return c.DeleteDataVolume(ctx, ns, name)
+			}},
+			deleteTask{"persistentvolumeclaims", name, func() error {
+				return c.DeletePVC(ctx, ns, name)
+			}},
+		)
 	}
 
 	var (
@@ -553,6 +575,44 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 	return nil
 }
 
+// collectDiskPVCNames returns every disk PVC name belonging to this instance,
+// deduplicated. Primary source is the live VM's volumeClaimTemplates
+// annotation (authoritative — covers revision-suffixed repave names). If the
+// VM is already gone (teardown retry after partial failure), fall back to the
+// naming conventions: refs.DataVolumeName / pg-<id>-data for the data disk,
+// and a namespace PVC scan for pg-<id>-os / pg-<id>-os-<rev> OS disks,
+// which also sweeps up strays left by repaves that predate this code.
+func (c *TypedClient) collectDiskPVCNames(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) []string {
+	seen := map[string]bool{}
+	if refs.VMName != "" {
+		if vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, refs.VMName, metav1.GetOptions{}); err == nil {
+			if pvcs, err := typedVolumeClaimTemplates(vm); err == nil {
+				for _, p := range pvcs {
+					seen[p.Name] = true
+				}
+			}
+		}
+	}
+	if refs.DataVolumeName != "" {
+		seen[refs.DataVolumeName] = true
+	}
+	seen[fmt.Sprintf("pg-%s-data", id)] = true
+	osPVCPrefix := fmt.Sprintf("pg-%s-os", id)
+	seen[osPVCPrefix] = true
+	if list, err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{}); err == nil {
+		for i := range list.Items {
+			if isOSDiskName(list.Items[i].Name, osPVCPrefix) {
+				seen[list.Items[i].Name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	return names
+}
+
 func (c *TypedClient) ClearDataVolumeOwnerRef(ctx context.Context, ns, dvName string) error {
 	patch := []byte(`{"metadata":{"ownerReferences":[]}}`)
 	_, err := c.CdiClientset.CdiV1beta1().DataVolumes(ns).Patch(
@@ -572,67 +632,133 @@ func (c *TypedClient) DeleteDataVolume(ctx context.Context, ns, dvName string) e
 	return err
 }
 
-func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) error {
+// SwapVMOSDisk points the VM's OS disk at a fresh PVC provisioned from the
+// image referenced by imgRef, and returns the name of the PVC it replaced
+// (empty when the VM is already on the target disk).
+//
+// The typed client builds VMs Harvester-style: disks are plain PVCs declared
+// in the harvesterhci.io/volumeClaimTemplates VM annotation and created —
+// ownerless — by Harvester's VM controller (createPVCsFromAnnotation). There
+// are no dataVolumeTemplates to patch. Reusing the old PVC name is impossible
+// without a race (Harvester recreates any annotation entry whose PVC goes
+// missing), so each repave target gets a revision-suffixed name
+// (pg-<id>-os-v20260615): Harvester provisions the new PVC from the new
+// image's storageClass, and the old PVC is deleted by the caller afterwards.
+// Distinct names mean creation and deletion can never fight over the same
+// object — this is what makes the swap race-free.
+func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, error) {
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
 	if err != nil {
-		return fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
+		return "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
 	}
-	osDVName := fmt.Sprintf("pg-%s-os", instID)
-	newTemplate := map[string]any{
-		"apiVersion": "cdi.kubevirt.io/v1beta1",
-		"kind":       "DataVolume",
-		"metadata": map[string]any{
-			"name": osDVName,
-			"annotations": map[string]any{
-				"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
-			},
-		},
-		"spec": map[string]any{
-			"source": map[string]any{"blank": map[string]any{}},
-			"pvc": map[string]any{
-				"accessModes":      []any{"ReadWriteMany"},
-				"volumeMode":       "Block",
-				"storageClassName": imgSC,
-				"resources": map[string]any{
-					"requests": map[string]any{"storage": "20Gi"},
-				},
-			},
-		},
-	}
+	osPVCPrefix := fmt.Sprintf("pg-%s-os", instID)
+	newPVCName := osDiskNameForImage(instID, imgName)
 
-	// MergePatch replaces arrays entirely, so read the existing dataVolumeTemplates
-	// and preserve any entries beyond the OS disk before patching.
-	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("SwapVMOSDisk: get VM %s/%s: %w", ns, vmName, err)
-	}
-	templates := make([]any, 0, len(vm.Spec.DataVolumeTemplates))
-	replaced := false
-	for i := range vm.Spec.DataVolumeTemplates {
-		if vm.Spec.DataVolumeTemplates[i].Name == osDVName {
-			templates = append(templates, newTemplate)
-			replaced = true
-		} else {
-			templates = append(templates, vm.Spec.DataVolumeTemplates[i])
+	oldPVCName := ""
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
 		}
-	}
-	if !replaced {
-		templates = append(templates, newTemplate)
-	}
+		pvcs, err := typedVolumeClaimTemplates(vm)
+		if err != nil {
+			return err
+		}
 
-	patch := map[string]any{
-		"spec": map[string]any{
-			"dataVolumeTemplates": templates,
-		},
-	}
-	patchBytes, err := json.Marshal(patch)
+		found := false
+		for i := range pvcs {
+			if !isOSDiskName(pvcs[i].Name, osPVCPrefix) {
+				continue
+			}
+			found = true
+			if pvcs[i].Name == newPVCName {
+				// Already swapped (re-entered after a crash or requeue): nothing
+				// to replace, nothing for the caller to delete.
+				oldPVCName = ""
+				return nil
+			}
+			oldPVCName = pvcs[i].Name
+			if pvcs[i].Annotations == nil {
+				pvcs[i].Annotations = map[string]string{}
+			}
+			pvcs[i].Name = newPVCName
+			pvcs[i].Annotations[harvesterbuilder.AnnotationKeyImageID] = fmt.Sprintf("%s/%s", imgNs, imgName)
+			pvcs[i].Spec.StorageClassName = &imgSC
+			break
+		}
+		if !found {
+			return fmt.Errorf("SwapVMOSDisk: no OS disk entry (prefix %s) in %s annotation of VM %s/%s",
+				osPVCPrefix, util.AnnotationVolumeClaimTemplates, ns, vmName)
+		}
+
+		data, err := json.Marshal(pvcs)
+		if err != nil {
+			return fmt.Errorf("SwapVMOSDisk: marshal %s: %w", util.AnnotationVolumeClaimTemplates, err)
+		}
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[util.AnnotationVolumeClaimTemplates] = string(data)
+
+		// Repoint the os-disk volume at the new PVC.
+		for i := range vm.Spec.Template.Spec.Volumes {
+			v := &vm.Spec.Template.Spec.Volumes[i]
+			if v.PersistentVolumeClaim != nil && isOSDiskName(v.PersistentVolumeClaim.ClaimName, osPVCPrefix) {
+				v.PersistentVolumeClaim.ClaimName = newPVCName
+			}
+		}
+
+		// Drop dataVolumeTemplates left behind by the earlier (DVT-based) repave
+		// implementation — nothing references them, and the stray DataVolumes
+		// they spawn adopt whatever PVC holds the OS disk name.
+		if len(vm.Spec.DataVolumeTemplates) > 0 {
+			kept := vm.Spec.DataVolumeTemplates[:0]
+			for i := range vm.Spec.DataVolumeTemplates {
+				if !isOSDiskName(vm.Spec.DataVolumeTemplates[i].Name, osPVCPrefix) {
+					kept = append(kept, vm.Spec.DataVolumeTemplates[i])
+				}
+			}
+			vm.Spec.DataVolumeTemplates = kept
+		}
+
+		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("SwapVMOSDisk marshal: %w", err)
+		return "", err
 	}
-	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Patch(
-		ctx, vmName, types.MergePatchType, patchBytes, metav1.PatchOptions{},
-	)
+	return oldPVCName, nil
+}
+
+// DeletePVC deletes a PersistentVolumeClaim by name. NotFound is success:
+// disk PVCs are created ownerless by Harvester from the volumeClaimTemplates
+// annotation, so explicit deletion is the only way they ever go away.
+func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
+	err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 	return err
+}
+
+// osDiskNameForImage derives the revision-suffixed OS disk name for a repave
+// target image, e.g. ("orders", "ubuntu-2204-postgres-v20260615") →
+// "pg-orders-os-v20260615". Deterministic, so a repave re-entered after a
+// crash resolves to the same name and becomes a no-op instead of another swap.
+func osDiskNameForImage(instID, imgName string) string {
+	rev := imgName
+	if i := strings.LastIndex(imgName, "-"); i >= 0 && i < len(imgName)-1 {
+		rev = imgName[i+1:]
+	}
+	return fmt.Sprintf("pg-%s-os-%s", instID, rev)
+}
+
+// isOSDiskName reports whether name is this instance's OS disk: the original
+// fixed name (pg-<id>-os) or a revision-suffixed repave name
+// (pg-<id>-os-<rev>). The exact-or-separator check keeps instance "orders"
+// from matching the disks of an instance named "orders-os".
+func isOSDiskName(name, osPVCPrefix string) bool {
+	return name == osPVCPrefix || strings.HasPrefix(name, osPVCPrefix+"-")
 }
 
 // Helpers

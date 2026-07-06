@@ -691,17 +691,20 @@ func (r *DBInstanceReconciler) phaseFailed(ctx context.Context, inst *dbaasv1.DB
 // phaseRepave swaps the OS disk for the latest baked image while leaving the
 // pgdata disk untouched. Triggered by the repave-trigger=now annotation.
 //
-// Step 0: Clear pgdata ownerRef (safety — prevents cascade delete if VM CR is patched)
-// Step 1: Stop VM, wait for VMI to disappear
-// Step 2: Delete old OS disk DataVolume
-// Step 3: Resolve new image from catalog
-// Step 4: Patch VM spec with new OS disk DataVolumeTemplate
-// Step 5: Start VM → re-enter phaseWaitReady
-// Step 7: imageRevision + conditions updated in phaseAvailable after ready
+// Step 0: Resolve new image + verify engineVersion (no destructive op before this)
+// Step 1: Clear pgdata ownerRef (safety — prevents cascade delete if VM CR is patched)
+// Step 2: Stop VM, wait for VMI to disappear
+// Step 3: Swap the OS disk to a fresh revision-suffixed disk (pg-<id>-os-<rev>)
+// Step 4: Delete the replaced OS disk (stray DataVolume first, then the PVC)
+// Step 5: Regenerate cloud-init Secret and reattach the cloudinit disk
+// Step 6: Start VM → re-enter phaseWaitReady
+//
+// The old and new OS disks have different names, so Steps 3 and 4 can never
+// race over the same object: Harvester provisions the new disk from the new
+// image while the old one is deleted independently.
 func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	ns := inst.Namespace
 	vmName := inst.Status.Resources.VMName
-	osDVName := fmt.Sprintf("pg-%s-os", inst.Name)
 	pgdataDVName := inst.Status.Resources.DataVolumeName
 
 	inst.Status.Phase = dbaasv1.StatusModifying
@@ -742,19 +745,27 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
 	}
 
-	// Step 3: update the DVT to the new image BEFORE deleting the existing DV.
-	// CDI watches DataVolumes; the instant a DV is deleted it reads the VM's
-	// dataVolumeTemplates to recreate it. If the DVT is still pointing at the old
-	// image at that moment, CDI recreates the DV from the old image. Patching the
-	// DVT first ensures CDI reads the already-updated template on recreation.
-	if err := r.Harvester.SwapVMOSDisk(ctx, ns, vmName, inst.Name, entry.ImageName); err != nil {
+	// Step 3: swap the OS disk to a fresh revision-suffixed disk provisioned
+	// from the new image. Returns the name of the disk it replaced ("" when the
+	// swap already happened on a previous, interrupted pass).
+	oldOSDisk, err := r.Harvester.SwapVMOSDisk(ctx, ns, vmName, inst.Name, entry.ImageName)
+	if err != nil {
 		return r.fail(ctx, inst, "RepaveSwapOSDiskFailed", err)
 	}
 
-	// Step 4: delete old OS disk; DVT is already updated, so CDI recreates the
-	// DV from the new image when the VM starts.
-	if err := r.Harvester.DeleteDataVolume(ctx, ns, osDVName); err != nil {
-		return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
+	// Step 4: remove the replaced OS disk. Stray DataVolume first — repaves
+	// that ran before the annotation-based swap left DVs that adopted the OS
+	// PVC, and deleting the DV releases it — then the PVC itself, which is
+	// otherwise ownerless (Harvester creates annotation-declared PVCs without
+	// ownerReferences, so nothing cascade-deletes them). Both treat NotFound
+	// as success.
+	if oldOSDisk != "" {
+		if err := r.Harvester.DeleteDataVolume(ctx, ns, oldOSDisk); err != nil {
+			return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
+		}
+		if err := r.Harvester.DeletePVC(ctx, ns, oldOSDisk); err != nil {
+			return r.fail(ctx, inst, "RepaveDeleteOSDiskFailed", err)
+		}
 	}
 
 	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]

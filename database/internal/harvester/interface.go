@@ -55,11 +55,19 @@ type ClientInterface interface {
 	ClearDataVolumeOwnerRef(ctx context.Context, ns, dvName string) error
 	// DeleteDataVolume deletes a DataVolume by name. NotFound is treated as success.
 	DeleteDataVolume(ctx context.Context, ns, dvName string) error
-	// SwapVMOSDisk replaces the os-disk DataVolumeTemplate in the VM spec with a
-	// new one backed by the image referenced by imgRef (name or displayName in
-	// namespace default). The storageClass is resolved from the image's own
-	// status.storageClassName, so this works whether the image was uploaded via
-	// kubectl (metadata.name matches) or the Harvester UI (auto-generated name,
-	// displayName matches).
-	SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) error
+	// DeletePVC deletes a PersistentVolumeClaim by name. NotFound is treated as
+	// success. Needed because Harvester creates disk PVCs (from the VM's
+	// volumeClaimTemplates annotation) without ownerReferences, so nothing
+	// cascade-deletes them — explicit deletion is the only way they go away.
+	DeletePVC(ctx context.Context, ns, name string) error
+	// SwapVMOSDisk points the VM's OS disk at a fresh, revision-suffixed disk
+	// (pg-<id>-os-<rev>) provisioned from the image referenced by imgRef (name
+	// or displayName in namespace default). The storageClass is resolved from
+	// the image's own status.storageClassName, so this works whether the image
+	// was uploaded via kubectl (metadata.name matches) or the Harvester UI
+	// (auto-generated name, displayName matches). It returns the name of the
+	// disk it replaced ("" when the VM is already on the target disk) so the
+	// caller can delete the old disk — the two names never collide, which is
+	// what makes the swap race-free.
+	SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (oldDiskName string, err error)
 }
