@@ -525,16 +525,32 @@ var BakedImages = map[string]BakedImageEntry{
 		OSVersion:  "24.04",
 		PGVersions: []string{"15", "16", "17"},
 	},
+	"v20260815": {
+		ImageName:  "ubuntu-2404-postgres-v20260815",
+		OSVersion:  "24.04",
+		PGVersions: []string{"18"}, // 15/16/17 dropped — this is the EOL trigger
+	},
 }
 
-// LatestBakedImages maps OS stream → current validated revision.
+// LatestBakedImages maps OS stream → current validated revision. Exactly ONE
+// entry per OS stream — this is a pointer to the active revision, not a
+// history (that's what BakedImages is for). To publish a new revision for a
+// stream you already have, EDIT that stream's existing entry in place; do not
+// add a second map entry for the same key. Go map literals reject duplicate
+// keys at compile time anyway ("duplicate key ... in map literal"), so this
+// self-enforces — but the failure mode to avoid is reasoning about it as
+// "add a row" when it's really "update the pointer".
+//
 // DefaultOSVersion is read from the BACKING_IMAGE_OS_VERSION operator env var —
 // flip the env var to change the default stream without a code change.
-// Add new streams with Validated: false until testing is complete.
+// Both new-instance provisioning (phaseVM) and drift detection (phaseAvailable)
+// gate on the SAME Validated flag for a stream, so add new streams with
+// Validated: false until the image has been smoke-tested outside the operator
+// (e.g. a VM created directly in Harvester), then flip true — there is no
+// partial state where one path sees it validated and the other doesn't.
 var LatestBakedImages = map[string]BakedImageStream{
 	"22.04": {Revision: "v20260515", Validated: true},
-	"24.04": {Revision: "v20260715", Validated: true},
-	// "24.04": {Revision: "v20261201", Validated: false}, // uncomment when 24.04 stream is ready
+	"24.04": {Revision: "v20260815", Validated: true}, // was v20260715 — bumped for the PG18-only EOL test image
 }
 
 func init() {

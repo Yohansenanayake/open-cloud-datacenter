@@ -6,10 +6,20 @@
 #   NS=tenant-acme ID=test-img-deletion YAML=./test.yaml ./repave-e2e.sh stage1
 #   NS=tenant-acme ID=test-img-deletion                  ./repave-e2e.sh stage2
 #   NS=tenant-acme ID=test-img-deletion YAML=./test.yaml ./repave-e2e.sh stage3
+#   NS=tenant-acme ID=test-img-deletion                  ./repave-e2e.sh stage4
 #   NS=... ID=... YAML=... ./repave-e2e.sh all     # pauses at controller redeploy
 #
 # IMPORTANT: ID must exactly match metadata.name in YAML — the script
 # validates this up front and aborts on mismatch (every assertion keys off ID).
+#
+# stage4 (PG major-version EOL, E1-E3): run against an EXISTING Available
+# instance (no YAML needed — it stays untouched throughout, that's the point).
+# Precondition, done by hand before invoking: publish a new baked image
+# revision whose PGVersions drops the instance's engineVersion, point
+# LatestBakedImages[osStream] at it with Validated: true, and `make deploy`.
+# Not part of `all` — it needs a distinct catalog bump from the plain
+# OS-only bump `all` uses, and it deliberately does not delete/recreate $ID
+# (stage3 does), so it must run before stage3 against the same instance.
 #
 # Env:
 #   NS       instance namespace                  (required)
@@ -31,8 +41,8 @@
 # multi-run history without digging through terminal scrollback.
 set -uo pipefail
 
-case "${1:-}" in stage1|stage2|stage3|all) ;; *)
-  echo "usage: NS=<ns> ID=<name> [YAML=<file>] [SKIP_DB=1] $0 {stage1|stage2|stage3|all}"; exit 2 ;;
+case "${1:-}" in stage1|stage2|stage3|stage4|all) ;; *)
+  echo "usage: NS=<ns> ID=<name> [YAML=<file>] [SKIP_DB=1] $0 {stage1|stage2|stage3|stage4|all}"; exit 2 ;;
 esac
 
 STAGE_ARG="$1"
@@ -141,6 +151,42 @@ check_yaml_matches_id() {
   yns=$(awk '/^metadata:/{m=1;next} m&&/^[^ ]/{m=0} m&&/^  namespace:/{print $2;exit}' "$YAML")
   [ "$yname" = "$ID" ] || die "YAML metadata.name='$yname' but ID='$ID' — set ID=$yname or edit the YAML"
   [ -z "$yns" ] || [ "$yns" = "$NS" ] || die "YAML namespace='$yns' but NS='$NS' — they must match"
+}
+
+provision_probe() { # provision_probe <instance-name> <engineVersion>
+  # Provisions a disposable DBInstance cloned from $ID's own class/storage/
+  # network (so E3 needs no extra YAML input), waits for it to settle into
+  # Available or Failed, and prints "<phase>|<message>". Uses a local `id`
+  # distinct from the global $ID/$STATE/$LOG on purpose — this never touches
+  # the instance under test.
+  local id="$1" engine="$2"
+  local netref class storage
+  netref=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.spec.networkRef}')
+  class=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.spec.dbInstanceClass}')
+  storage=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.spec.allocatedStorage}')
+  cat <<YAML | kubectl apply -f - --validate=false >/dev/null
+apiVersion: dbaas.opencloud.wso2.com/v1alpha1
+kind: DBInstance
+metadata:
+  name: ${id}
+  namespace: ${NS}
+spec:
+  dbInstanceClass: ${class}
+  allocatedStorage: ${storage}
+  engineVersion: "${engine}"
+  dbName: eoltest
+  masterUsername: dbadmin
+  manageMasterUserPassword: true
+  networkRef: ${netref}
+  running: true
+YAML
+  local t=0 p=""
+  while [ $t -lt 180 ]; do
+    p=$(kubectl get dbinstance "$id" -n "$NS" -o jsonpath='{.status.provisioningPhase}' 2>/dev/null)
+    { [ "$p" = "Available" ] || [ "$p" = "Failed" ]; } && break
+    sleep 5; t=$((t+5))
+  done
+  printf '%s|%s' "$p" "$(kubectl get dbinstance "$id" -n "$NS" -o jsonpath='{.status.message}' 2>/dev/null)"
 }
 
 # ---------- stages ----------
@@ -275,10 +321,97 @@ stage3() {
   say "stage3 done"
 }
 
+stage4() {
+  say "E1: drift detection — PGVersionEOL (not OSUpdateAvailable)"
+  local t=0 cond=""
+  while [ $t -lt 300 ]; do
+    cond=$(kubectl get dbinstance "$ID" -n "$NS" \
+      -o jsonpath='{.status.conditions[?(@.type=="PGVersionEOL")].status}' 2>/dev/null)
+    [ "$cond" = "True" ] && break; sleep 10; t=$((t+10))
+  done
+  [ "$cond" = "True" ] && pass "PGVersionEOL=True" \
+    || fail "PGVersionEOL never appeared — did you publish the EOL image revision, point LatestBakedImages at it (Validated: true), and make deploy?"
+  local osupd; osupd=$(kubectl get dbinstance "$ID" -n "$NS" \
+    -o jsonpath='{.status.conditions[?(@.type=="OSUpdateAvailable")].status}' 2>/dev/null)
+  [ "$osupd" != "True" ] && pass "OSUpdateAvailable correctly NOT set — engineVersion is EOL, not just behind" \
+    || fail "OSUpdateAvailable=True but engineVersion is missing from the new image — should be PGVersionEOL instead"
+
+  say "E2: repave is blocked at Step 0 — VM and disk left untouched"
+  local pre_pvc vmname
+  pre_pvc=$(os_pvcs | head -1)
+  vmname=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.resources.vmName}')
+  kubectl annotate dbinstance "$ID" -n "$NS" "$ANNOT" --overwrite || die "annotate failed"
+
+  t=0; local msg=""
+  while [ $t -lt 90 ]; do
+    msg=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.message}' 2>/dev/null)
+    echo "$msg" | grep -q "RepaveBlockedPGVersionEOL" && break
+    sleep 5; t=$((t+5))
+  done
+  echo "$msg" | grep -q "RepaveBlockedPGVersionEOL" && pass "repave blocked before any destructive step: $msg" \
+    || fail "expected RepaveBlockedPGVersionEOL in status.message within 90s, got: $msg"
+
+  local post_pvc post_vmi_phase
+  post_pvc=$(os_pvcs | head -1)
+  [ "$post_pvc" = "$pre_pvc" ] && pass "OS PVC unchanged ($post_pvc) — no disk swap was attempted" \
+    || fail "OS PVC changed ($pre_pvc → $post_pvc) — a blocked repave must not touch storage"
+  post_vmi_phase=$(kubectl get vmi "$vmname" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$post_vmi_phase" = "Running" ] && pass "VMI still Running ($vmname) — VM was never stopped" \
+    || fail "VMI phase = '${post_vmi_phase:-<none>}', expected Running — a blocked repave must not touch the VM"
+
+  # r.fail() never clears the repave-trigger annotation (only the success path
+  # does), so left alone the instance would bounce between Failed (this block)
+  # and Available (failed-recovery reconcile finds a healthy, untouched VM)
+  # forever. Remove it and confirm the instance settles — proof that nothing
+  # was actually broken, just correctly refused.
+  kubectl annotate dbinstance "$ID" -n "$NS" "${ANNOT%=*}-" >/dev/null 2>&1
+  # Manual poll rather than wait_phase: wait_phase's own timeout path already
+  # calls fail() and this must not die() on failure — E3 below is independent
+  # and worth running regardless of whether recovery completed in time.
+  t=0; local recovered=""
+  while [ $t -lt 120 ]; do
+    recovered=$(phase)
+    [ "$recovered" = "Available" ] && break
+    sleep 5; t=$((t+5))
+  done
+  [ "$recovered" = "Available" ] && pass "instance recovered to Available after clearing the annotation" \
+    || fail "instance did not recover to Available after clearing repave-trigger (phase=${recovered:-<none>})"
+
+  say "E3: new-instance rules under the EOL stream"
+  local id_ok="${ID}-eol-pg18" result_ok phase_ok
+  result_ok=$(provision_probe "$id_ok" "18")
+  phase_ok="${result_ok%%|*}"
+  [ "$phase_ok" = "Available" ] && pass "new instance on engineVersion=18 (current stream's version) provisions fine" \
+    || fail "engineVersion=18 instance did not reach Available (phase=$phase_ok): ${result_ok#*|}"
+  kubectl delete dbinstance "$id_ok" -n "$NS" --timeout=120s >/dev/null 2>&1
+
+  local id_bad="${ID}-eol-pg17" result_bad phase_bad msg_bad
+  result_bad=$(provision_probe "$id_bad" "17")
+  phase_bad="${result_bad%%|*}"; msg_bad="${result_bad#*|}"
+  { [ "$phase_bad" = "Failed" ] && echo "$msg_bad" | grep -q "UnsupportedEngineVersion"; } \
+    && pass "new instance on engineVersion=17 (EOL'd out of the stream) correctly rejected: $msg_bad" \
+    || fail "expected Failed/UnsupportedEngineVersion for engineVersion=17, got phase=$phase_bad msg=$msg_bad"
+  kubectl delete dbinstance "$id_bad" -n "$NS" --timeout=120s >/dev/null 2>&1
+
+  say "E4: cross-instance data migration (manual — P008 playbook)"
+  echo "Not automated: this moves data between two independent instances and"
+  echo "needs a human to eyeball row counts, not a scripted assertion. Create a"
+  echo "migration-target instance on the new PG version, then run:"
+  echo
+  echo "  OLD_IP=\$(kubectl get dbinstance $ID -n $NS -o jsonpath='{.status.endpoint.address}')"
+  echo "  NEW_IP=\$(kubectl get dbinstance <new-instance> -n $NS -o jsonpath='{.status.endpoint.address}')"
+  echo "  pg_dumpall -h \$OLD_IP -U $(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.spec.masterUsername}') --globals-only > globals.sql"
+  echo "  pg_dump -h \$OLD_IP -U $(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.spec.masterUsername}') -Fc $(resolve_dbname) > database.dump"
+  echo "  # then psql -f globals.sql and pg_restore against \$NEW_IP — see P008 §2 for the full template"
+
+  say "stage4 done"
+}
+
 case "$STAGE_ARG" in
   stage1) stage1 ;;
   stage2) stage2 ;;
   stage3) stage3 ;;
+  stage4) stage4 ;;
   all)
     stage1
     printf '\n\033[1;33m>> Now edit manager.yaml (new OS stream) and run: make deploy IMG=<img>\n>> Press Enter when the controller rollout is complete...\033[0m'
