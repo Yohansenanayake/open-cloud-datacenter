@@ -712,16 +712,18 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 
 	// Step 0: resolve new image and verify engineVersion BEFORE any destructive
 	// operation. A bad stream config or EOL PG version must be caught here so we
-	// never leave the VM halted without an OS disk.
+	// never leave the VM halted without an OS disk. Both failures use
+	// failBlockedRepave (not fail): the request itself is invalid and re-annotating
+	// won't fix it, so the trigger is cleared instead of silently retrying forever.
 	osVersion := os.Getenv("BACKING_IMAGE_OS_VERSION")
 	stream, ok := dbaasv1.LatestBakedImages[osVersion]
 	if !ok || !stream.Validated {
-		return r.fail(ctx, inst, "InvalidOSStream",
+		return r.failBlockedRepave(ctx, inst, "InvalidOSStream",
 			fmt.Errorf("OS stream %q is not available or not validated", osVersion))
 	}
 	entry := dbaasv1.BakedImages[stream.Revision]
 	if !slices.Contains(entry.PGVersions, inst.Spec.EngineVersion) {
-		return r.fail(ctx, inst, "RepaveBlockedPGVersionEOL",
+		return r.failBlockedRepave(ctx, inst, "RepaveBlockedPGVersionEOL",
 			fmt.Errorf("engineVersion %q is not available in new image %q (available: %v) — "+
 				"migrate data to a supported version before repaving",
 				inst.Spec.EngineVersion, stream.Revision, entry.PGVersions))
@@ -1048,6 +1050,31 @@ func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstanc
 	// Return zero Result: controller-runtime ignores Result when error is
 	// non-nil and applies exponential backoff requeue instead.
 	return ctrl.Result{}, err
+}
+
+// failBlockedRepave fails the reconcile like fail(), but first clears the
+// repave-trigger annotation. Use this only for phaseRepave's Step 0
+// pre-flight guards, where the request itself is invalid (EOL engine
+// version, unvalidated/missing OS stream) — re-annotating won't change the
+// outcome, so retrying automatically on every reconcile is pure noise, and
+// worse, it overwrites this specific failure reason with the generic
+// "repave-trigger requires ProvisioningPhase=Available" message within one
+// reconcile cycle (that message-clobbering guard fires because the
+// annotation is still "now" but ProvisioningPhase has just flipped to
+// Failed). Every other failure path in phaseRepave (stop/swap/start) leaves
+// the annotation in place on purpose, so transient infra errors keep
+// retrying without the operator having to re-annotate.
+//
+// r.Patch overwrites the local inst (including Status) with the server's
+// response, so the annotation must be cleared BEFORE fail() sets the
+// failure Status fields — otherwise the patch would silently discard them.
+func (r *DBInstanceReconciler) failBlockedRepave(ctx context.Context, inst *dbaasv1.DBInstance, reason string, err error) (ctrl.Result, error) {
+	if inst.Annotations != nil {
+		patch := client.RawPatch(types.MergePatchType,
+			[]byte(fmt.Sprintf(`{"metadata":{"annotations":{"%s":null}}}`, AnnotationRepaveTrigger)))
+		_ = r.Patch(ctx, inst, patch)
+	}
+	return r.fail(ctx, inst, reason, err)
 }
 
 func (r *DBInstanceReconciler) statusUpdate(ctx context.Context, inst *dbaasv1.DBInstance) error {

@@ -342,6 +342,11 @@ stage4() {
   vmname=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.resources.vmName}')
   kubectl annotate dbinstance "$ID" -n "$NS" "$ANNOT" --overwrite || die "annotate failed"
 
+  # failBlockedRepave (dbinstance_controller.go) clears repave-trigger on this
+  # exact guard, so this message is now stable — before that fix, the very
+  # next reconcile saw the annotation still "now" but ProvisioningPhase
+  # already Failed, and the OTHER guard overwrote this message with a
+  # generic "requires ProvisioningPhase=Available" within under a second.
   t=0; local msg=""
   while [ $t -lt 90 ]; do
     msg=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.message}' 2>/dev/null)
@@ -359,11 +364,10 @@ stage4() {
   [ "$post_vmi_phase" = "Running" ] && pass "VMI still Running ($vmname) — VM was never stopped" \
     || fail "VMI phase = '${post_vmi_phase:-<none>}', expected Running — a blocked repave must not touch the VM"
 
-  # r.fail() never clears the repave-trigger annotation (only the success path
-  # does), so left alone the instance would bounce between Failed (this block)
-  # and Available (failed-recovery reconcile finds a healthy, untouched VM)
-  # forever. Remove it and confirm the instance settles — proof that nothing
-  # was actually broken, just correctly refused.
+  # failBlockedRepave already cleared the annotation above, so this is now a
+  # harmless no-op kept as a defensive fallback (>/dev/null covers the "already
+  # absent" case). Confirm the instance settles on its own — proof that
+  # nothing was actually broken, just correctly refused.
   kubectl annotate dbinstance "$ID" -n "$NS" "${ANNOT%=*}-" >/dev/null 2>&1
   # Manual poll rather than wait_phase: wait_phase's own timeout path already
   # calls fail() and this must not die() on failure — E3 below is independent
