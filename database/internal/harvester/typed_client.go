@@ -26,13 +26,11 @@ import (
 
 	harvesterbuilder "github.com/harvester/harvester/pkg/builder"
 	"github.com/harvester/harvester/pkg/util"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -178,12 +176,22 @@ func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (v
 	if err != nil {
 		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
 	}
+	vm.OwnerReferences = ownerRefSlice(p.Owner)
 	if _, e := c.Clientset.KubevirtV1().VirtualMachines(p.Namespace).Create(ctx, vm, metav1.CreateOptions{}); e != nil {
 		if err = ignoreAlreadyExists(e); err != nil {
 			return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
 		}
 	}
 	return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
+}
+
+// ownerRefSlice wraps an optional controller owner reference for ObjectMeta
+// assignment (nil in → nil out, leaving OwnerReferences unset).
+func ownerRefSlice(ref *metav1.OwnerReference) []metav1.OwnerReference {
+	if ref == nil {
+		return nil
+	}
+	return []metav1.OwnerReference{*ref}
 }
 
 // ensureCredentialsSecret returns the credential + TLS material for the
@@ -208,7 +216,7 @@ func (c *TypedClient) ensureCredentialsSecret(ctx context.Context, p VMCreatePar
 		tls:        tls,
 	}
 	credSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace, OwnerReferences: ownerRefSlice(p.Owner)},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			"admin_user":        p.MasterUser,
@@ -246,7 +254,7 @@ func (c *TypedClient) ensureCloudInitSecret(ctx context.Context, p VMCreateParam
 		"networkdata": buildNetworkData(p),
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace, OwnerReferences: ownerRefSlice(p.Owner)},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: desired,
 	}
@@ -432,26 +440,6 @@ func (c *TypedClient) RemoveCloudInitDisk(ctx context.Context, ns, vmName string
 }
 
 // Deploy the prometheus monitoring stack. Discussion : Harvester already have Prometheus operator, what to do ?
-func (c *TypedClient) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error) {
-	smName = fmt.Sprintf("pg-%s-monitor", id)
-	svcName = fmt.Sprintf("pg-%s-metrics", id)
-	grafanaURL = fmt.Sprintf("%s/d/dbaas-%s/postgresql-%s", c.GrafanaURL, id, id)
-	promTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, ns)
-	if vmIP == "" {
-		err = fmt.Errorf("monitoring endpoint IP is required")
-		return svcName, smName, grafanaURL, promTarget, err
-	}
-
-	if err = c.createOrUpdateService(ctx, id, ns, svcName); err != nil {
-		return svcName, smName, grafanaURL, promTarget, err
-	}
-	if err = c.createOrUpdateEndpoints(ctx, id, ns, svcName, vmIP); err != nil {
-		return svcName, smName, grafanaURL, promTarget, err
-	}
-	err = c.createOrUpdateServiceMonitor(ctx, id, ns, smName)
-	return svcName, smName, grafanaURL, promTarget, err
-}
-
 func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error {
 	type deleteTask struct {
 		resource string
@@ -695,123 +683,6 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	}
 
 	return vm, nil
-}
-
-func (c *TypedClient) createOrUpdateService(ctx context.Context, id, ns, svcName string) error {
-	desired := typedMonitoringService(id, ns, svcName)
-	if _, err := c.KubeClient.CoreV1().Services(ns).Create(ctx, desired, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	existing, err := c.KubeClient.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	existing.Labels = desired.Labels
-	existing.Spec.Type = desired.Spec.Type
-	existing.Spec.ClusterIP = desired.Spec.ClusterIP
-	existing.Spec.Ports = desired.Spec.Ports
-	existing.Spec.Selector = nil
-	_, err = c.KubeClient.CoreV1().Services(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
-}
-
-func (c *TypedClient) createOrUpdateEndpoints(ctx context.Context, id, ns, svcName, vmIP string) error {
-	desired := typedMonitoringEndpoints(id, ns, svcName, vmIP)
-	if _, err := c.KubeClient.CoreV1().Endpoints(ns).Create(ctx, desired, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	existing, err := c.KubeClient.CoreV1().Endpoints(ns).Get(ctx, svcName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	existing.Labels = desired.Labels
-	existing.Subsets = desired.Subsets
-	_, err = c.KubeClient.CoreV1().Endpoints(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
-}
-
-func (c *TypedClient) createOrUpdateServiceMonitor(ctx context.Context, id, ns, smName string) error {
-	desired := typedServiceMonitor(id, ns, smName)
-	if _, err := c.Clientset.MonitoringV1().ServiceMonitors(ns).Create(ctx, desired, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	existing, err := c.Clientset.MonitoringV1().ServiceMonitors(ns).Get(ctx, smName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	existing.Labels = desired.Labels
-	existing.Spec.Selector = desired.Spec.Selector
-	existing.Spec.Endpoints = desired.Spec.Endpoints
-	_, err = c.Clientset.MonitoringV1().ServiceMonitors(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
-}
-
-func typedMonitoringService(id, ns, svcName string) *corev1.Service {
-	// create a headless service for the Postgres exporter metrics endpoint
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      svcName,
-			Namespace: ns,
-			Labels:    map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelMetrics: "true"},
-		},
-		Spec: corev1.ServiceSpec{
-			Type:      corev1.ServiceTypeClusterIP,
-			ClusterIP: corev1.ClusterIPNone,
-			Ports: []corev1.ServicePort{{
-				Name:       "metrics",
-				Port:       9187,
-				TargetPort: intstr.FromInt(9187),
-				Protocol:   corev1.ProtocolTCP,
-			}},
-		},
-	}
-}
-
-func typedMonitoringEndpoints(id, ns, svcName, vmIP string) *corev1.Endpoints {
-	return &corev1.Endpoints{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Endpoints"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      svcName,
-			Namespace: ns,
-			Labels:    map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelMetrics: "true"},
-		},
-		Subsets: []corev1.EndpointSubset{{
-			Addresses: []corev1.EndpointAddress{{IP: vmIP}},
-			Ports: []corev1.EndpointPort{{
-				Name:     "metrics",
-				Port:     9187,
-				Protocol: corev1.ProtocolTCP,
-			}},
-		}},
-	}
-}
-
-func typedServiceMonitor(id, ns, smName string) *monitoringv1.ServiceMonitor {
-	return &monitoringv1.ServiceMonitor{
-		TypeMeta: metav1.TypeMeta{APIVersion: "monitoring.coreos.com/v1", Kind: "ServiceMonitor"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      smName,
-			Namespace: ns,
-			Labels:    map[string]string{dbaasv1.LabelInstance: id, "release": "prometheus"},
-		},
-		Spec: monitoringv1.ServiceMonitorSpec{
-			Selector: metav1.LabelSelector{
-				MatchLabels: map[string]string{dbaasv1.LabelMetrics: "true", dbaasv1.LabelInstance: id},
-			},
-			Endpoints: []monitoringv1.Endpoint{{
-				Port:     "metrics",
-				Interval: monitoringv1.Duration("15s"),
-				Path:     "/metrics",
-			}},
-		},
-	}
 }
 
 func typedVMNetworkName(namespace, nadName string) string {

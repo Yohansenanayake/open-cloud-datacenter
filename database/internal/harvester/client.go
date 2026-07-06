@@ -135,6 +135,11 @@ type VMCreateParams struct {
 	// otherwise inject unreachable cluster DNS, breaking apt during
 	// cloud-init). Supplied by the control plane (per-VPC CoreDNS address).
 	DNSServerIP string
+	// Owner, when non-nil, is stamped as the controller owner reference on the
+	// same-namespace children this call creates (VM, credentials Secret,
+	// cloud-init Secret) so Owns() watches fire and GC backs up the finalizer
+	// teardown (PR7). Typed client only; the legacy dynamic client ignores it.
+	Owner *metav1.OwnerReference
 }
 
 // VMIReadiness bundles the VMI state fields needed for phase gating and

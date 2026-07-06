@@ -18,19 +18,26 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
-// ensureMonitoring reconciles the per-instance metrics Service/Endpoints/
-// ServiceMonitor via the idempotent DeployMonitoring provider call, pinned to the
-// current endpoint IP. A deploy failure is non-fatal (the database works without
-// monitoring): it is reported via MonitoringReady=False and the step still
-// returns Satisfied so provisioning completes; the next pass retries. PR7 replaces
-// the provider call with ResourceBuilders + owner refs.
+// ensureMonitoring reconciles the per-instance monitoring trio — selectorless
+// metrics Service, manual Endpoints pinned to the current data-net IP, and
+// ServiceMonitor — as builder-managed, controller-owned children (PR7). Owner
+// refs make the Owns(Service/ServiceMonitor) watches live: out-of-band deletion
+// or drift is repaired on the next pass, and GC backs up the finalizer teardown.
+//
+// A deploy failure is non-fatal (the database works without monitoring): it is
+// reported via MonitoringReady=False and the step still returns Satisfied so
+// provisioning completes; the next pass retries. Created/updated results also
+// return Satisfied — the documented §4.1 cheap-same-pass exception (three cached
+// idempotent applies; only the slow VM create must stop the pass).
 func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	// Desired stopped: nothing to scrape; don't deploy against a dead endpoint.
 	if !wantRunning(inst) {
@@ -47,22 +54,26 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 		return pendingAfter("WaitingForEndpoint", msg, healthRequeue)
 	}
 
-	svcName, smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, inst.Name, inst.Namespace, inst.Status.Endpoint.Address)
-	if err != nil {
-		// Track the Service name regardless: DeployMonitoring creates the Service
-		// first, so a partial failure may leave it behind for the finalizer.
-		log.FromContext(ctx).Error(err, "monitoring setup failed (non-fatal)")
-		inst.Status.Resources.MetricsServiceName = svcName
-		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
-			"MonitoringDeployFailed", err.Error())
-		return satisfied()
+	builders := []resource.Builder{
+		resource.MetricsService{Instance: inst},
+		resource.MetricsEndpoints{Instance: inst, VMIP: inst.Status.Endpoint.Address},
+		resource.ServiceMonitor{Instance: inst},
+	}
+	for _, b := range builders {
+		if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, b); err != nil {
+			log.FromContext(ctx).Error(err, "monitoring reconcile failed (non-fatal)")
+			setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+				"MonitoringDeployFailed", err.Error())
+			return satisfied()
+		}
 	}
 
+	svcName := resource.MetricsServiceName(inst)
 	inst.Status.Resources.MetricsServiceName = svcName
-	inst.Status.Resources.ServiceMonitor = smName
-	inst.Status.GrafanaURL = grafanaURL
-	inst.Status.PrometheusTarget = promTarget
+	inst.Status.Resources.ServiceMonitor = resource.ServiceMonitorName(inst)
+	inst.Status.GrafanaURL = fmt.Sprintf("%s/d/dbaas-%s/postgresql-%s", r.GrafanaBaseURL, inst.Name, inst.Name)
+	inst.Status.PrometheusTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, inst.Namespace)
 	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue,
-		"MonitoringDeployed", "metrics Service and ServiceMonitor reconciled")
+		"MonitoringDeployed", "metrics Service, Endpoints, and ServiceMonitor reconciled")
 	return satisfied()
 }

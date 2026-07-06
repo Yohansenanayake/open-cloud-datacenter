@@ -9,7 +9,6 @@ import (
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvesterfake "github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
 	harvesterutil "github.com/harvester/harvester/pkg/util"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -431,53 +430,6 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	if vm.Spec.Template.Spec.Domain.CPU.Cores != 4 || cpuLimit.Cmp(*resource.NewQuantity(4, resource.DecimalSI)) != 0 || memLimit.Cmp(resource.MustParse("8192Mi")) != 0 {
 		t.Fatalf("resized CPU/memory = cores:%d cpuLimit:%s memLimit:%s, want cores:4 cpuLimit:4 memLimit:8192Mi",
 			vm.Spec.Template.Spec.Domain.CPU.Cores, cpuLimit.String(), memLimit.String())
-	}
-}
-
-func TestTypedDeployMonitoringIsIdempotent(t *testing.T) {
-	ctx := context.Background()
-	client := newTestTypedClient()
-	client.GrafanaURL = "https://grafana.example"
-
-	for i := range 2 {
-		svcName, smName, grafanaURL, promTarget, err := client.DeployMonitoring(ctx, "orders", "tenant-a", "192.168.40.50")
-		if err != nil {
-			t.Fatalf("DeployMonitoring call %d returned error: %v", i+1, err)
-		}
-		if svcName != "pg-orders-metrics" || smName != "pg-orders-monitor" {
-			t.Fatalf("unexpected monitoring names: %q %q", svcName, smName)
-		}
-		if grafanaURL != "https://grafana.example/d/dbaas-orders/postgresql-orders" {
-			t.Fatalf("Grafana URL = %q", grafanaURL)
-		}
-		if promTarget != "pg-orders-metrics.tenant-a.svc:9187" {
-			t.Fatalf("Prometheus target = %q", promTarget)
-		}
-	}
-
-	svc, err := client.KubeClient.CoreV1().Services("tenant-a").Get(ctx, "pg-orders-metrics", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get Service: %v", err)
-	}
-	if len(svc.Spec.Selector) != 0 {
-		t.Fatalf("Service selector = %v, want no selector", svc.Spec.Selector)
-	}
-	if svc.Spec.Ports[0].TargetPort.IntVal != 9187 {
-		t.Fatalf("Service targetPort = %v, want 9187", svc.Spec.Ports[0].TargetPort)
-	}
-	ep, err := client.KubeClient.CoreV1().Endpoints("tenant-a").Get(ctx, "pg-orders-metrics", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get Endpoints: %v", err)
-	}
-	if ep.Subsets[0].Addresses[0].IP != "192.168.40.50" {
-		t.Fatalf("Endpoint IP = %q, want 192.168.40.50", ep.Subsets[0].Addresses[0].IP)
-	}
-	sm, err := client.Clientset.MonitoringV1().ServiceMonitors("tenant-a").Get(ctx, "pg-orders-monitor", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get ServiceMonitor: %v", err)
-	}
-	if sm.Spec.Endpoints[0].Interval != monitoringv1.Duration("15s") {
-		t.Fatalf("ServiceMonitor interval = %q, want 15s", sm.Spec.Endpoints[0].Interval)
 	}
 }
 

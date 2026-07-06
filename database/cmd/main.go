@@ -212,6 +212,7 @@ func main() {
 	if err := (&controller.DBInstanceReconciler{
 		Client:                  mgr.GetClient(),
 		Harvester:               hvClient,
+		GrafanaBaseURL:          grafanaURL,
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbinstance")

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/harvester/harvester/pkg/util"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +38,7 @@ import (
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
+	dbresource "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
 // newProvisionInst returns a DBInstance mid-provisioning: valid spec, finalizer
@@ -58,23 +60,29 @@ func newProvisionInst() *dbaasv1.DBInstance {
 	}
 }
 
-// newProvisionReconciler wires a reconciler with the dbaas + KubeVirt schemes so
-// ensureVM can observe VirtualMachine objects through the fake client.
+// newProvisionReconciler wires a reconciler with the dbaas + KubeVirt + core +
+// monitoring schemes so ensureVM can observe VirtualMachine objects and
+// ensureMonitoring can apply its builder-managed children through the fake client.
 func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Object) *DBInstanceReconciler {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := dbaasv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add dbaas scheme: %v", err)
-	}
-	if err := kubevirtv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add kubevirt scheme: %v", err)
+	for _, add := range []func(*runtime.Scheme) error{
+		dbaasv1.AddToScheme, kubevirtv1.AddToScheme, corev1.AddToScheme, monitoringv1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatalf("add scheme: %v", err)
+		}
 	}
 	fakeClient := ctrlfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&dbaasv1.DBInstance{}).
 		WithObjects(objs...).
 		Build()
-	return &DBInstanceReconciler{Client: fakeClient, Harvester: stub}
+	return &DBInstanceReconciler{
+		Client:         fakeClient,
+		Harvester:      stub,
+		GrafanaBaseURL: "https://grafana.example",
+	}
 }
 
 // testVM returns a VirtualMachine shaped the way CreatePostgresVM builds it for
@@ -306,5 +314,23 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	}
 	if got.Status.Endpoint == nil || got.Status.Endpoint.Address != "192.168.40.50" {
 		t.Fatalf("Endpoint = %+v, want address 192.168.40.50", got.Status.Endpoint)
+	}
+
+	// The builder-managed monitoring trio exists, controller-owned (PR7).
+	for _, check := range []struct {
+		name string
+		obj  client.Object
+	}{
+		{dbresource.MetricsServiceName(got), &corev1.Service{}},
+		{dbresource.MetricsServiceName(got), &corev1.Endpoints{}},
+		{dbresource.ServiceMonitorName(got), &monitoringv1.ServiceMonitor{}},
+	} {
+		if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: check.name}, check.obj); err != nil {
+			t.Fatalf("monitoring child %s (%T) missing: %v", check.name, check.obj, err)
+		}
+		refs := check.obj.GetOwnerReferences()
+		if len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
+			t.Fatalf("monitoring child %s owner refs = %+v, want controller-owned by the DBInstance", check.name, refs)
+		}
 	}
 }

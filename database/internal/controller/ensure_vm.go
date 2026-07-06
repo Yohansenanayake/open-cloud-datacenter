@@ -39,6 +39,22 @@ func vmNameFor(inst *dbaasv1.DBInstance) string {
 	return fmt.Sprintf("pg-%s", inst.Name)
 }
 
+// ownerRefFor builds the controller owner reference the provider stamps on the
+// same-namespace children it creates (VM, credentials/cloud-init Secrets). This
+// is what makes the Owns() watches fire for them and lets GC back up the
+// finalizer's explicit teardown.
+func ownerRefFor(inst *dbaasv1.DBInstance) *metav1.OwnerReference {
+	controller := true
+	return &metav1.OwnerReference{
+		APIVersion:         dbaasv1.GroupVersion.String(),
+		Kind:               "DBInstance",
+		Name:               inst.Name,
+		UID:                inst.UID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &controller,
+	}
+}
+
 // ensureVM asserts the VirtualMachine resource exists with the create-time shape.
 // It observes the real VM through the manager client (KubeVirt types are in the
 // scheme since PR1) rather than trusting status.Resources.VMName — so an
@@ -134,6 +150,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		VMPassword:             inst.Spec.VMPassword,
 		StaticNetwork:          inst.Spec.StaticNetwork,
 		DNSServerIP:            inst.Spec.DNSServerIP,
+		Owner:                  ownerRefFor(inst),
 	})
 	// Record resource refs even on partial failure: the names are deterministic
 	// and returned regardless of err, so persisting them lets the finalizer

@@ -60,6 +60,9 @@ type DBInstanceReconciler struct {
 	client.Client
 	Harvester harvester.ClientInterface
 	Recorder  record.EventRecorder
+	// GrafanaBaseURL is the cluster Grafana base used to render per-instance
+	// dashboard links in status (from the --grafana-url flag).
+	GrafanaBaseURL string
 	// MaxConcurrentReconciles bounds how many DBInstances reconcile in parallel.
 	// Reconciles are serialized per object regardless, so raising this only adds
 	// cross-instance parallelism (safe). <1 is treated as 1.

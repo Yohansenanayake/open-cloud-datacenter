@@ -72,6 +72,16 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	if cond.ObservedGeneration != inst.Generation {
 		t.Fatalf("cond ObservedGeneration = %d, want %d", cond.ObservedGeneration, inst.Generation)
 	}
+
+	// PR7: the provider is asked to stamp a controller owner reference on the
+	// children it creates (VM, credentials/cloud-init Secrets).
+	if stub.LastVMCreateParams == nil || stub.LastVMCreateParams.Owner == nil {
+		t.Fatal("VMCreateParams.Owner not set")
+	}
+	owner := stub.LastVMCreateParams.Owner
+	if owner.Kind != "DBInstance" || owner.Name != "orders" || owner.Controller == nil || !*owner.Controller {
+		t.Fatalf("Owner = %+v, want controller ref to the DBInstance", owner)
+	}
 }
 
 func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {

@@ -34,20 +34,18 @@ type stubHarvester struct {
 	stopVMErr          error
 	startVMErr         error
 	createVMErr        error
-	deployMonErr       error
 	removeCloudInitErr error
 	deleteSecretErr    error
 
-	// Optional DeployMonitoring return values; zero values match the legacy
-	// stub behavior so steady-state tests are unaffected.
-	monSvcName, monSMName, monGrafanaURL, monPromTarget string
+	StopVMCalls   int
+	StartVMCalls  int
+	CreateVMCalls int
+	ResizeVMCalls int
+	ResizeDVCalls int
 
-	StopVMCalls           int
-	StartVMCalls          int
-	CreateVMCalls         int
-	DeployMonitoringCalls int
-	ResizeVMCalls         int
-	ResizeDVCalls         int
+	// LastVMCreateParams captures the most recent CreatePostgresVM input so
+	// tests can assert what the controller asked for (e.g. the owner ref).
+	LastVMCreateParams *harvester.VMCreateParams
 
 	// OpsLog records the order of cleanup-relevant calls so tests can assert
 	// sequencing (e.g. cloud-init disk removal MUST precede secret deletion).
@@ -66,6 +64,7 @@ func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ in
 }
 func (s *stubHarvester) CreatePostgresVM(_ context.Context, p harvester.VMCreateParams) (string, string, string, string, error) {
 	s.CreateVMCalls++
+	s.LastVMCreateParams = &p
 	// Names are deterministic and returned even on error, matching the real
 	// client contract ("record refs even on partial failure").
 	return "pg-" + p.ID, "pg-" + p.ID + "-credentials", "pg-" + p.ID + "-cloudinit", "CA-PEM", s.createVMErr
@@ -90,13 +89,6 @@ func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error {
 func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error {
 	s.OpsLog = append(s.OpsLog, "RemoveCloudInitDisk")
 	return s.removeCloudInitErr
-}
-func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (string, string, string, string, error) {
-	s.DeployMonitoringCalls++
-	if s.deployMonErr != nil {
-		return s.monSvcName, "", "", "", s.deployMonErr
-	}
-	return s.monSvcName, s.monSMName, s.monGrafanaURL, s.monPromTarget, nil
 }
 func (s *stubHarvester) TeardownAll(_ context.Context, _, _ string, _ dbaasv1.ResourceRefs) error {
 	return nil

@@ -43,6 +43,9 @@ type ClientInterface interface {
 	// poweroff/restart leaves the VM stuck in Starting with FailedMount.
 	RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error
 
-	DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error)
+	// Monitoring objects (metrics Service/Endpoints, ServiceMonitor) are
+	// builder-managed by the controller since PR7 (internal/resource) — no
+	// provider method. TeardownAll still deletes them by ref as the finalizer's
+	// authoritative cleanup; owner-ref GC is the backup.
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error
 }
