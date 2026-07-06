@@ -26,7 +26,10 @@ case "${1:-}" in stage1|stage2|stage3|all) ;; *)
 esac
 
 NS="${NS:?set NS}"; ID="${ID:?set ID}"
-DBNAME="${DBNAME:-$ID}"; PGUSER="${PGUSER:-dbadmin}"
+DBNAME="${DBNAME:-$ID}"
+# PGUSER intentionally left unset here (not defaulted to "dbadmin"): db_exec
+# falls back to the credentials Secret's real admin_user so this works for
+# any masterUsername, not just instances that happen to use the default.
 TIMEOUT="${TIMEOUT:-900}"
 STATE="/tmp/repave-e2e.${NS}.${ID}.state"
 ANNOT="dbaas.opencloud.wso2.com/repave-trigger=now"
@@ -69,11 +72,19 @@ os_pvcs() { # list this instance's OS disk PVC names (exact or -suffixed)
 }
 
 db_exec() { # db_exec <sql>  (uses current endpoint + secret)
-  local ep pw
+  local ep pw user
   ep=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.endpoint.address}')
-  pw=$(kubectl get secret "pg-${ID}-credentials" -n "$NS" -o jsonpath='{.data.password}' | base64 -d)
+  # Secret keys are admin_user / admin_password (typed_client.go
+  # ensureCredentialsSecret) — NOT "password". PGUSER, if the caller set it
+  # explicitly, wins; otherwise use the actual admin_user from the secret so
+  # this works for any masterUsername, not just the "dbadmin" default.
+  user=$(kubectl get secret "pg-${ID}-credentials" -n "$NS" -o jsonpath='{.data.admin_user}' | base64 -d)
+  pw=$(kubectl get secret "pg-${ID}-credentials" -n "$NS" -o jsonpath='{.data.admin_password}' | base64 -d)
   [ -n "$ep" ] || { fail "no endpoint address on DBInstance"; return 1; }
-  PGPASSWORD="$pw" psql -h "$ep" -U "$PGUSER" -d "$DBNAME" -tAc "$1" 2>&1
+  [ -n "$pw" ] || { fail "empty admin_password from secret pg-${ID}-credentials — secret missing/wrong keys?"; return 1; }
+  # Server's pg_hba.conf is hostssl-only (cloudinit.go bootstrap.sh); force SSL
+  # explicitly instead of relying on libpq's "prefer" negotiation.
+  PGPASSWORD="$pw" PGSSLMODE=require psql -h "$ep" -U "${PGUSER:-$user}" -d "$DBNAME" -tAc "$1" 2>&1
 }
 
 apply_yaml() {
@@ -109,7 +120,12 @@ stage1() {
   kubectl get pvc "pg-${ID}-data" -n "$NS" >/dev/null 2>&1 \
     && pass "data PVC pg-${ID}-data exists" || fail "data PVC missing"
 
-  echo "baseline_os_pvc=$(os_pvcs | head -1)" > "$STATE"
+  local base_pvc; base_pvc=$(os_pvcs | head -1)
+  local base_sc; base_sc=$(kubectl get pvc "$base_pvc" -n "$NS" -o jsonpath='{.spec.storageClassName}' 2>/dev/null)
+  {
+    echo "baseline_os_pvc=$base_pvc"
+    echo "baseline_os_sc=$base_sc"
+  } > "$STATE"
   kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.appliedSpec.imageRevision}' \
     | xargs -I{} sh -c 'echo "baseline_rev={}" >> '"$STATE"
 
@@ -152,12 +168,22 @@ stage2() {
   echo "$new_pvc" | grep -qE "^pg-${ID}-os-." && pass "new name is revision-suffixed" \
     || fail "new PVC not revision-suffixed: $new_pvc"
 
-  local sc rev; sc=$(kubectl get pvc "$new_pvc" -n "$NS" -o jsonpath='{.spec.storageClassName}')
+  local sc rev imgid; sc=$(kubectl get pvc "$new_pvc" -n "$NS" -o jsonpath='{.spec.storageClassName}')
   rev=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.appliedSpec.imageRevision}')
-  echo "   PVC storageClass: $sc | appliedSpec.imageRevision: $rev"
+  imgid=$(kubectl get pvc "$new_pvc" -n "$NS" -o jsonpath='{.metadata.annotations.harvesterhci\.io/imageId}' 2>/dev/null)
+  echo "   PVC storageClass: $sc | imageId: $imgid | appliedSpec.imageRevision: $rev"
   [ "$rev" != "$baseline_rev" ] && pass "imageRevision updated ($baseline_rev → $rev)" || fail "imageRevision unchanged"
-  echo "$sc" | grep -q "$rev" && pass "PVC storageClass matches new revision" \
-    || fail "PVC storageClass ($sc) doesn't reference new revision ($rev) — verify in Harvester UI"
+  # storageClass NAMING is not a stable signal — Harvester auto-generates
+  # names like "longhorn-image-rnrmm" for UI-uploaded images, unrelated to any
+  # revision string (see resolveVMImage in typed_client.go). What actually
+  # proves the disk changed lineage is that the storageClass differs from the
+  # pre-repave baseline; the imageId annotation is the authoritative pointer
+  # to which VirtualMachineImage backs it (cross-check in Harvester UI).
+  [ -n "$sc" ] && [ "$sc" != "$baseline_os_sc" ] \
+    && pass "PVC storageClass changed ($baseline_os_sc → $sc) — new disk lineage confirmed" \
+    || fail "PVC storageClass unchanged ($sc) — disk was not actually reprovisioned from a new image"
+  [ -n "$imgid" ] && pass "PVC carries imageId annotation: $imgid (verify this is the new image in Harvester UI)" \
+    || fail "PVC missing harvesterhci.io/imageId annotation"
 
   [ -z "$(kubectl get dv -n "$NS" -o name 2>/dev/null | grep "pg-${ID}-os")" ] \
     && pass "no stray DataVolumes" || fail "stray DataVolume present"
