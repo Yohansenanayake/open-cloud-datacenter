@@ -3,14 +3,17 @@
 # See P012-repave-testing-guide.md for the test matrix (T1..T10).
 #
 # Usage:
-#   NS=tenant-acme ID=test-repave YAML=./test.yaml ./repave-e2e.sh stage1
-#   NS=tenant-acme ID=test-repave                  ./repave-e2e.sh stage2
-#   NS=tenant-acme ID=test-repave YAML=./test.yaml ./repave-e2e.sh stage3
+#   NS=tenant-acme ID=test-img-deletion YAML=./test.yaml ./repave-e2e.sh stage1
+#   NS=tenant-acme ID=test-img-deletion                  ./repave-e2e.sh stage2
+#   NS=tenant-acme ID=test-img-deletion YAML=./test.yaml ./repave-e2e.sh stage3
 #   NS=... ID=... YAML=... ./repave-e2e.sh all     # pauses at controller redeploy
+#
+# IMPORTANT: ID must exactly match metadata.name in YAML — the script
+# validates this up front and aborts on mismatch (every assertion keys off ID).
 #
 # Env:
 #   NS       instance namespace                  (required)
-#   ID       DBInstance name                     (required)
+#   ID       DBInstance name — MUST match YAML's metadata.name (required)
 #   YAML     path to the DBInstance manifest     (stage1/stage3/all)
 #   DBNAME   database name for psql checks       (default: value of ID)
 #   PGUSER   master username                     (default: dbadmin)
@@ -73,12 +76,32 @@ db_exec() { # db_exec <sql>  (uses current endpoint + secret)
   PGPASSWORD="$pw" psql -h "$ep" -U "$PGUSER" -d "$DBNAME" -tAc "$1" 2>&1
 }
 
+apply_yaml() {
+  # --validate=false: kubectl's client-side validation needs an OpenAPI
+  # download from the apiserver, which fails on some clusters ("proto: cannot
+  # parse invalid wire-format data" — kubectl/apiserver version skew, common
+  # against Harvester). The apiserver still validates server-side.
+  kubectl apply -f "$YAML" --validate=false
+}
+
+check_yaml_matches_id() {
+  # Every assertion below keys off $ID (PVC names, annotate target, secret
+  # name), so the manifest must create exactly that DBInstance or the script
+  # polls a name that never appears and hangs until TIMEOUT.
+  local yname yns
+  yname=$(awk '/^metadata:/{m=1;next} m&&/^[^ ]/{m=0} m&&/^  name:/{print $2;exit}' "$YAML")
+  yns=$(awk '/^metadata:/{m=1;next} m&&/^[^ ]/{m=0} m&&/^  namespace:/{print $2;exit}' "$YAML")
+  [ "$yname" = "$ID" ] || die "YAML metadata.name='$yname' but ID='$ID' — set ID=$yname or edit the YAML"
+  [ -z "$yns" ] || [ "$yns" = "$NS" ] || die "YAML namespace='$yns' but NS='$NS' — they must match"
+}
+
 # ---------- stages ----------
 stage1() {
   say "T1: provision baseline"
   [ -n "${YAML:-}" ] || die "set YAML=<path to DBInstance manifest>"
-  kubectl apply -f "$YAML" || die "apply failed"
-  wait_phase "available" || die "instance never became Available"
+  check_yaml_matches_id
+  apply_yaml || die "apply failed"
+  wait_phase "Available" || die "instance never became Available"
   echo
 
   local pvcs; pvcs=$(os_pvcs)
@@ -171,8 +194,9 @@ stage3() {
 
   say "T10: re-apply same name (old-disk-reattach regression)"
   [ -n "${YAML:-}" ] || die "set YAML=<path to DBInstance manifest>"
+  check_yaml_matches_id
   local before; before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  kubectl apply -f "$YAML" || die "re-apply failed"
+  apply_yaml || die "re-apply failed"
   wait_phase "Available" || die "re-applied instance never became Available"
   echo
 
