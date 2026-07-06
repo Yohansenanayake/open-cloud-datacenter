@@ -95,6 +95,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;delete;update;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;create;update;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 

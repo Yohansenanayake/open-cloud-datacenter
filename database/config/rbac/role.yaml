@@ -24,6 +24,14 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumeclaims
+  verbs:
+  - delete
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - get
@@ -46,6 +54,7 @@ rules:
   - create
   - delete
   - get
+  - patch
   - update
 - apiGroups:
   - dbaas.opencloud.wso2.com
@@ -94,6 +103,7 @@ rules:
   - create
   - delete
   - get
+  - patch
   - update
 - apiGroups:
   - monitoring.coreos.com
