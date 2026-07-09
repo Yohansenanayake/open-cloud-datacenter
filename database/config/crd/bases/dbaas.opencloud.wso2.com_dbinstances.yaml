@@ -70,6 +70,12 @@ spec:
                   backupRetentionPeriod, preferredBackupWindow. These fields exist in
                   the schema for forward compatibility but the reconciler does not
                   apply them. See ARCHITECTURE.md for the roadmap.
+
+              Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
+              vmPassword carry a CEL "self == oldSelf" rule: the other five (osImage,
+              dbName, masterUsername, port, storageType) are compared post-defaulting in
+              immutableDrift(), so a raw CEL rule on them would be stricter than that
+              check — see immutableDrift's doc comment.
             properties:
               allocatedStorage:
                 description: |-
@@ -138,7 +144,11 @@ spec:
                   NOT YET IMPLEMENTED: cloud-init installs whatever PostgreSQL the OS
                   image's apt repo provides (Ubuntu 24.04 → PG 16; older → older). The
                   field is recorded but does not drive package selection.
+                  Immutable after first reconcile.
                 type: string
+                x-kubernetes-validations:
+                - message: engineVersion is immutable after creation
+                  rule: self == oldSelf
               manageMasterUserPassword:
                 description: |-
                   ManageMasterUserPassword: if true, auto-generate the admin password
@@ -191,6 +201,9 @@ spec:
                   Example: "iaas-net/vm-subnet-001".
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
+                x-kubernetes-validations:
+                - message: networkRef is immutable after creation
+                  rule: self == oldSelf
               osImage:
                 description: |-
                   OSImage is the Harvester VirtualMachineImage to clone for the VM's
@@ -273,6 +286,9 @@ spec:
                 - gateway
                 - nameservers
                 type: object
+                x-kubernetes-validations:
+                - message: staticNetwork is immutable after creation
+                  rule: self == oldSelf
               storageType:
                 description: |-
                   StorageType maps to a Longhorn StorageClass. Default "longhorn".
@@ -292,6 +308,9 @@ spec:
                   (ubuntu). For development and debugging only — leave empty in
                   production. Immutable after first reconcile.
                 type: string
+                x-kubernetes-validations:
+                - message: vmPassword is immutable after creation
+                  rule: self == oldSelf
             required:
             - allocatedStorage
             - dbInstanceClass
@@ -320,7 +339,43 @@ spec:
                     type: string
                   port:
                     type: integer
+                  staticNetwork:
+                    description: |-
+                      NetworkConfig is a static IPv4 configuration for the database VM's data
+                      NIC. When set on DBInstanceSpec.StaticNetwork, these values are written
+                      into cloud-init's netplan in place of `dhcp4: true`.
+                    properties:
+                      address:
+                        description: Address is the IPv4 address with CIDR prefix,
+                          e.g. "192.168.40.50/24".
+                        pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}\/(3[0-2]|[12]?\d)$
+                        type: string
+                      gateway:
+                        description: Gateway is the IPv4 default gateway, e.g. "192.168.40.1".
+                        pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$
+                        type: string
+                      nameservers:
+                        description: |-
+                          Nameservers are the DNS server IPs the VM should use. Supply at
+                          least one — cloud-init will fail to resolve apt mirrors without DNS.
+                        items:
+                          type: string
+                        minItems: 1
+                        type: array
+                      searchDomains:
+                        description: SearchDomains are DNS search-domain suffixes.
+                          Optional.
+                        items:
+                          type: string
+                        type: array
+                    required:
+                    - address
+                    - gateway
+                    - nameservers
+                    type: object
                   storageType:
+                    type: string
+                  vmPassword:
                     type: string
                 type: object
               conditions:

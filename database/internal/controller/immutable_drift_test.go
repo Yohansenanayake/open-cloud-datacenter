@@ -74,3 +74,79 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 		t.Fatalf("immutableDrift() = %q, want dbName", drift)
 	}
 }
+
+func TestImmutableDriftDetectsVMPasswordChange(t *testing.T) {
+	inst := &dbaasv1.DBInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
+		Spec: dbaasv1.DBInstanceSpec{
+			DBInstanceClass:  "db.t3.medium",
+			AllocatedStorage: 50,
+			NetworkRef:       "default/vm-network",
+			VMPassword:       "changed",
+		},
+		Status: dbaasv1.DBInstanceStatus{
+			AppliedSpec: &dbaasv1.AppliedSpec{
+				NetworkRef: "default/vm-network",
+				VMPassword: "original",
+			},
+		},
+	}
+
+	if drift := immutableDrift(inst); drift != "vmPassword" {
+		t.Fatalf("immutableDrift() = %q, want vmPassword", drift)
+	}
+}
+
+func TestImmutableDriftDetectsStaticNetworkChange(t *testing.T) {
+	inst := &dbaasv1.DBInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
+		Spec: dbaasv1.DBInstanceSpec{
+			DBInstanceClass:  "db.t3.medium",
+			AllocatedStorage: 50,
+			NetworkRef:       "default/vm-network",
+			StaticNetwork: &dbaasv1.NetworkConfig{
+				Address: "192.168.40.51/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+			},
+		},
+		Status: dbaasv1.DBInstanceStatus{
+			AppliedSpec: &dbaasv1.AppliedSpec{
+				NetworkRef: "default/vm-network",
+				StaticNetwork: &dbaasv1.NetworkConfig{
+					Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+				},
+			},
+		},
+	}
+
+	if drift := immutableDrift(inst); drift != "staticNetwork" {
+		t.Fatalf("immutableDrift() = %q, want staticNetwork", drift)
+	}
+}
+
+// A distinct pointer with an identical value must not be treated as drift —
+// guards against a naive pointer-identity comparison creeping back in.
+func TestImmutableDriftStaticNetworkSameValueDifferentPointerIsNotDrift(t *testing.T) {
+	inst := &dbaasv1.DBInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
+		Spec: dbaasv1.DBInstanceSpec{
+			DBInstanceClass:  "db.t3.medium",
+			AllocatedStorage: 50,
+			NetworkRef:       "default/vm-network",
+			StaticNetwork: &dbaasv1.NetworkConfig{
+				Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+			},
+		},
+		Status: dbaasv1.DBInstanceStatus{
+			AppliedSpec: &dbaasv1.AppliedSpec{
+				NetworkRef: "default/vm-network",
+				StaticNetwork: &dbaasv1.NetworkConfig{
+					Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+				},
+			},
+		},
+	}
+
+	if drift := immutableDrift(inst); drift != "" {
+		t.Fatalf("immutableDrift() = %q, want no drift", drift)
+	}
+}

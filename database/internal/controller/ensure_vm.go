@@ -121,16 +121,12 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		storageType = defaultStorageType
 	}
 
-	// Reserve the deterministic data-disk name. The PVC itself is created by
+	// Record the deterministic data-disk name. The PVC itself is created by
 	// Harvester from the VM's volumeClaimTemplates annotation, so there is no
 	// DataVolume object to observe — the recorded ref is the persisted fact
 	// (allowed: it cannot be reconstructed by observation).
 	if inst.Status.Resources.DataVolumeName == "" {
-		dvName, err := r.Harvester.CreateDataVolume(ctx, inst.Name, inst.Namespace, inst.Spec.AllocatedStorage, storageType)
-		if err != nil {
-			return transient(err)
-		}
-		inst.Status.Resources.DataVolumeName = dvName
+		inst.Status.Resources.DataVolumeName = harvester.DataVolumeName(inst.Name)
 	}
 
 	// Material was already resolved (and its three durable Secrets created)
@@ -198,6 +194,8 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		EngineVersion:  inst.Spec.EngineVersion,
 		Port:           specPort(inst.Spec.Port),
 		StorageType:    storageType,
+		VMPassword:     inst.Spec.VMPassword,
+		StaticNetwork:  inst.Spec.StaticNetwork.DeepCopy(),
 	}
 	setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionFalse,
 		"VMCreated", "created virtualmachine, waiting for it to register")

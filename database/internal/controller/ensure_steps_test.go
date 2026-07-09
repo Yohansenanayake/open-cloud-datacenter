@@ -238,6 +238,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		Ready:   true,
 	}}
 	r := newProvisionReconciler(t, stub, inst)
+	wrapClientForSecretDeleteTracking(t, r, stub, "pg-orders-cloudinit")
 	key := client.ObjectKeyFromObject(inst)
 
 	// Pass 1: no VM observed → create it, stop the pass (event-driven Pending).

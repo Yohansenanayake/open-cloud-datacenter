@@ -3,7 +3,8 @@
 A Kubernetes operator that provisions managed PostgreSQL databases as
 KubeVirt VMs on a Harvester HCI cluster. One `DBInstance` custom resource
 maps to one VM with persistent storage, SSL-only PostgreSQL, an admin
-credentials Secret, and optional Prometheus monitoring.
+credentials Secret plus a password-free connection Secret, and optional
+Prometheus monitoring.
 
 Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
 `kubectl apply` to `psql` round-trip in ~3 minutes.
@@ -44,10 +45,18 @@ Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
   can manage `DBInstance`s in their namespace with no per-tenant wiring.
   Authorization is pure Kubernetes RBAC — there is no separate DBaaS
   login.
-- **Per-instance TLS**: ephemeral CA + server cert generated for each VM
-  and pinned via `status.caCertPem`. `pg_hba.conf` enforces
-  `hostssl … scram-sha-256` only. The master role is created with
-  `CREATEDB`/`CREATEROLE` but **not** `SUPERUSER`.
+- **Per-instance TLS**: ephemeral CA + server cert generated for each VM.
+  The CA's private key and the server key live in a controller-private
+  Secret in the operator namespace (default `dbaas-system`); the public
+  `ca.crt` is pinned via the tenant-facing connection Secret
+  (`pg-<name>-connect`), alongside `host`/`port`/`dbname`/`jdbcUrl`/`sslmode`.
+  `pg_hba.conf` enforces `hostssl … scram-sha-256` only. The master role is
+  created with `CREATEDB`/`CREATEROLE` but **not** `SUPERUSER`.
+- **Credentials Secret model**: the tenant-namespace `pg-<name>-credentials`
+  Secret holds only `admin_user`/`admin_password`. DBaaS-internal operational
+  credentials (`repl_password`, `exporter_password`) and the TLS private
+  material live in two controller-private Secrets in the operator namespace,
+  named from the DBInstance's UID and never exposed to tenants.
 
 ## What's NOT in this version
 

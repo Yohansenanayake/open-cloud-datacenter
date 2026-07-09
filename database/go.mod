@@ -26,8 +26,11 @@ replace (
 require (
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
+	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.82.0
 	k8s.io/apimachinery v0.34.0
 	k8s.io/client-go v12.0.0+incompatible
+	kubevirt.io/api v1.6.0
+	kubevirt.io/client-go v1.6.0
 	sigs.k8s.io/controller-runtime v0.20.4
 )
 
@@ -66,7 +69,6 @@ require (
 	github.com/openshift/custom-resource-status v1.1.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
-	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.82.0 // indirect
 	github.com/rancher/aks-operator v1.11.5 // indirect
 	github.com/rancher/eks-operator v1.11.5 // indirect
 	github.com/rancher/fleet/pkg/apis v0.12.3 // indirect
@@ -89,8 +91,6 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/kube-aggregator v0.33.1 // indirect
 	k8s.io/kubernetes v1.32.2 // indirect
-	kubevirt.io/api v1.6.0 // indirect
-	kubevirt.io/client-go v1.6.0 // indirect
 	kubevirt.io/containerized-data-importer-api v1.62.0 // indirect
 	kubevirt.io/controller-lifecycle-operator-sdk/api v0.0.0-20220329064328-f3cc58c6ed90 // indirect
 	kubevirt.io/kubevirt v1.6.0 // indirect

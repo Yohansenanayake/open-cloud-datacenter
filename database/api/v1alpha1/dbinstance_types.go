@@ -33,6 +33,12 @@ import (
 //     backupRetentionPeriod, preferredBackupWindow. These fields exist in
 //     the schema for forward compatibility but the reconciler does not
 //     apply them. See ARCHITECTURE.md for the roadmap.
+//
+// Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
+// vmPassword carry a CEL "self == oldSelf" rule: the other five (osImage,
+// dbName, masterUsername, port, storageType) are compared post-defaulting in
+// immutableDrift(), so a raw CEL rule on them would be stricter than that
+// check — see immutableDrift's doc comment.
 type DBInstanceSpec struct {
 	// DBInstanceClass maps to VM CPU/RAM. e.g. "db.t3.medium", "db.m5.large".
 	// Mutable: changing the class on an Available instance resizes the VM.
@@ -44,7 +50,9 @@ type DBInstanceSpec struct {
 	// NOT YET IMPLEMENTED: cloud-init installs whatever PostgreSQL the OS
 	// image's apt repo provides (Ubuntu 24.04 → PG 16; older → older). The
 	// field is recorded but does not drive package selection.
+	// Immutable after first reconcile.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engineVersion is immutable after creation"
 	EngineVersion string `json:"engineVersion,omitempty"`
 
 	// DBName is the initial database to create. Default: the instance name.
@@ -163,6 +171,7 @@ type DBInstanceSpec struct {
 	// Example: "iaas-net/vm-subnet-001".
 	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="networkRef is immutable after creation"
 	NetworkRef string `json:"networkRef"`
 
 	// StaticNetwork, when set, configures the VM's data NIC with a static
@@ -172,6 +181,7 @@ type DBInstanceSpec struct {
 	// Immutable after first reconcile (in-VM netplan reconfiguration is not
 	// implemented).
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="staticNetwork is immutable after creation"
 	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
 
 	// DNSServerIP, when set, pins the VM's resolver via KubeVirt
@@ -189,6 +199,7 @@ type DBInstanceSpec struct {
 	// (ubuntu). For development and debugging only — leave empty in
 	// production. Immutable after first reconcile.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="vmPassword is immutable after creation"
 	VMPassword string `json:"vmPassword,omitempty"`
 
 	// S3BackupConfig for pgBackRest S3 target.
@@ -342,6 +353,10 @@ type AppliedSpec struct {
 	Port int `json:"port,omitempty"`
 	// +optional
 	StorageType string `json:"storageType,omitempty"`
+	// +optional
+	VMPassword string `json:"vmPassword,omitempty"`
+	// +optional
+	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
 }
 
 // Endpoint is the network address clients use to reach the database.

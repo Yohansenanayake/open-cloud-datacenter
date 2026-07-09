@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 
@@ -39,6 +38,15 @@ import (
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvesterclientset "github.com/harvester/harvester/pkg/generated/clientset/versioned"
 	kvclientset "kubevirt.io/client-go/kubevirt"
+)
+
+const (
+	vmiPhaseRunning = "Running"
+	// dataNetInterface is the VM's tenant-facing NIC, bridged onto the
+	// Multus NAD from spec.networkRef. Tenant clients (psql / app pods
+	// on the same VLAN) reach the DB through this interface; the
+	// published status.endpoint.address is this interface's IP.
+	dataNetInterface = "data-net"
 )
 
 // TypedClient manages Harvester resources through Harvester's generated
@@ -71,14 +79,6 @@ func NewTypedClient(config *rest.Config, grafanaURL string) (*TypedClient, error
 
 func NewTypedClientWithClientsets(clientset harvesterclientset.Interface, kubeClient kubernetes.Interface, kvClientset kvclientset.Interface, grafanaURL string) *TypedClient {
 	return &TypedClient{Clientset: clientset, KubeClient: kubeClient, KvClientset: kvClientset, GrafanaURL: grafanaURL}
-}
-
-func (c *TypedClient) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error) {
-	dvName := fmt.Sprintf("pg-%s-data", id)
-	// In the Harvester-owned storage path, this phase reserves the deterministic
-	// data disk PVC/template name. The actual PVC is created later by Harvester
-	// from the VM's harvesterhci.io/volumeClaimTemplates annotation.
-	return dvName, nil
 }
 
 func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error {
@@ -188,35 +188,6 @@ func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (V
 	return readiness, nil
 }
 
-// TODO: Not used anymore , clean up later from interface and dynamic client
-func (c *TypedClient) DialVMListener(ctx context.Context, ns, vmName string, port int) error {
-	// Dial VM port 5432 using TCP using management pod network
-	list, err := c.KubeClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("vm.kubevirt.io/name=%s", vmName),
-	})
-	if err != nil {
-		return fmt.Errorf("list launcher pods for %s: %w", vmName, err)
-	}
-	podIP := ""
-	for _, pod := range list.Items {
-		if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
-			podIP = pod.Status.PodIP
-			break
-		}
-	}
-	if podIP == "" {
-		return fmt.Errorf("no Running launcher pod with podIP for VM %s", vmName)
-	}
-	addr := fmt.Sprintf("%s:%d", podIP, port)
-	d := net.Dialer{Timeout: dialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-	_ = conn.Close()
-	return nil
-}
-
 // To align behavior with kubevirt v1.1.1, we set runStrategy to Halted when stopping a VM.
 // see harvester/pkg/api/vm/handler.go 142 for harvester version 1.7.1
 func (c *TypedClient) StopVM(ctx context.Context, ns, vmName string) error {
@@ -259,14 +230,6 @@ func (c *TypedClient) ResizeVM(ctx context.Context, ns, vmName string, cpuCores,
 		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 		return err
 	})
-}
-
-func (c *TypedClient) DeleteSecret(ctx context.Context, ns, name string) error {
-	err := c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, name, metav1.DeleteOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
 }
 
 func (c *TypedClient) RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error {
@@ -427,6 +390,14 @@ func resolveImageStorageClassName(image *harvesterhciov1beta1.VirtualMachineImag
 		image.Namespace, image.Name)
 }
 
+// DataVolumeName is the deterministic name of a DBInstance's data-disk PVC.
+// It's a pure naming convention, not a provider call: the PVC itself is
+// created later by Harvester from the VM's harvesterhci.io/volumeClaimTemplates
+// annotation (see buildPostgresVM below), so there's nothing to reserve up front.
+func DataVolumeName(id string) string {
+	return fmt.Sprintf("pg-%s-data", id)
+}
+
 func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretName, imageID, imageSC string, running bool) (*kubevirtv1.VirtualMachine, error) {
 	annotations := map[string]string{}
 	if c.MgmtLogicalSwitch != "" {
@@ -443,7 +414,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	osPVCName := fmt.Sprintf("pg-%s-os", p.ID)
 	dataPVCName := p.DataVolumeRef
 	if dataPVCName == "" {
-		dataPVCName = fmt.Sprintf("pg-%s-data", p.ID)
+		dataPVCName = DataVolumeName(p.ID)
 	}
 	dataSizeGB := p.DataVolumeSizeGB
 	if dataSizeGB <= 0 {
@@ -577,6 +548,14 @@ func mergeStringMap(base map[string]string, overlay map[string]string) map[strin
 		out[k] = v
 	}
 	return out
+}
+
+// ignoreAlreadyExists returns nil if err is an AlreadyExists API error, otherwise err.
+func ignoreAlreadyExists(err error) error {
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
 }
 
 func ptr[T any](v T) *T {

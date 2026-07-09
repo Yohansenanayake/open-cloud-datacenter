@@ -40,6 +40,7 @@ import (
 	dbaasv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/controller"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/gateway"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -194,11 +195,12 @@ func main() {
 
 	restConfig := ctrl.GetConfigOrDie()
 
-	hvClient, err := newHarvesterClient(restConfig, grafanaURL, mgmtLogicalSwitch)
+	hvClient, err := harvester.NewTypedClient(restConfig, grafanaURL)
 	if err != nil {
 		setupLog.Error(err, "Failed to create Harvester client")
 		os.Exit(1)
 	}
+	hvClient.MgmtLogicalSwitch = mgmtLogicalSwitch
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,

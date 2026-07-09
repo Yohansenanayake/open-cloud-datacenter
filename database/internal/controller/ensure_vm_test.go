@@ -111,6 +111,35 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 }
 
+// VMPassword/StaticNetwork are immutable but had no AppliedSpec coverage at
+// all before PR9 — assert they're snapshotted, and that StaticNetwork is a
+// defensive copy (not aliasing the spec's pointer).
+func TestEnsureVMSnapshotsVMPasswordAndStaticNetwork(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Spec.VMPassword = "s3cr3t"
+	inst.Spec.StaticNetwork = &dbaasv1.NetworkConfig{
+		Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+	}
+	stub := &stubHarvester{}
+	r := newProvisionReconciler(t, stub, inst)
+
+	r.ensureVM(context.Background(), inst)
+
+	a := inst.Status.AppliedSpec
+	if a == nil {
+		t.Fatal("AppliedSpec not snapshotted")
+	}
+	if a.VMPassword != "s3cr3t" {
+		t.Fatalf("AppliedSpec.VMPassword = %q, want s3cr3t", a.VMPassword)
+	}
+	if a.StaticNetwork == nil || a.StaticNetwork.Address != "192.168.40.50/24" {
+		t.Fatalf("AppliedSpec.StaticNetwork = %+v, want copy of spec.StaticNetwork", a.StaticNetwork)
+	}
+	if a.StaticNetwork == inst.Spec.StaticNetwork {
+		t.Fatal("AppliedSpec.StaticNetwork aliases spec.StaticNetwork, want a defensive copy")
+	}
+}
+
 func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{}

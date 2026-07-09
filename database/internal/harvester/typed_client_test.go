@@ -21,6 +21,28 @@ import (
 	kvfake "kubevirt.io/client-go/kubevirt/fake"
 )
 
+// mgmtNetInterface is the legacy dynamic-client's dial-probe NIC name
+// (removed in PR9 along with DialVMListener) — kept here only so the tests
+// below can assert it never appears on a TypedClient-built VM.
+const mgmtNetInterface = "mgmt-net"
+
+func testVMCreateParams() VMCreateParams {
+	return VMCreateParams{
+		ID:                     "orders",
+		Namespace:              "tenant-a",
+		CPUCores:               2,
+		MemoryMB:               4096,
+		OSImage:                "ubuntu-22.04",
+		DataVolumeRef:          "pg-orders-data",
+		DataVolumeSizeGB:       20,
+		DataVolumeStorageClass: "harvester-longhorn",
+		NADName:                "tenant-a/vm-network",
+		MasterUser:             "dbadmin",
+		Port:                   5432,
+		CloudInitSecretName:    "pg-orders-cloudinit",
+	}
+}
+
 func TestTypedCreatePostgresVMFailsOnImageResolutionFailure(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
@@ -34,14 +56,11 @@ func TestTypedCreatePostgresVMFailsOnImageResolutionFailure(t *testing.T) {
 	}
 }
 
-func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemplate(t *testing.T) {
+func TestDataVolumeNameMatchesPVCTemplateAndResizeUpdatesVMTemplate(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(testTypedVMImage())
 
-	dvName, err := client.CreateDataVolume(ctx, "orders", "tenant-a", 10, "harvester-longhorn")
-	if err != nil {
-		t.Fatalf("CreateDataVolume returned error: %v", err)
-	}
+	dvName := DataVolumeName("orders")
 	if dvName != "pg-orders-data" {
 		t.Fatalf("DataVolume name = %q, want pg-orders-data", dvName)
 	}
@@ -392,12 +411,9 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	}
 }
 
-func TestTypedDeleteSecretAndTeardownIgnoreNotFound(t *testing.T) {
+func TestTypedTeardownIgnoresNotFound(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
-	if err := client.DeleteSecret(ctx, "tenant-a", "missing"); err != nil {
-		t.Fatalf("DeleteSecret returned error for missing Secret: %v", err)
-	}
 	err := client.TeardownAll(ctx, "orders", "tenant-a", dbaasv1.ResourceRefs{
 		VMName:              "pg-orders",
 		DataVolumeName:      "pg-orders-data",
