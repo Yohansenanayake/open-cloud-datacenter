@@ -615,15 +615,26 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 	// OS disk cleanup. The original fixed-name DV (pg-<id>-os) is VM-owned and
 	// cascade-deletes with the VM, but revision-suffixed disks from repaves —
 	// and any PVC that outlived its DV (e.g. via CDI claim adoption) — need
-	// explicit deletion. Scan the namespace for this instance's OS disk names;
-	// the exact-or-separator match (isOSDiskName) avoids collisions with
-	// instances whose name shares the prefix.
-	osPrefix := fmt.Sprintf("pg-%s-os", id)
-	osDiskNames := map[string]bool{osPrefix: true}
-	if list, err := c.Dynamic.Resource(pvcGVR).Namespace(ns).List(ctx, metav1.ListOptions{}); err == nil {
-		for i := range list.Items {
-			if name := list.Items[i].GetName(); isOSDiskName(name, osPrefix) {
-				osDiskNames[name] = true
+	// explicit deletion.
+	//
+	// Prefer the exact name the controller recorded in status.resources
+	// (osDiskPVCName): a namespace-wide prefix scan is ambiguous whenever one
+	// instance's name is itself a prefix of another's (e.g. "orders" and
+	// "orders-os" coexisting — "orders"'s prefix "pg-orders-os" is also a
+	// prefix of "orders-os"'s own disk "pg-orders-os-os"). Only fall back to
+	// the scan for instances that predate that field, a shrinking, bounded
+	// legacy case rather than an ongoing exposure.
+	osDiskNames := map[string]bool{}
+	if refs.OSDiskPVCName != "" {
+		osDiskNames[refs.OSDiskPVCName] = true
+	} else {
+		osPrefix := fmt.Sprintf("pg-%s-os", id)
+		osDiskNames[osPrefix] = true
+		if list, err := c.Dynamic.Resource(pvcGVR).Namespace(ns).List(ctx, metav1.ListOptions{}); err == nil {
+			for i := range list.Items {
+				if name := list.Items[i].GetName(); isOSDiskName(name, osPrefix) {
+					osDiskNames[name] = true
+				}
 			}
 		}
 	}
@@ -883,8 +894,13 @@ func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef st
 		return "", "", fmt.Errorf("SwapVMOSDisk: set dataVolumeTemplates: %w", err)
 	}
 
-	// Repoint the os-disk volume at the new DataVolume.
+	// Repoint the os-disk volume at the new DataVolume. The dataVolumeTemplates
+	// edit above is what provisions the new DV, but the VM only boots from
+	// whatever this volume's dataVolume.name says — if no volume matches, that
+	// edit alone would silently leave the VM booting the old disk while this
+	// function reports success. Fail instead of proceeding to Update.
 	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
+	volumeUpdated := false
 	for i := range volumes {
 		vol, ok := volumes[i].(map[string]any)
 		if !ok {
@@ -896,7 +912,12 @@ func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef st
 		}
 		if name, _ := dv["name"].(string); isOSDiskName(name, osPrefix) {
 			dv["name"] = newDVName
+			volumeUpdated = true
 		}
+	}
+	if !volumeUpdated {
+		return "", "", fmt.Errorf("SwapVMOSDisk: no os-disk volume (prefix %s) in spec.template.spec.volumes of VM %s/%s — refusing to update dataVolumeTemplates without repointing the actual boot volume",
+			osPrefix, ns, vmName)
 	}
 	if err := unstructured.SetNestedSlice(vm.Object, volumes, "spec", "template", "spec", "volumes"); err != nil {
 		return "", "", fmt.Errorf("SwapVMOSDisk: set volumes: %w", err)

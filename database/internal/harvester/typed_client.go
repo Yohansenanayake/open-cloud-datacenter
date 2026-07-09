@@ -739,12 +739,22 @@ func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgR
 		}
 		vm.Annotations[util.AnnotationVolumeClaimTemplates] = string(data)
 
-		// Repoint the os-disk volume at the new PVC.
+		// Repoint the os-disk volume at the new PVC. The annotation edit above
+		// is what Harvester actually provisions from, but the VM only boots
+		// from whatever this volume's claimName says — if no volume matches,
+		// the annotation change alone would silently leave the VM booting the
+		// old disk while reporting success. Fail instead of proceeding to Update.
+		volumeUpdated := false
 		for i := range vm.Spec.Template.Spec.Volumes {
 			v := &vm.Spec.Template.Spec.Volumes[i]
 			if v.PersistentVolumeClaim != nil && isOSDiskName(v.PersistentVolumeClaim.ClaimName, osPVCPrefix) {
 				v.PersistentVolumeClaim.ClaimName = newPVCName
+				volumeUpdated = true
 			}
+		}
+		if !volumeUpdated {
+			return fmt.Errorf("SwapVMOSDisk: no os-disk volume (prefix %s) in spec.template.spec.volumes of VM %s/%s — refusing to update annotation without repointing the actual boot volume",
+				osPVCPrefix, ns, vmName)
 		}
 
 		// Drop dataVolumeTemplates left behind by the earlier (DVT-based) repave
