@@ -14,13 +14,42 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package harvester
+package credentials
 
 import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+
+	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
+
+// BootstrapParams is the subset of DBInstance spec/class the guest bootstrap
+// needs — everything cloud-init bakes into bootstrap.env/netplan. VM shape
+// (CPU/mem/image/disks) stays with the Harvester provider and never crosses
+// into this package.
+type BootstrapParams struct {
+	ID             string
+	DBName         string
+	Port           int
+	MasterUser     string
+	MaxConnections int
+	BackupEnabled  bool
+	BackupWindow   string
+	S3Config       *dbaasv1.S3BackupConfig
+	VMPassword     string
+	// StaticNetwork, when non-nil, makes the cloud-init netplan use a
+	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
+	// server.
+	StaticNetwork *dbaasv1.NetworkConfig
+}
+
+// BuildCloudInit renders the cloud-init userdata and networkdata that
+// KubeVirt's cloudInitNoCloud datasource reads from the ephemeral cloud-init
+// Secret (internal/resource.CloudInitSecret).
+func BuildCloudInit(p BootstrapParams, m *Material) (userdata, networkdata string) {
+	return buildUserData(p, m), buildNetworkData(p)
+}
 
 // buildNetworkData returns the cloud-init network-config v2 YAML for the
 // VM's two NICs. KubeVirt's cloudInitNoCloud datasource reads it from
@@ -37,7 +66,7 @@ import (
 //     case the supplied address / gateway / DNS are written as static
 //     config. The data VLAN must have internet connectivity for
 //     cloud-init package installation to succeed.
-func buildNetworkData(p VMCreateParams) string {
+func buildNetworkData(p BootstrapParams) string {
 	if p.StaticNetwork == nil {
 		return `version: 2
 ethernets:
@@ -68,7 +97,7 @@ ethernets:
 	)
 }
 
-func buildCloudInit(p VMCreateParams, adminPw, replPw, exporterPw string, tls *TLSBundle) string {
+func buildUserData(p BootstrapParams, m *Material) string {
 	backupConfig := "# backups disabled"
 	if p.BackupEnabled && p.S3Config != nil {
 		backupConfig = fmt.Sprintf(
@@ -89,9 +118,9 @@ ssh_pwauth: true
 `, p.VMPassword)
 	}
 
-	caCertB64 := base64.StdEncoding.EncodeToString([]byte(tls.CACertPEM))
-	serverCertB64 := base64.StdEncoding.EncodeToString([]byte(tls.ServerCertPEM))
-	serverKeyB64 := base64.StdEncoding.EncodeToString([]byte(tls.ServerKeyPEM))
+	caCertB64 := base64.StdEncoding.EncodeToString([]byte(m.TLS.CACertPEM))
+	serverCertB64 := base64.StdEncoding.EncodeToString([]byte(m.TLS.ServerCertPEM))
+	serverKeyB64 := base64.StdEncoding.EncodeToString([]byte(m.TLS.ServerKeyPEM))
 
 	// Install everything from bootstrap.sh's apt calls rather than relying
 	// on cloud-init's `packages:` module. Minimal cloud images (Ubuntu's
@@ -245,9 +274,9 @@ final_message: "DBaaS bootstrap complete for %s"
 		p.DBName,
 		p.Port,
 		p.MasterUser,
-		adminPw,
-		replPw,
-		exporterPw,
+		m.AdminPassword,
+		m.ReplPassword,
+		m.ExporterPassword,
 		p.MaxConnections,
 		backupConfig,
 		caCertB64,

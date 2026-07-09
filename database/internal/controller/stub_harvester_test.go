@@ -62,12 +62,12 @@ func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ in
 	s.ResizeDVCalls++
 	return nil
 }
-func (s *stubHarvester) CreatePostgresVM(_ context.Context, p harvester.VMCreateParams) (string, string, string, string, error) {
+func (s *stubHarvester) CreatePostgresVM(_ context.Context, p harvester.VMCreateParams) (string, error) {
 	s.CreateVMCalls++
 	s.LastVMCreateParams = &p
-	// Names are deterministic and returned even on error, matching the real
-	// client contract ("record refs even on partial failure").
-	return "pg-" + p.ID, "pg-" + p.ID + "-credentials", "pg-" + p.ID + "-cloudinit", "CA-PEM", s.createVMErr
+	// The name is deterministic and returned even on error, matching the real
+	// client contract ("record the ref even on partial failure").
+	return "pg-" + p.ID, s.createVMErr
 }
 func (s *stubHarvester) DialVMListener(_ context.Context, _, _ string, _ int) error { return nil }
 func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error {

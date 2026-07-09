@@ -52,7 +52,7 @@ func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBIn
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse,
 			"Degraded", "database degraded; see the Degraded condition for attribution")
-		return satisfied() // why satisfied()?
+		return satisfied() // why satisfied()? This step satisfied, nothing else to do.
 	}
 
 	inst.Status.Phase = dbaasv1.StatusAvailable

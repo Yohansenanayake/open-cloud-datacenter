@@ -14,21 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package harvester
+// Package credentials is the durable-material source of truth for a
+// DBInstance's admin/internal passwords and TLS bundle (Phase 0 PR8). Material
+// is resolved — generated at most once, reused forever after — by Resolver,
+// never regenerated inside the Harvester provisioning client: regenerating
+// after a VM has already booted with the old password/CA would diverge from
+// the running instance (verify-ca failures, wrong credentials).
+package credentials
 
 import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"math/big"
 	"net"
 	"time"
 )
 
+// Material is the durable credential + TLS material for one DBInstance.
+type Material struct {
+	AdminUser        string
+	AdminPassword    string
+	ReplPassword     string
+	ExporterPassword string
+	TLS              *TLSBundle
+}
+
 // TLSBundle holds the four PEM-encoded values generated for one DBInstance.
-// CACertPEM and CAKeyPEM are stored in the K8s Secret so the CA can be
+// CACertPEM and CAKeyPEM are stored in the private TLS Secret so the CA can be
 // referenced for future cert rotation. ServerCertPEM and ServerKeyPEM are
 // written into the VM via cloud-init.
 type TLSBundle struct {
@@ -40,8 +56,8 @@ type TLSBundle struct {
 
 // generateTLS creates an ephemeral self-signed CA and a server certificate
 // signed by that CA. commonName is used as the Subject CN for both certs
-// (typically the VM name). All certificates are valid for 10 years; rotation
-// is out of scope for Phase 1.
+// (the VM name). All certificates are valid for 10 years; rotation is future
+// work (see discussion #172).
 func generateTLS(commonName string) (*TLSBundle, error) {
 	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -72,8 +88,8 @@ func generateTLS(commonName string) (*TLSBundle, error) {
 	}
 
 	return &TLSBundle{
-		CACertPEM:     tlsPemEncode("CERTIFICATE", caCertDER),
-		CAKeyPEM:      tlsPemEncodeKey(caKey),
+		CACertPEM:     pemEncode("CERTIFICATE", caCertDER),
+		CAKeyPEM:      pemEncodeKey(caKey),
 		ServerCertPEM: serverCertPEM,
 		ServerKeyPEM:  serverKeyPEM,
 	}, nil
@@ -81,7 +97,7 @@ func generateTLS(commonName string) (*TLSBundle, error) {
 
 // RenewServerCert re-issues the server certificate using the existing CA,
 // adding the supplied IPs as Subject Alternative Names. Call this once the
-// VM's vpc-net IP is known and push the result back into the VM.
+// VM's data-net IP is known and push the result back into the VM.
 func RenewServerCert(caCertPEM, caKeyPEM, commonName string, ips []net.IP) (serverCertPEM, serverKeyPEM string, err error) {
 	caKeyBlock, _ := pem.Decode([]byte(caKeyPEM))
 	caKey, err := x509.ParsePKCS1PrivateKey(caKeyBlock.Bytes)
@@ -119,15 +135,22 @@ func issueServerCert(caCert *x509.Certificate, caKey *rsa.PrivateKey, commonName
 	if err != nil {
 		return
 	}
-	certPEM = tlsPemEncode("CERTIFICATE", serverCertDER)
-	keyPEM = tlsPemEncodeKey(serverKey)
+	certPEM = pemEncode("CERTIFICATE", serverCertDER)
+	keyPEM = pemEncodeKey(serverKey)
 	return
 }
 
-func tlsPemEncode(blockType string, data []byte) string {
+func pemEncode(blockType string, data []byte) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: data}))
 }
 
-func tlsPemEncodeKey(key *rsa.PrivateKey) string {
-	return tlsPemEncode("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key))
+func pemEncodeKey(key *rsa.PrivateKey) string {
+	return pemEncode("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key))
+}
+
+// randomString returns a cryptographically random URL-safe string of length n.
+func randomString(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return base64.URLEncoding.EncodeToString(b)[:n]
 }

@@ -21,17 +21,21 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 )
 
 func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
+	ctx := context.Background()
 	inst := newProvisionInst()
 	stub := &stubHarvester{}
 	r := newProvisionReconciler(t, stub, inst)
 
-	res := r.ensureVM(context.Background(), inst)
+	res := r.ensureVM(ctx, inst)
 
 	if res.Outcome != OutcomePending || res.Reason != "VMCreated" {
 		t.Fatalf("res = %+v, want Pending/VMCreated", res)
@@ -43,16 +47,12 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 		t.Fatalf("CreateVMCalls = %d, want 1", stub.CreateVMCalls)
 	}
 
+	// ensureVM itself only owns VMName/DataVolumeName/CloudInitSecretName;
+	// SecretName/MasterUserSecret are ensureCredentials's job (not exercised
+	// here since we call ensureVM directly).
 	refs := inst.Status.Resources
-	if refs.VMName != "pg-orders" || refs.SecretName != "pg-orders-credentials" ||
-		refs.CloudInitSecretName != "pg-orders-cloudinit" || refs.DataVolumeName != "pg-orders-data" {
+	if refs.VMName != "pg-orders" || refs.CloudInitSecretName != "pg-orders-cloudinit" || refs.DataVolumeName != "pg-orders-data" {
 		t.Fatalf("Resources = %+v, want deterministic pg-orders names", refs)
-	}
-	if inst.Status.CACertPEM != "CA-PEM" {
-		t.Fatalf("CACertPEM = %q", inst.Status.CACertPEM)
-	}
-	if inst.Status.MasterUserSecret == nil || inst.Status.MasterUserSecret.Name != "pg-orders-credentials" {
-		t.Fatalf("MasterUserSecret = %+v", inst.Status.MasterUserSecret)
 	}
 
 	a := inst.Status.AppliedSpec
@@ -74,13 +74,40 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 
 	// PR7: the provider is asked to stamp a controller owner reference on the
-	// children it creates (VM, credentials/cloud-init Secrets).
+	// VM it creates.
 	if stub.LastVMCreateParams == nil || stub.LastVMCreateParams.Owner == nil {
 		t.Fatal("VMCreateParams.Owner not set")
 	}
 	owner := stub.LastVMCreateParams.Owner
 	if owner.Kind != "DBInstance" || owner.Name != "orders" || owner.Controller == nil || !*owner.Controller {
 		t.Fatalf("Owner = %+v, want controller ref to the DBInstance", owner)
+	}
+	if stub.LastVMCreateParams.CloudInitSecretName != "pg-orders-cloudinit" {
+		t.Fatalf("CloudInitSecretName = %q, want pg-orders-cloudinit", stub.LastVMCreateParams.CloudInitSecretName)
+	}
+
+	// PR8: the cloud-init Secret must exist, owner-ref'd, with rendered content
+	// — built from Material that ensureVM resolved as a side effect (its own
+	// step, ensureCredentials, wasn't called in this test).
+	var ci corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ci); err != nil {
+		t.Fatalf("cloud-init secret missing: %v", err)
+	}
+	if ci.StringData["userdata"] == "" || ci.StringData["networkdata"] == "" {
+		t.Fatalf("cloud-init secret has empty userdata/networkdata: %+v", ci.StringData)
+	}
+	if refs := ci.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
+		t.Fatalf("cloud-init secret owner refs = %+v, want controller-owned", refs)
+	}
+
+	// The tenant credentials Secret was created as a side effect of resolving
+	// Material for cloud-init.
+	var cred corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: credentials.TenantCredentialsSecretName(inst)}, &cred); err != nil {
+		t.Fatalf("tenant credentials secret missing: %v", err)
+	}
+	if cred.StringData["admin_password"] == "" {
+		t.Fatal("tenant credentials secret has no admin_password")
 	}
 }
 
@@ -133,9 +160,10 @@ func TestEnsureVMCreateErrorIsTransientAndRecordsRefs(t *testing.T) {
 	if res.Outcome != OutcomeTransient || res.Err == nil {
 		t.Fatalf("res = %+v, want Transient with error", res)
 	}
-	// Refs must be recorded even on failure so TeardownAll can clean up partials.
+	// The VM ref and the already-applied cloud-init Secret ref must be
+	// recorded even on failure so TeardownAll can clean up partials.
 	refs := inst.Status.Resources
-	if refs.VMName == "" || refs.SecretName == "" || refs.CloudInitSecretName == "" {
+	if refs.VMName == "" || refs.CloudInitSecretName == "" {
 		t.Fatalf("Resources = %+v, want refs recorded despite create error", refs)
 	}
 }

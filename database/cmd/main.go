@@ -48,6 +48,16 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// defaultOperatorNamespace resolves the --operator-namespace flag's default:
+// the POD_NAMESPACE downward-API env var (set in config/manager/manager.yaml),
+// falling back to "dbaas-system" for local/dev runs where it's unset.
+func defaultOperatorNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "dbaas-system"
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -69,6 +79,7 @@ func main() {
 	var probeAddr string
 	var gatewayAddr string
 	var grafanaURL string
+	var operatorNamespace string
 	var mgmtLogicalSwitch string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -81,6 +92,10 @@ func main() {
 		"The address the DBInstance REST API gateway binds to.")
 	flag.StringVar(&grafanaURL, "grafana-url", "https://grafana.monitoring.svc",
 		"Base URL of the cluster Grafana instance, used to render per-DBInstance dashboard links.")
+	flag.StringVar(&operatorNamespace, "operator-namespace", defaultOperatorNamespace(),
+		"Namespace for controller-private Secrets (internal DB credentials, TLS material), "+
+			"outside every tenant namespace. Defaults to the POD_NAMESPACE env var (set via the "+
+			"downward API in config/manager/manager.yaml), falling back to \"dbaas-system\".")
 	flag.StringVar(&mgmtLogicalSwitch, "mgmt-logical-switch", "ovn-default",
 		"Kube-OVN logical switch to pin DB VM launcher pods' default (mgmt-net) network to, "+
 			"so the controller can reach the readiness probe across tenant VPCs. "+
@@ -213,6 +228,7 @@ func main() {
 		Client:                  mgr.GetClient(),
 		Harvester:               hvClient,
 		GrafanaBaseURL:          grafanaURL,
+		OperatorNamespace:       operatorNamespace,
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbinstance")

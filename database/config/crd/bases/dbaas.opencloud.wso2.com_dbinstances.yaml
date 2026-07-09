@@ -323,9 +323,6 @@ spec:
                   storageType:
                     type: string
                 type: object
-              caCertPem:
-                description: CACertPEM is the generated CA for SSL verification.
-                type: string
               conditions:
                 description: Conditions for each sub-resource.
                 items:
@@ -468,7 +465,21 @@ spec:
                       the VM reaches Available so the installation script and embedded
                       passwords are not left on-cluster indefinitely.
                     type: string
+                  connectionSecretName:
+                    description: |-
+                      ConnectionSecretName is the tenant-facing Secret with connection
+                      metadata (host/port/dbname/jdbcUrl/sslmode/ca.crt) and no password
+                      material. Lives in the DBInstance's own namespace.
+                    type: string
                   dataVolumeName:
+                    type: string
+                  internalSecretRef:
+                    description: |-
+                      InternalSecretRef is "namespace/name" of the controller-private Secret
+                      holding DBaaS-internal credentials (repl_password, exporter_password).
+                      Namespace-qualified because it lives in the operator namespace, not the
+                      DBInstance's own namespace, and so cannot carry an owner reference —
+                      cleanup is finalizer-driven by this ref plus a UID-label sweep backstop.
                     type: string
                   metricsServiceName:
                     description: |-
@@ -481,6 +492,12 @@ spec:
                       NADName is the Multus NetworkAttachmentDefinition the VM's data NIC
                       attaches to. The controller does not create the NAD; this just records
                       the reference from spec.networkRef so callers can see it on the CR.
+                    type: string
+                  privateTLSSecretRef:
+                    description: |-
+                      PrivateTLSSecretRef is "namespace/name" of the controller-private
+                      Secret holding the CA and server TLS material. Same cross-namespace
+                      cleanup model as InternalSecretRef.
                     type: string
                   secretName:
                     type: string

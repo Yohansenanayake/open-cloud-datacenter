@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"strings"
 	"time"
@@ -63,6 +64,11 @@ type DBInstanceReconciler struct {
 	// GrafanaBaseURL is the cluster Grafana base used to render per-instance
 	// dashboard links in status (from the --grafana-url flag).
 	GrafanaBaseURL string
+	// OperatorNamespace holds the two controller-private Secrets (internal DB
+	// credentials, TLS) — outside every tenant namespace. From the
+	// --operator-namespace flag (default POD_NAMESPACE env, fallback
+	// dbaas-system — see operatorNamespace()).
+	OperatorNamespace string
 	// MaxConcurrentReconciles bounds how many DBInstances reconcile in parallel.
 	// Reconciles are serialized per object regardless, so raising this only adds
 	// cross-instance parallelism (safe). <1 is treated as 1.
@@ -234,8 +240,55 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 	// The tenant namespace is owned by the cluster operator (created during
 	// onboarding) — never delete it. We only remove the resources we created.
 
+	// The two private Secrets (internal DB credentials, TLS) live in the
+	// operator namespace, outside the DBInstance's own namespace, so they
+	// can't carry an owner reference for GC — the finalizer is their only
+	// cleanup path.
+	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
+		inst.Status.Message = fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err)
+		_ = r.statusUpdate(ctx, inst)
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
+	}
+
 	controllerutil.RemoveFinalizer(inst, dbaasv1.FinalizerName)
 	return ctrl.Result{}, r.Update(ctx, inst)
+}
+
+// deleteOperatorSecrets removes the two controller-private, cross-namespace
+// Secrets. It deletes by the recorded ref first, then sweeps the operator
+// namespace by the DBInstance-UID label as a backstop for refs lost to a
+// status reset or created before the ref was recorded — the label is the
+// only durable link once status is gone.
+func (r *DBInstanceReconciler) deleteOperatorSecrets(ctx context.Context, inst *dbaasv1.DBInstance) error {
+	var errs []error
+
+	deleteRef := func(ref string) {
+		ns, name, ok := strings.Cut(ref, "/")
+		if !ok || name == "" {
+			return // If namesapce/name reference is malformed, skip deletion.
+		}
+		sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+		if err := r.Delete(ctx, sec); err != nil && !errors.IsNotFound(err) {
+			errs = append(errs, err)
+		}
+	}
+	deleteRef(inst.Status.Resources.InternalSecretRef)
+	deleteRef(inst.Status.Resources.PrivateTLSSecretRef)
+
+	var list corev1.SecretList
+	if err := r.List(ctx, &list,
+		client.InNamespace(r.operatorNamespace()),
+		client.MatchingLabels{dbaasv1.LabelDBInstanceUID: string(inst.UID)},
+	); err != nil {
+		errs = append(errs, err)
+	} else {
+		for i := range list.Items {
+			if err := r.Delete(ctx, &list.Items[i]); err != nil && !errors.IsNotFound(err) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return goerrors.Join(errs...)
 }
 
 // ============================================================
@@ -262,6 +315,15 @@ func specPort(port int) int {
 		return defaultPort
 	}
 	return port
+}
+
+// operatorNamespace returns the configured operator namespace, defaulting to
+// "dbaas-system" so tests and any deployment that omits the flag still work.
+func (r *DBInstanceReconciler) operatorNamespace() string {
+	if r.OperatorNamespace == "" {
+		return "dbaas-system"
+	}
+	return r.OperatorNamespace
 }
 
 // hasConditionReason reports whether a condition of condType is present, True,

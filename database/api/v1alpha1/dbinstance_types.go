@@ -280,10 +280,6 @@ type DBInstanceStatus struct {
 	// +optional
 	PrometheusTarget string `json:"prometheusTarget,omitempty"`
 
-	// CACertPEM is the generated CA for SSL verification.
-	// +optional
-	CACertPEM string `json:"caCertPem,omitempty"`
-
 	// ReadReplicas tracks child replica identifiers.
 	// +optional
 	ReadReplicas []string `json:"readReplicas,omitempty"`
@@ -393,6 +389,23 @@ type ResourceRefs struct {
 	// can delete it (forgetting it leaves orphan Services in the tenant ns).
 	// +optional
 	MetricsServiceName string `json:"metricsServiceName,omitempty"`
+	// ConnectionSecretName is the tenant-facing Secret with connection
+	// metadata (host/port/dbname/jdbcUrl/sslmode/ca.crt) and no password
+	// material. Lives in the DBInstance's own namespace.
+	// +optional
+	ConnectionSecretName string `json:"connectionSecretName,omitempty"`
+	// InternalSecretRef is "namespace/name" of the controller-private Secret
+	// holding DBaaS-internal credentials (repl_password, exporter_password).
+	// Namespace-qualified because it lives in the operator namespace, not the
+	// DBInstance's own namespace, and so cannot carry an owner reference —
+	// cleanup is finalizer-driven by this ref plus a UID-label sweep backstop.
+	// +optional
+	InternalSecretRef string `json:"internalSecretRef,omitempty"`
+	// PrivateTLSSecretRef is "namespace/name" of the controller-private
+	// Secret holding the CA and server TLS material. Same cross-namespace
+	// cleanup model as InternalSecretRef.
+	// +optional
+	PrivateTLSSecretRef string `json:"privateTLSSecretRef,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -471,6 +484,12 @@ const (
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"
 	LabelRole     = "dbaas.opencloud.wso2.com/role"
 	LabelMetrics  = "dbaas.opencloud.wso2.com/metrics"
+	// LabelDBInstanceUID marks the two controller-private, cross-namespace
+	// Secrets (operator-namespace internal-credentials and TLS Secrets) with
+	// the owning DBInstance's UID. Cross-namespace objects can't carry owner
+	// references, so this label is the backstop cleanup sweep alongside the
+	// recorded ref in status.resources.
+	LabelDBInstanceUID = "dbaas.opencloud.wso2.com/dbinstance-uid"
 
 	// FinalizerName triggers controller-side teardown of Harvester resources.
 	FinalizerName = "dbaas.opencloud.wso2.com/cleanup"

@@ -171,6 +171,15 @@ func TestCrashLoopRecoversWhenHealthyOutOfBand(t *testing.T) {
 	r, req := newLifecycleFixture(t, true, stub)
 	seedCrashLoopPark(t, r)
 	ctx := context.Background()
+	inst := getInst(t, r.Client)
+	inst.Status.LastKnownVMIUID = "vmi-uid-crashed"
+	inst.Status.RecentUnplannedRestarts = crashLoopThreshold
+	inst.Status.RestartCount = crashLoopThreshold
+	now := metav1.Now()
+	inst.Status.LastUnplannedRestartTime = &now
+	if err := r.Status().Update(ctx, inst); err != nil {
+		t.Fatalf("status seed restart history: %v", err)
+	}
 
 	// Operator starts the VM out-of-band and it comes up healthy.
 	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyAlways)
@@ -180,7 +189,7 @@ func TestCrashLoopRecoversWhenHealthyOutOfBand(t *testing.T) {
 		t.Fatalf("recovery reconcile error: %v", err)
 	}
 
-	inst := getInst(t, r.Client)
+	inst = getInst(t, r.Client)
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		t.Fatal("CrashLoopHalted still set after healthy out-of-band recovery")
 	}
@@ -192,6 +201,9 @@ func TestCrashLoopRecoversWhenHealthyOutOfBand(t *testing.T) {
 	}
 	if inst.Status.LastKnownVMIUID != "vmi-uid-recovered" {
 		t.Fatalf("LastKnownVMIUID = %q, want re-baselined to the recovered VMI", inst.Status.LastKnownVMIUID)
+	}
+	if inst.Status.RecentUnplannedRestarts != 0 {
+		t.Fatalf("RecentUnplannedRestarts = %d, want reset after recovery", inst.Status.RecentUnplannedRestarts)
 	}
 	if stub.StopVMCalls != 0 || stub.StartVMCalls != 0 {
 		t.Fatalf("controller VM calls during out-of-band recovery (stop=%d start=%d), want none", stub.StopVMCalls, stub.StartVMCalls)

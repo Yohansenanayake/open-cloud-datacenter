@@ -21,19 +21,16 @@ import (
 	kvfake "kubevirt.io/client-go/kubevirt/fake"
 )
 
-func TestTypedCreatePostgresVMDoesNotCreateSecretWhenImageResolutionFails(t *testing.T) {
+func TestTypedCreatePostgresVMFailsOnImageResolutionFailure(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
 
-	_, credSecretName, cloudInitSecretName, _, err := client.CreatePostgresVM(ctx, testVMCreateParams())
+	vmName, err := client.CreatePostgresVM(ctx, testVMCreateParams())
 	if err == nil {
 		t.Fatalf("CreatePostgresVM returned nil error, want image resolution error")
 	}
-	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("credentials Secret should not exist after image-resolution failure, got: %v", err)
-	}
-	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("cloudinit Secret should not exist after image-resolution failure, got: %v", err)
+	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("VM should not exist after image-resolution failure, got: %v", err)
 	}
 }
 
@@ -50,7 +47,7 @@ func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemp
 	}
 	params := testVMCreateParams()
 	params.DataVolumeRef = dvName
-	if _, _, _, _, err := client.CreatePostgresVM(ctx, params); err != nil {
+	if _, err := client.CreatePostgresVM(ctx, params); err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
 	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
@@ -91,81 +88,42 @@ func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemp
 	}
 }
 
-func TestTypedCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
-	ctx := context.Background()
-	client := newTestTypedClient(testTypedVMImage())
-
-	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := client.CreatePostgresVM(ctx, testVMCreateParams())
-	if err != nil {
-		t.Fatalf("CreatePostgresVM returned error: %v", err)
-	}
-	if vmName != "pg-orders" || credSecretName != "pg-orders-credentials" || cloudInitSecretName != "pg-orders-cloudinit" {
-		t.Fatalf("unexpected names: vm=%q cred=%q cloudinit=%q", vmName, credSecretName, cloudInitSecretName)
-	}
-	if caCertPEM == "" {
-		t.Fatalf("CA cert is empty")
-	}
-
-	credSecret, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get credentials Secret: %v", err)
-	}
-	if credSecret.StringData["ca_cert"] != caCertPEM {
-		t.Fatalf("returned CA does not match Secret CA")
-	}
-	cloudInitSecret, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get cloudinit Secret: %v", err)
-	}
-	if cloudInitSecret.StringData["userdata"] == "" {
-		t.Fatalf("cloudinit Secret has no stringData.userdata")
-	}
-	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("get created VM: %v", err)
-	}
-}
-
-// On re-entry, CreatePostgresVM must reuse the existing credentials material
-// rather than regenerating it — otherwise the returned CA and the cloud-init
-// bootstrap would diverge from the credentials Secret (verify-ca failures /
-// wrong password). This covers the asymmetric partial state where the
-// cloud-init Secret was lost but the credentials Secret survived.
-func TestTypedCreatePostgresVMReusesCredentialMaterialOnReentry(t *testing.T) {
+// CreatePostgresVM no longer generates credentials/cloud-init (PR8 — that
+// moved to internal/credentials + internal/resource; the reuse-on-reentry
+// invariant is now tested there). It only builds the VM against an
+// already-provisioned cloud-init Secret name.
+func TestTypedCreatePostgresVMUsesSuppliedCloudInitSecret(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(testTypedVMImage())
 	params := testVMCreateParams()
 
-	_, credName, ciName, ca1, err := client.CreatePostgresVM(ctx, params)
+	vmName, err := client.CreatePostgresVM(ctx, params)
 	if err != nil {
-		t.Fatalf("first CreatePostgresVM: %v", err)
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
-	cred1, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get credentials Secret: %v", err)
-	}
-	pw1 := cred1.StringData["admin_password"]
-
-	// Simulate the asymmetric partial state: cloud-init gone, credentials kept.
-	if err := client.KubeClient.CoreV1().Secrets("tenant-a").Delete(ctx, ciName, metav1.DeleteOptions{}); err != nil {
-		t.Fatalf("delete cloudinit Secret: %v", err)
+	if vmName != "pg-orders" {
+		t.Fatalf("VM name = %q, want pg-orders", vmName)
 	}
 
-	_, _, _, ca2, err := client.CreatePostgresVM(ctx, params)
+	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("second CreatePostgresVM: %v", err)
+		t.Fatalf("get created VM: %v", err)
 	}
-	if ca2 != ca1 {
-		t.Fatalf("returned CA changed across re-entry: was %q now %q", ca1, ca2)
+	found := false
+	for _, v := range vm.Spec.Template.Spec.Volumes {
+		if v.Name != "cloudinit" || v.CloudInitNoCloud == nil {
+			continue
+		}
+		found = true
+		if v.CloudInitNoCloud.UserDataSecretRef == nil || v.CloudInitNoCloud.UserDataSecretRef.Name != params.CloudInitSecretName {
+			t.Fatalf("UserDataSecretRef = %+v, want %q", v.CloudInitNoCloud.UserDataSecretRef, params.CloudInitSecretName)
+		}
+		if v.CloudInitNoCloud.NetworkDataSecretRef == nil || v.CloudInitNoCloud.NetworkDataSecretRef.Name != params.CloudInitSecretName {
+			t.Fatalf("NetworkDataSecretRef = %+v, want %q", v.CloudInitNoCloud.NetworkDataSecretRef, params.CloudInitSecretName)
+		}
 	}
-	cred2, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get credentials Secret after re-entry: %v", err)
-	}
-	if got := cred2.StringData["admin_password"]; got != pw1 {
-		t.Fatalf("admin_password changed across re-entry: was %q now %q", pw1, got)
-	}
-	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, ciName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("cloudinit Secret not recreated on re-entry: %v", err)
+	if !found {
+		t.Fatal("cloudinit volume not found on VM")
 	}
 }
 
@@ -176,10 +134,11 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	params := testVMCreateParams()
 	params.DNSServerIP = "10.96.0.10/32"
 
-	vmName, _, cloudInitSecretName, _, err := client.CreatePostgresVM(ctx, params)
+	vmName, err := client.CreatePostgresVM(ctx, params)
 	if err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
+	cloudInitSecretName := params.CloudInitSecretName
 	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get created VM: %v", err)

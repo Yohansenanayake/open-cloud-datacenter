@@ -51,17 +51,6 @@ type TypedClient struct {
 	MgmtLogicalSwitch string
 }
 
-// credentialMaterial is the per-instance secret material shared by the
-// credentials Secret (user-facing) and the cloud-init bootstrap (what the VM
-// is actually provisioned with). Both must come from the same generation, so
-// CreatePostgresVM derives them from one source — see ensureCredentialsSecret.
-type credentialMaterial struct {
-	adminPw    string
-	replPw     string
-	exporterPw string
-	tls        *TLSBundle
-}
-
 var _ ClientInterface = (*TypedClient)(nil)
 
 func NewTypedClient(config *rest.Config, grafanaURL string) (*TypedClient, error) {
@@ -143,46 +132,23 @@ func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName s
 	})
 }
 
-func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error) {
+func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error) {
 	vmName = fmt.Sprintf("pg-%s", p.ID)
-	credSecretName = fmt.Sprintf("pg-%s-credentials", p.ID)
-	cloudInitSecretName = fmt.Sprintf("pg-%s-cloudinit", p.ID)
 
-	// Resolve the image first so a bad/missing image fails before we create any
-	// Secrets (no orphans on the most common early failure).
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
 	if err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
+		return vmName, err
 	}
 
-	// Obtain credential + TLS material idempotently. The credentials Secret is
-	// the single source of truth: on a retry where it already exists we reuse
-	// its material instead of regenerating, so the cloud-init Secret and the
-	// returned CA always match what the VM was bootstrapped with. Regenerating
-	// here would silently publish a CA/passwords that diverge from the running
-	// VM (verify-ca failures, wrong credentials) on any partial re-entry.
-	creds, err := c.ensureCredentialsSecret(ctx, p, vmName, credSecretName)
+	vm, err := c.buildPostgresVM(p, vmName, p.CloudInitSecretName, fmt.Sprintf("%s/%s", imgNs, imgName), imgSC, true)
 	if err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
-	}
-	caCertPEM = creds.tls.CACertPEM
-
-	// cloud-init Secret, always derived from the settled material above.
-	if err = c.ensureCloudInitSecret(ctx, p, cloudInitSecretName, creds); err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
-	}
-
-	vm, err := c.buildPostgresVM(p, vmName, cloudInitSecretName, fmt.Sprintf("%s/%s", imgNs, imgName), imgSC, true)
-	if err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
+		return vmName, err
 	}
 	vm.OwnerReferences = ownerRefSlice(p.Owner)
 	if _, e := c.Clientset.KubevirtV1().VirtualMachines(p.Namespace).Create(ctx, vm, metav1.CreateOptions{}); e != nil {
-		if err = ignoreAlreadyExists(e); err != nil {
-			return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
-		}
+		err = ignoreAlreadyExists(e)
 	}
-	return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
+	return vmName, err
 }
 
 // ownerRefSlice wraps an optional controller owner reference for ObjectMeta
@@ -192,115 +158,6 @@ func ownerRefSlice(ref *metav1.OwnerReference) []metav1.OwnerReference {
 		return nil
 	}
 	return []metav1.OwnerReference{*ref}
-}
-
-// ensureCredentialsSecret returns the credential + TLS material for the
-// instance, reusing the existing credentials Secret if present (retry-safe) and
-// otherwise generating fresh material and creating it.
-func (c *TypedClient) ensureCredentialsSecret(ctx context.Context, p VMCreateParams, vmName, name string) (*credentialMaterial, error) {
-	if existing, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
-		return materialFromSecret(existing, p.Namespace, name)
-	} else if !apierrors.IsNotFound(err) {
-		return nil, err
-	}
-
-	// First creation: generate fresh material and persist it.
-	tls, err := generateTLS(vmName)
-	if err != nil {
-		return nil, fmt.Errorf("TLS generation: %w", err)
-	}
-	m := &credentialMaterial{
-		adminPw:    randomString(32),
-		replPw:     randomString(32),
-		exporterPw: randomString(24),
-		tls:        tls,
-	}
-	credSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace, OwnerReferences: ownerRefSlice(p.Owner)},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"admin_user":        p.MasterUser,
-			"admin_password":    m.adminPw,
-			"repl_password":     m.replPw,
-			"exporter_password": m.exporterPw,
-			"ca_cert":           tls.CACertPEM,
-			"ca_key":            tls.CAKeyPEM,
-			"server_cert":       tls.ServerCertPEM,
-			"server_key":        tls.ServerKeyPEM,
-		},
-	}
-	if _, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Create(ctx, credSecret, metav1.CreateOptions{}); err != nil {
-		// Lost a race: created concurrently between our Get and Create. Reuse the winner.
-		// Classic race : TOCTOU (time-of-check-to-time-of-use)
-		if apierrors.IsAlreadyExists(err) {
-			won, gerr := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, name, metav1.GetOptions{})
-			if gerr != nil {
-				return nil, gerr
-			}
-			return materialFromSecret(won, p.Namespace, name)
-		}
-		return nil, err
-	}
-	return m, nil
-}
-
-// ensureCloudInitSecret creates the cloud-init Secret from the given material,
-// or overwrites an existing one so it always matches that material. Overwriting
-// is safe because CreatePostgresVM only runs before the VM exists (phaseVM is
-// guarded by VMName), so the Secret has not been consumed by a boot yet.
-func (c *TypedClient) ensureCloudInitSecret(ctx context.Context, p VMCreateParams, name string, m *credentialMaterial) error {
-	desired := map[string]string{
-		"userdata":    buildCloudInit(p, m.adminPw, m.replPw, m.exporterPw, m.tls),
-		"networkdata": buildNetworkData(p),
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace, OwnerReferences: ownerRefSlice(p.Owner)},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: desired,
-	}
-	if _, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	// Already Exist cloud-init Secret: overwrite to match the credential generated from ensureCredentialsSecret().
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		existing, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		existing.Data = nil
-		existing.StringData = desired
-		_, err = c.KubeClient.CoreV1().Secrets(p.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
-		return err
-	})
-}
-
-// materialFromSecret reconstructs credentialMaterial struct from a persisted
-// credentials Secret. It reads Data (populated by the apiserver) and falls back
-// to StringData (set on a freshly built object, e.g. under the fake client).
-func materialFromSecret(s *corev1.Secret, ns, name string) (*credentialMaterial, error) {
-	get := func(k string) string {
-		if v, ok := s.Data[k]; ok {
-			return string(v)
-		}
-		return s.StringData[k]
-	}
-	m := &credentialMaterial{
-		adminPw:    get("admin_password"),
-		replPw:     get("repl_password"),
-		exporterPw: get("exporter_password"),
-		tls: &TLSBundle{
-			CACertPEM:     get("ca_cert"),
-			CAKeyPEM:      get("ca_key"),
-			ServerCertPEM: get("server_cert"),
-			ServerKeyPEM:  get("server_key"),
-		},
-	}
-	if m.adminPw == "" || m.tls.CACertPEM == "" || m.tls.ServerCertPEM == "" || m.tls.ServerKeyPEM == "" {
-		return nil, fmt.Errorf("credentials secret %s/%s is missing required keys", ns, name)
-	}
-	return m, nil
 }
 
 func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error) {

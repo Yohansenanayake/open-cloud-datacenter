@@ -26,7 +26,9 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
 // vmNameFor returns the deterministic VM name for an instance. It matches the
@@ -87,10 +89,11 @@ func (r *DBInstanceReconciler) ensureVM(ctx context.Context, inst *dbaasv1.DBIns
 }
 
 // createVM closes the observed gap: no VirtualMachine exists, so build one from
-// spec + class via the Harvester client. CreatePostgresVM is idempotent — it
-// ignores AlreadyExists on the VM, reuses existing credential material, and
-// overwrites the not-yet-consumed cloud-init Secret — so re-invoking it after a
-// partial failure or an out-of-band VM delete is safe and preserves credentials.
+// spec + class via the Harvester client. CreatePostgresVM is idempotent (it
+// ignores AlreadyExists on the VM), and the cloud-init Secret it references is
+// rebuilt from durable Material every time this runs — so re-invoking it after
+// a partial failure or an out-of-band VM delete is safe and reproduces the
+// same VM.
 func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
 	if !ok {
@@ -130,7 +133,36 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		inst.Status.Resources.DataVolumeName = dvName
 	}
 
-	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := r.Harvester.CreatePostgresVM(ctx, harvester.VMCreateParams{
+	// Material was already resolved (and its three durable Secrets created)
+	// by ensureCredentials earlier in the step order; this re-read is cheap.
+	material, err := r.credentialsResolver().Resolve(ctx, inst)
+	if err != nil {
+		return transient(err)
+	}
+	userdata, networkdata := credentials.BuildCloudInit(credentials.BootstrapParams{
+		ID:             inst.Name,
+		DBName:         dbName,
+		Port:           specPort(inst.Spec.Port),
+		MasterUser:     masterUser,
+		MaxConnections: classSpec.MaxConnections,
+		BackupEnabled:  inst.Spec.BackupRetentionPeriod > 0,
+		BackupWindow:   inst.Spec.PreferredBackupWindow,
+		S3Config:       inst.Spec.S3BackupConfig,
+		VMPassword:     inst.Spec.VMPassword,
+		StaticNetwork:  inst.Spec.StaticNetwork,
+	}, material)
+
+	cloudInitName := resource.CloudInitSecretName(inst)
+	if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, resource.CloudInitSecret{
+		Instance:    inst,
+		UserData:    userdata,
+		NetworkData: networkdata,
+	}); err != nil {
+		return transient(err)
+	}
+	inst.Status.Resources.CloudInitSecretName = cloudInitName
+
+	vmName, err := r.Harvester.CreatePostgresVM(ctx, harvester.VMCreateParams{
 		ID:                     inst.Name,
 		Namespace:              inst.Namespace,
 		CPUCores:               classSpec.CPUCores,
@@ -141,34 +173,21 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		DataVolumeStorageClass: storageType,
 		NADName:                inst.Spec.NetworkRef,
 		MasterUser:             masterUser,
-		DBName:                 dbName,
 		Port:                   specPort(inst.Spec.Port),
-		MaxConnections:         classSpec.MaxConnections,
-		BackupEnabled:          inst.Spec.BackupRetentionPeriod > 0,
-		BackupWindow:           inst.Spec.PreferredBackupWindow,
-		S3Config:               inst.Spec.S3BackupConfig,
-		VMPassword:             inst.Spec.VMPassword,
-		StaticNetwork:          inst.Spec.StaticNetwork,
+		CloudInitSecretName:    cloudInitName,
 		DNSServerIP:            inst.Spec.DNSServerIP,
 		Owner:                  ownerRefFor(inst),
 	})
-	// Record resource refs even on partial failure: the names are deterministic
-	// and returned regardless of err, so persisting them lets the finalizer
-	// (TeardownAll) clean up anything created before the error instead of leaking it.
+	// Record the ref even on partial failure: the name is deterministic and
+	// returned regardless of err, so persisting it lets the finalizer
+	// (TeardownAll) clean up anything created before the error.
 	inst.Status.Resources.VMName = vmName
-	inst.Status.Resources.SecretName = credSecretName
-	inst.Status.Resources.CloudInitSecretName = cloudInitSecretName
 	if err != nil {
 		setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionFalse,
 			"VMCreateFailed", err.Error())
 		return transient(err)
 	}
 
-	inst.Status.CACertPEM = caCertPEM
-	inst.Status.MasterUserSecret = &dbaasv1.MasterUserSecretRef{
-		Name:   credSecretName,
-		Status: dbaasv1.SecretStatusActive,
-	}
 	// Snapshot the immutable fields as applied; immutableDrift refuses later spec
 	// changes that drift from this snapshot.
 	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{

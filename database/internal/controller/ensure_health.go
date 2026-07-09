@@ -54,10 +54,10 @@ const (
 // ensureDatabaseHealth is both the provisioning readiness gate and (since PR6)
 // the steady-state liveness monitor, all from one VMI observation per pass:
 //
-//  1. crash-loop guard runs FIRST and unconditionally (plan §8.3) — a gate can
-//     never starve it;
-//  2. while parked under CrashLoopHalted it re-probes cold every 30s and
+//  1. while parked under CrashLoopHalted it re-probes cold every 30s and
 //     auto-recovers when an operator brings the VM back healthy out-of-band;
+//  2. otherwise, the crash-loop guard runs FIRST (plan §8.3) — a gate can never
+//     starve it;
 //  3. while catching up (observedGeneration != generation) it GATES: booting /
 //     probe-not-passing → Pending;
 //  4. once caught up, a probe blip is REPORT-ONLY: Degraded is set with
@@ -87,14 +87,11 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 		readiness = harvester.VMIReadiness{} // VMI object gone: boot gate / parked
 	}
 
-	// Crash-loop guard: first, unconditionally.
-	if res, halted := r.trackRestarts(ctx, inst, readiness); halted {
-		return res
-	}
-
 	// Parked under CrashLoopHalted (replaces legacy phaseFailed): recovery is an
-	// out-of-band operator start — when the VMI comes back fully healthy, clear
-	// the halt and let this pass converge normally.
+	// out-of-band operator start. Handle the parked state before restart-counting:
+	// the recovery VMI has a new UID by definition and must get a chance to prove
+	// healthy instead of being counted as another crash-loop restart and halted
+	// immediately.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		if readiness.Running && readiness.Ready && readiness.AgentConnected {
 			r.Recorder.Eventf(inst, corev1.EventTypeNormal, dbaasv1.ReasonRecovered,
@@ -103,11 +100,17 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// Re-snapshot the recovered VMI so its UID is not counted as another
 			// unplanned restart.
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
+			inst.Status.RecentUnplannedRestarts = 0
 		} else {
 			msg := "crash-loop halted; VM kept down — start the VM out-of-band once repaired to recover"
 			inst.Status.Message = msg
 			return pendingAfter("CrashLoopHalted", msg, crashLoopParkRequeue)
 		}
+	}
+
+	// Crash-loop guard: first on every non-parked path, before readiness gates.
+	if res, halted := r.trackRestarts(ctx, inst, readiness); halted {
+		return res
 	}
 
 	port := specPort(inst.Spec.Port)

@@ -68,6 +68,11 @@ spec:
           - --mgmt-logical-switch=ovn-default
         image: controller:latest
         name: manager
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         ports:
         - containerPort: 8081
           name: health

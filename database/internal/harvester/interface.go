@@ -29,7 +29,12 @@ type ClientInterface interface {
 	CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error)
 	ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error
 
-	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error)
+	// CreatePostgresVM creates the VM from an already-provisioned cloud-init
+	// Secret (p.CloudInitSecretName) — credential/TLS material and the
+	// cloud-init payload are resolved by internal/credentials and applied by
+	// internal/resource before this is called (PR8); the provider only builds
+	// VM shape.
+	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error)
 	GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error)
 	DialVMListener(ctx context.Context, ns, vmName string, port int) error // not used anymore , will be removed in future
 	StopVM(ctx context.Context, ns, vmName string) error

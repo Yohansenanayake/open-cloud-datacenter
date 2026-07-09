@@ -48,6 +48,7 @@ func newProvisionInst() *dbaasv1.DBInstance {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "orders",
 			Namespace:       "tenant-a",
+			UID:             "orders-uid",
 			Generation:      3,
 			Finalizers:      []string{dbaasv1.FinalizerName},
 			ResourceVersion: "1",
@@ -254,6 +255,18 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if after1.Status.Resources.VMName != "pg-orders" {
 		t.Fatalf("VMName = %q, want pg-orders", after1.Status.Resources.VMName)
 	}
+	// ensureCredentials runs before ensureVM in step order, so the tenant
+	// credentials ref and the two operator-namespace refs are already set
+	// after pass 1 — before the VM (and its cloud-init Secret) even exist.
+	if after1.Status.Resources.SecretName != "pg-orders-credentials" {
+		t.Fatalf("SecretName = %q after pass 1, want pg-orders-credentials", after1.Status.Resources.SecretName)
+	}
+	if after1.Status.Resources.InternalSecretRef != "dbaas-system/dbi-orders-uid-internal" {
+		t.Fatalf("InternalSecretRef = %q after pass 1", after1.Status.Resources.InternalSecretRef)
+	}
+	if after1.Status.Resources.PrivateTLSSecretRef != "dbaas-system/dbi-orders-uid-tls" {
+		t.Fatalf("PrivateTLSSecretRef = %q after pass 1", after1.Status.Resources.PrivateTLSSecretRef)
+	}
 	if after1.Status.IsConditionTrue(dbaasv1.ConditionReady) {
 		t.Fatal("Ready must not be True after pass 1")
 	}
@@ -331,6 +344,46 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		refs := check.obj.GetOwnerReferences()
 		if len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 			t.Fatalf("monitoring child %s owner refs = %+v, want controller-owned by the DBInstance", check.name, refs)
+		}
+	}
+
+	// PR8: the full credential/TLS secret inventory exists — slim tenant
+	// credentials + connection Secret in the tenant namespace, internal +
+	// TLS Secrets in the operator namespace — and status.caCertPem is gone
+	// (the field no longer exists on DBInstanceStatus at all).
+	if got.Status.Resources.ConnectionSecretName != "pg-orders-connect" {
+		t.Fatalf("ConnectionSecretName = %q, want pg-orders-connect", got.Status.Resources.ConnectionSecretName)
+	}
+	if got.Status.MasterUserSecret == nil || got.Status.MasterUserSecret.Name != "pg-orders-credentials" {
+		t.Fatalf("MasterUserSecret = %+v", got.Status.MasterUserSecret)
+	}
+
+	var tenantCred corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-credentials"}, &tenantCred); err != nil {
+		t.Fatalf("tenant credentials secret missing: %v", err)
+	}
+	if tenantCred.StringData["admin_password"] == "" {
+		t.Fatal("tenant credentials secret has no admin_password")
+	}
+	if _, hasLegacy := tenantCred.StringData["ca_cert"]; hasLegacy {
+		t.Fatal("tenant credentials secret must not carry TLS keys")
+	}
+
+	var conn corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-connect"}, &conn); err != nil {
+		t.Fatalf("connection secret missing: %v", err)
+	}
+	if conn.StringData["host"] != "192.168.40.50" || conn.StringData["ca.crt"] == "" {
+		t.Fatalf("connection secret StringData = %+v", conn.StringData)
+	}
+
+	for _, name := range []string{"dbi-orders-uid-internal", "dbi-orders-uid-tls"} {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: "dbaas-system", Name: name}, &sec); err != nil {
+			t.Fatalf("operator-namespace secret %s missing: %v", name, err)
+		}
+		if sec.Labels[dbaasv1.LabelDBInstanceUID] != "orders-uid" {
+			t.Fatalf("%s labels = %+v, want dbinstance-uid=orders-uid", name, sec.Labels)
 		}
 	}
 }

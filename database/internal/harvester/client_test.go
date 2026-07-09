@@ -18,7 +18,6 @@ package harvester
 
 import (
 	"context"
-	"encoding/base64"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,73 +28,57 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 )
 
-func TestCreatePostgresVMDoesNotCreateSecretWhenImageResolutionFails(t *testing.T) {
+func TestCreatePostgresVMFailsOnImageResolutionFailure(t *testing.T) {
 	ctx := context.Background()
-	// client without the fake image — image resolution fails before any Secret is created
+	// client without the fake image — image resolution fails before the VM is created
 	client := newTestHarvesterClient()
 
-	_, credSecretName, cloudInitSecretName, _, err := client.CreatePostgresVM(ctx, testVMCreateParams())
+	vmName, err := client.CreatePostgresVM(ctx, testVMCreateParams())
 	if err == nil {
 		t.Fatalf("CreatePostgresVM returned nil error, want image resolution error")
 	}
-
-	// Neither Secret should exist after an image-resolution failure.
-	if _, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("credentials Secret should not exist after image-resolution failure, got: %v", err)
-	}
-	if _, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("cloudinit Secret should not exist after image-resolution failure, got: %v", err)
+	if _, err := client.Dynamic.Resource(vmGVR).Namespace("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("VM should not exist after image-resolution failure, got: %v", err)
 	}
 }
 
-func TestCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
+// CreatePostgresVM no longer generates credentials/cloud-init (PR8 — that
+// moves to internal/credentials + internal/resource); it only builds the VM
+// from an already-provisioned cloud-init Secret name.
+func TestCreatePostgresVMCreatesVMWithSuppliedCloudInitSecret(t *testing.T) {
 	ctx := context.Background()
 	client := newTestHarvesterClient(testVMImage())
 
-	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := client.CreatePostgresVM(ctx, testVMCreateParams())
+	vmName, err := client.CreatePostgresVM(ctx, testVMCreateParams())
 	if err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
 	if vmName != "pg-orders" {
 		t.Fatalf("VM name = %q, want pg-orders", vmName)
 	}
-	if credSecretName != "pg-orders-credentials" {
-		t.Fatalf("credentials Secret name = %q, want pg-orders-credentials", credSecretName)
-	}
-	if cloudInitSecretName != "pg-orders-cloudinit" {
-		t.Fatalf("cloudinit Secret name = %q, want pg-orders-cloudinit", cloudInitSecretName)
-	}
-	if caCertPEM == "" {
-		t.Fatalf("CA cert is empty")
-	}
 
-	// credentials Secret must exist and contain the CA.
-	// Fake client stores stringData as-is (no base64 encoding like the real API server).
-	credSecret, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{})
+	vm, err := client.Dynamic.Resource(vmGVR).Namespace("tenant-a").Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get credentials Secret: %v", err)
-	}
-	secretCA, _, _ := unstructured.NestedString(credSecret.Object, "stringData", "ca_cert")
-	if secretCA == "" {
-		t.Fatalf("credentials Secret has no stringData.ca_cert")
-	}
-	if caCertPEM != secretCA {
-		t.Fatalf("returned CA does not match Secret CA")
-	}
-
-	// cloudinit Secret must exist and contain userdata.
-	cloudInitSecret, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get cloudinit Secret: %v", err)
-	}
-	userdata, _, _ := unstructured.NestedString(cloudInitSecret.Object, "stringData", "userdata")
-	if userdata == "" {
-		t.Fatalf("cloudinit Secret has no stringData.userdata")
-	}
-
-	// VM must exist.
-	if _, err := client.Dynamic.Resource(vmGVR).Namespace("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); err != nil {
 		t.Fatalf("get created VM: %v", err)
+	}
+
+	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
+	var found bool
+	for _, v := range volumes {
+		vol, ok := v.(map[string]any)
+		if !ok || vol["name"] != "cloudinit" {
+			continue
+		}
+		found = true
+		cin, _, _ := unstructured.NestedMap(vol, "cloudInitNoCloud")
+		secretRef, _, _ := unstructured.NestedMap(cin, "secretRef")
+		netRef, _, _ := unstructured.NestedMap(cin, "networkDataSecretRef")
+		if secretRef["name"] != "pg-orders-cloudinit" || netRef["name"] != "pg-orders-cloudinit" {
+			t.Fatalf("cloudinit volume refs = %+v / %+v, want pg-orders-cloudinit", secretRef, netRef)
+		}
+	}
+	if !found {
+		t.Fatal("cloudinit volume not found on VM")
 	}
 }
 
@@ -106,7 +89,7 @@ func TestCreatePostgresVMPreservesKubeOVNSettings(t *testing.T) {
 	params := testVMCreateParams()
 	params.DNSServerIP = "10.96.0.10/32"
 
-	vmName, _, _, _, err := client.CreatePostgresVM(ctx, params)
+	vmName, err := client.CreatePostgresVM(ctx, params)
 	if err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
@@ -195,9 +178,8 @@ func testVMCreateParams() VMCreateParams {
 		DataVolumeStorageClass: "harvester-longhorn",
 		NADName:                "tenant-a/vm-network",
 		MasterUser:             "dbadmin",
-		DBName:                 "orders",
 		Port:                   5432,
-		MaxConnections:         100,
+		CloudInitSecretName:    "pg-orders-cloudinit",
 	}
 }
 
@@ -206,13 +188,4 @@ func testVMImage() *unstructured.Unstructured {
 	// set status.storageClassName to indicate the fake VM Image is ready
 	_ = unstructured.SetNestedField(img.Object, "longhorn-image-ubuntu", "status", "storageClassName")
 	return img
-}
-
-func testCredentialSecret(caCert string) *unstructured.Unstructured {
-	secret := newUnstructured("v1", "Secret", "pg-orders-credentials", "tenant-a")
-	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
-	_ = unstructured.SetNestedStringMap(secret.Object, map[string]string{
-		"ca_cert": base64.StdEncoding.EncodeToString([]byte(caCert)),
-	}, "data")
-	return secret
 }
