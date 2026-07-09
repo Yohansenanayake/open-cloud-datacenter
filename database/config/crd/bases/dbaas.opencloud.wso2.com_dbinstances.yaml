@@ -63,7 +63,7 @@ spec:
                 - implemented mutable post-create: dbInstanceClass, allocatedStorage,
                   running, deletionProtection
                 - implemented immutable post-create (modify is refused): networkRef,
-                  osImage, dbName, masterUsername, port, storageType, staticNetwork,
+                  dbName, masterUsername, port, storageType, staticNetwork,
                   vmPassword, engineVersion
                 - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
                   multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
@@ -133,11 +133,13 @@ spec:
                   KubeVirt's default DNS behaviour (correct for cluster-routable VLANs).
                 type: string
               engineVersion:
+                default: "17"
                 description: |-
                   EngineVersion is the PostgreSQL major version, e.g. "16".
-                  NOT YET IMPLEMENTED: cloud-init installs whatever PostgreSQL the OS
-                  image's apt repo provides (Ubuntu 24.04 → PG 16; older → older). The
-                  field is recorded but does not drive package selection.
+                  Immutable after first reconcile. The default below will be removed once
+                  the DBInstance defaulting webhook is deployed (dbinstance_webhook.go
+                  DBInstanceDefaulter), which will set this dynamically from the
+                  BakedImages catalog instead of a hardcoded value.
                 type: string
               manageMasterUserPassword:
                 description: |-
@@ -183,20 +185,13 @@ spec:
                 description: |-
                   NetworkRef is a Harvester NAD reference (namespace/name) for the VLAN
                   network the database VM attaches to. This is the VM's only network
-                  interface: client traffic, package install during cloud-init, and the
-                  Prometheus metrics scrape all go through it. The NAD must already exist
-                  on the cluster (the controller does not create networks) and the VLAN
-                  must have internet egress.
+                  interface: client traffic and the Prometheus metrics scrape go through it.
+                  The NAD must already exist on the cluster (the controller does not create
+                  networks). No internet egress required — packages are pre-installed in the
+                  baked image.
                   Immutable after first reconcile.
                   Example: "iaas-net/vm-subnet-001".
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
-              osImage:
-                description: |-
-                  OSImage is the Harvester VirtualMachineImage to clone for the VM's
-                  OS disk. Either "<ns>/<name>" or just "<name>" (resolved in the
-                  "default" namespace), or the image's spec.displayName.
-                  Immutable after first reconcile.
                 type: string
               port:
                 description: |-
@@ -312,11 +307,16 @@ spec:
                     type: string
                   engineVersion:
                     type: string
+                  imageRevision:
+                    description: |-
+                      ImageRevision is the baked image revision the VM was provisioned or last
+                      repaved with, e.g. "v20260615". Used for drift detection — when this
+                      differs from the current LatestBakedImages revision, OSUpdateAvailable
+                      is set to True.
+                    type: string
                   masterUsername:
                     type: string
                   networkRef:
-                    type: string
-                  osImage:
                     type: string
                   port:
                     type: integer
@@ -481,6 +481,18 @@ spec:
                       NADName is the Multus NetworkAttachmentDefinition the VM's data NIC
                       attaches to. The controller does not create the NAD; this just records
                       the reference from spec.networkRef so callers can see it on the CR.
+                    type: string
+                  osDiskPVCName:
+                    description: |-
+                      OSDiskPVCName is the exact current name of the OS disk PVC: pg-<id>-os
+                      at first provision, or a revision-suffixed pg-<id>-os-<rev> after a
+                      repave. Authoritative — TeardownAll and repave's old-disk cleanup read
+                      this instead of deriving the name by string-prefix matching against a
+                      namespace-wide PVC scan, which is ambiguous whenever one instance's
+                      name is itself a prefix of another's (e.g. "orders" and "orders-os").
+                      Empty on instances provisioned before this field existed; callers fall
+                      back to reading the live VM's own volumeClaimTemplates annotation (see
+                      collectDiskPVCNames), which is exact but requires the VM to still exist.
                     type: string
                   secretName:
                     type: string

@@ -52,7 +52,6 @@ func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ in
 func (s *stubHarvester) CreatePostgresVM(_ context.Context, _ harvester.VMCreateParams) (string, string, string, string, error) {
 	return "", "", "", "", nil
 }
-func (s *stubHarvester) DialVMListener(_ context.Context, _, _ string, _ int) error { return nil }
 func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error {
 	s.StopVMCalls++
 	return s.stopVMErr
@@ -64,11 +63,20 @@ func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error {
 func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error  { return nil }
 func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error        { return nil }
 func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
+func (s *stubHarvester) PrepareCloudInitForRepave(_ context.Context, _ harvester.VMCreateParams, _, _, _ string) error {
+	return nil
+}
 func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (string, string, string, string, error) {
 	return "", "", "", "", nil
 }
 func (s *stubHarvester) TeardownAll(_ context.Context, _, _ string, _ dbaasv1.ResourceRefs) error {
 	return nil
+}
+func (s *stubHarvester) ClearDataVolumeOwnerRef(_ context.Context, _, _ string) error { return nil }
+func (s *stubHarvester) DeleteDataVolume(_ context.Context, _, _ string) error        { return nil }
+func (s *stubHarvester) DeletePVC(_ context.Context, _, _ string) error               { return nil }
+func (s *stubHarvester) SwapVMOSDisk(_ context.Context, _, _, _, _ string) (string, string, error) {
+	return "", "", nil
 }
 
 // newWaitReadyReconciler returns a reconciler and a DBInstance wired up for

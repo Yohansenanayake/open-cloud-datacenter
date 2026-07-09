@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -64,6 +65,9 @@ var (
 	vmImageGVR = schema.GroupVersionResource{
 		Group: "harvesterhci.io", Version: "v1beta1", Resource: "virtualmachineimages",
 	}
+	pvcGVR = schema.GroupVersionResource{
+		Group: "", Version: "v1", Resource: "persistentvolumeclaims",
+	}
 )
 
 const (
@@ -90,13 +94,12 @@ type Client struct {
 	GrafanaURL string
 	// MgmtLogicalSwitch, when non-empty, is stamped onto the VM launcher pod
 	// as the `ovn.kubernetes.io/logical_switch` annotation. On a Kube-OVN
-	// cluster this keeps the launcher pod's DEFAULT network (and therefore the
-	// mgmt-net masquerade NIC the controller probes) on a shared,
+	// cluster this keeps the launcher pod's DEFAULT network on a shared,
 	// controller-reachable subnet (e.g. "ovn-default") instead of inheriting
 	// the project namespace's tenant-VPC default — which is isolated and
 	// unreachable from the controller. The data-net NIC still attaches to the
 	// tenant subnet via Multus. Empty = don't set the annotation (correct for
-	// non-OVN clusters and for unit tests). See DialVMListener.
+	// non-OVN clusters and for unit tests).
 	MgmtLogicalSwitch string
 }
 
@@ -108,11 +111,17 @@ func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 
 // VMCreateParams bundles everything needed to create a PostgreSQL VM.
 type VMCreateParams struct {
-	ID                     string
-	Namespace              string
-	CPUCores               int
-	MemoryMB               int
-	OSImage                string
+	ID        string
+	Namespace string
+	CPUCores  int
+	MemoryMB  int
+	// ImageName is the Harvester VirtualMachineImage name resolved from the
+	// BakedImages catalog by the controller. e.g. "ubuntu-2204-postgres-v20260615".
+	ImageName string
+	// EngineVersion is the PostgreSQL major version to activate via cloud-init.
+	// e.g. "16". All supported versions are pre-installed in the baked image;
+	// bootstrap.sh activates only this one.
+	EngineVersion          string
 	DataVolumeRef          string
 	DataVolumeSizeGB       int
 	DataVolumeStorageClass string
@@ -131,9 +140,7 @@ type VMCreateParams struct {
 	StaticNetwork *dbaasv1.NetworkConfig
 	// DNSServerIP, when non-empty, pins the VM's resolver via KubeVirt
 	// dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
-	// subnets to defeat the virt-launcher internal-DHCP DNS race (it would
-	// otherwise inject unreachable cluster DNS, breaking apt during
-	// cloud-init). Supplied by the control plane (per-VPC CoreDNS address).
+	// subnets to defeat the virt-launcher internal-DHCP DNS race.
 	DNSServerIP string
 }
 
@@ -258,7 +265,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 
 	// Resolve the Harvester VirtualMachineImage before creating any resources
 	// so that a missing image causes an early error without leaving orphan Secrets.
-	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.ImageName)
 	if err != nil {
 		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
 	}
@@ -601,8 +608,41 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 		{serviceGVR, ns, refs.MetricsServiceName},
 		{vmGVR, ns, refs.VMName},
 		{dvGVR, ns, refs.DataVolumeName},
+		{pvcGVR, ns, refs.DataVolumeName},
 		{secretGVR, ns, refs.SecretName},
 		{secretGVR, ns, refs.CloudInitSecretName},
+	}
+	// OS disk cleanup. The original fixed-name DV (pg-<id>-os) is VM-owned and
+	// cascade-deletes with the VM, but revision-suffixed disks from repaves —
+	// and any PVC that outlived its DV (e.g. via CDI claim adoption) — need
+	// explicit deletion.
+	//
+	// Prefer the exact name the controller recorded in status.resources
+	// (osDiskPVCName): a namespace-wide prefix scan is ambiguous whenever one
+	// instance's name is itself a prefix of another's (e.g. "orders" and
+	// "orders-os" coexisting — "orders"'s prefix "pg-orders-os" is also a
+	// prefix of "orders-os"'s own disk "pg-orders-os-os"). Only fall back to
+	// the scan for instances that predate that field, a shrinking, bounded
+	// legacy case rather than an ongoing exposure.
+	osDiskNames := map[string]bool{}
+	if refs.OSDiskPVCName != "" {
+		osDiskNames[refs.OSDiskPVCName] = true
+	} else {
+		osPrefix := fmt.Sprintf("pg-%s-os", id)
+		osDiskNames[osPrefix] = true
+		if list, err := c.Dynamic.Resource(pvcGVR).Namespace(ns).List(ctx, metav1.ListOptions{}); err == nil {
+			for i := range list.Items {
+				if name := list.Items[i].GetName(); isOSDiskName(name, osPrefix) {
+					osDiskNames[name] = true
+				}
+			}
+		}
+	}
+	for name := range osDiskNames {
+		tasks = append(tasks,
+			deleteTask{dvGVR, ns, name},
+			deleteTask{pvcGVR, ns, name},
+		)
 	}
 
 	var (
@@ -641,6 +681,262 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 // RemoveCloudInitDisk is a no-op on the dynamic client pending implementation.
 // The typed client (default) has the full implementation.
 func (c *Client) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
+
+func (c *Client) PrepareCloudInitForRepave(ctx context.Context, p VMCreateParams, vmName, credSecretName, cloudInitSecretName string) error {
+	secret, err := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Get(ctx, credSecretName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get credentials Secret %s/%s for repave cloud-init: %w", p.Namespace, credSecretName, err)
+	}
+	get := func(key string) (string, error) {
+		if v, ok, _ := unstructured.NestedString(secret.Object, "data", key); ok {
+			b, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				return "", fmt.Errorf("decode credentials Secret key %q: %w", key, err)
+			}
+			return string(b), nil
+		}
+		if v, ok, _ := unstructured.NestedString(secret.Object, "stringData", key); ok {
+			return v, nil
+		}
+		return "", fmt.Errorf("credentials Secret %s/%s is missing key %q", p.Namespace, credSecretName, key)
+	}
+	adminPw, err := get("admin_password")
+	if err != nil {
+		return err
+	}
+	replPw, err := get("repl_password")
+	if err != nil {
+		return err
+	}
+	exporterPw, err := get("exporter_password")
+	if err != nil {
+		return err
+	}
+	caCert, err := get("ca_cert")
+	if err != nil {
+		return err
+	}
+	caKey, err := get("ca_key")
+	if err != nil {
+		return err
+	}
+	serverCert, err := get("server_cert")
+	if err != nil {
+		return err
+	}
+	serverKey, err := get("server_key")
+	if err != nil {
+		return err
+	}
+	tls := &TLSBundle{CACertPEM: caCert, CAKeyPEM: caKey, ServerCertPEM: serverCert, ServerKeyPEM: serverKey}
+
+	cloudInitSecret := newUnstructured("v1", "Secret", cloudInitSecretName, p.Namespace)
+	_ = unstructured.SetNestedField(cloudInitSecret.Object, "Opaque", "type")
+	_ = unstructured.SetNestedField(cloudInitSecret.Object, map[string]any{
+		"userdata":    buildCloudInit(p, adminPw, replPw, exporterPw, tls),
+		"networkdata": buildNetworkData(p),
+	}, "stringData")
+	if _, err := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, cloudInitSecret, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		existing, getErr := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Get(ctx, cloudInitSecretName, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		_ = unstructured.SetNestedField(existing.Object, map[string]any{
+			"userdata":    buildCloudInit(p, adminPw, replPw, exporterPw, tls),
+			"networkdata": buildNetworkData(p),
+		}, "stringData")
+		_, err = c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+
+	vm, err := c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	disks, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "domain", "devices", "disks")
+	if !namedSliceContains(disks, "cloudinit") {
+		disks = append(disks, map[string]any{"name": "cloudinit", "disk": map[string]any{"bus": "virtio"}})
+		_ = unstructured.SetNestedSlice(vm.Object, disks, "spec", "template", "spec", "domain", "devices", "disks")
+	}
+	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
+	cloudInitVolume := map[string]any{
+		"name": "cloudinit",
+		"cloudInitNoCloud": map[string]any{
+			"secretRef":            map[string]any{"name": cloudInitSecretName},
+			"networkDataSecretRef": map[string]any{"name": cloudInitSecretName},
+		},
+	}
+	replaced := false
+	for i := range volumes {
+		if volume, ok := volumes[i].(map[string]any); ok && volume["name"] == "cloudinit" {
+			volumes[i] = cloudInitVolume
+			replaced = true
+		}
+	}
+	if !replaced {
+		volumes = append(volumes, cloudInitVolume)
+	}
+	_ = unstructured.SetNestedSlice(vm.Object, volumes, "spec", "template", "spec", "volumes")
+	_, err = c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Update(ctx, vm, metav1.UpdateOptions{})
+	return err
+}
+
+func namedSliceContains(items []any, name string) bool {
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if ok && m["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ClearDataVolumeOwnerRef patches the DataVolume to remove all ownerReferences.
+// This must be called before deleting the VM CR during repave so the pgdata
+// DataVolume is not cascade-deleted by the garbage collector.
+func (c *Client) ClearDataVolumeOwnerRef(ctx context.Context, ns, dvName string) error {
+	patch := []byte(`{"metadata":{"ownerReferences":[]}}`)
+	_, err := c.Dynamic.Resource(dvGVR).Namespace(ns).Patch(
+		ctx, dvName, types.MergePatchType, patch, metav1.PatchOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// DeleteDataVolume deletes a DataVolume by name. NotFound is treated as success
+// so the call is idempotent across reconcile retries.
+func (c *Client) DeleteDataVolume(ctx context.Context, ns, dvName string) error {
+	err := c.Dynamic.Resource(dvGVR).Namespace(ns).Delete(ctx, dvName, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// SwapVMOSDisk replaces the os-disk DataVolumeTemplate in the VM spec with a
+// revision-suffixed one (pg-<id>-os-<rev>) backed by the new image's
+// BackingImage StorageClass, and repoints the os-disk volume at it. Returns
+// the name of the DataVolume it replaced ("" when the VM is already on the
+// target disk) and the name it's now on (always set), so the caller can
+// delete the old disk and persist the new name — distinct old/new names are
+// what make the swap race-free.
+//
+// The dynamic client builds VMs with real dataVolumeTemplates (unlike the
+// typed client's Harvester volumeClaimTemplates annotation), so the swap here
+// is a template replacement. NOTE: this client is legacy — kept correct and
+// compiling until it is removed; the typed client is the real implementation.
+func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, string, error) {
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
+	if err != nil {
+		return "", "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
+	}
+	osPrefix := fmt.Sprintf("pg-%s-os", instID)
+	newDVName := osDiskNameForImage(instID, imgName)
+	newTemplate := map[string]any{
+		"apiVersion": "cdi.kubevirt.io/v1beta1",
+		"kind":       "DataVolume",
+		"metadata": map[string]any{
+			"name": newDVName,
+			"annotations": map[string]any{
+				"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
+			},
+		},
+		"spec": map[string]any{
+			"source": map[string]any{"blank": map[string]any{}},
+			"pvc": map[string]any{
+				"accessModes":      []any{"ReadWriteMany"},
+				"volumeMode":       "Block",
+				"storageClassName": imgSC,
+				"resources": map[string]any{
+					"requests": map[string]any{"storage": "20Gi"},
+				},
+			},
+		},
+	}
+
+	vm, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		return "", "", fmt.Errorf("SwapVMOSDisk: get VM %s/%s: %w", ns, vmName, err)
+	}
+
+	oldDVName := ""
+	templates, _, _ := unstructured.NestedSlice(vm.Object, "spec", "dataVolumeTemplates")
+	replaced := false
+	for i := range templates {
+		tpl, ok := templates[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(tpl, "metadata", "name")
+		if !isOSDiskName(name, osPrefix) {
+			continue
+		}
+		if name == newDVName {
+			// Already swapped (re-entered after a crash or requeue).
+			return "", newDVName, nil
+		}
+		oldDVName = name
+		templates[i] = newTemplate
+		replaced = true
+		break
+	}
+	if !replaced {
+		templates = append(templates, newTemplate)
+	}
+	if err := unstructured.SetNestedSlice(vm.Object, templates, "spec", "dataVolumeTemplates"); err != nil {
+		return "", "", fmt.Errorf("SwapVMOSDisk: set dataVolumeTemplates: %w", err)
+	}
+
+	// Repoint the os-disk volume at the new DataVolume. The dataVolumeTemplates
+	// edit above is what provisions the new DV, but the VM only boots from
+	// whatever this volume's dataVolume.name says — if no volume matches, that
+	// edit alone would silently leave the VM booting the old disk while this
+	// function reports success. Fail instead of proceeding to Update.
+	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
+	volumeUpdated := false
+	for i := range volumes {
+		vol, ok := volumes[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		dv, ok := vol["dataVolume"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := dv["name"].(string); isOSDiskName(name, osPrefix) {
+			dv["name"] = newDVName
+			volumeUpdated = true
+		}
+	}
+	if !volumeUpdated {
+		return "", "", fmt.Errorf("SwapVMOSDisk: no os-disk volume (prefix %s) in spec.template.spec.volumes of VM %s/%s — refusing to update dataVolumeTemplates without repointing the actual boot volume",
+			osPrefix, ns, vmName)
+	}
+	if err := unstructured.SetNestedSlice(vm.Object, volumes, "spec", "template", "spec", "volumes"); err != nil {
+		return "", "", fmt.Errorf("SwapVMOSDisk: set volumes: %w", err)
+	}
+
+	if _, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Update(ctx, vm, metav1.UpdateOptions{}); err != nil {
+		return "", "", fmt.Errorf("SwapVMOSDisk: update VM %s/%s: %w", ns, vmName, err)
+	}
+	return oldDVName, newDVName, nil
+}
+
+// DeletePVC deletes a PersistentVolumeClaim by name, ignoring NotFound.
+func (c *Client) DeletePVC(ctx context.Context, ns, name string) error {
+	err := c.Dynamic.Resource(pvcGVR).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
 
 // DeleteSecret deletes a Secret, ignoring NotFound. Used by the controller to
 // clean up the ephemeral cloud-init Secret once the VM reaches Available.

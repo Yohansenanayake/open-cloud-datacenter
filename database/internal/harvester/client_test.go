@@ -19,6 +19,7 @@ package harvester
 import (
 	"context"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -91,6 +92,9 @@ func TestCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
 	userdata, _, _ := unstructured.NestedString(cloudInitSecret.Object, "stringData", "userdata")
 	if userdata == "" {
 		t.Fatalf("cloudinit Secret has no stringData.userdata")
+	}
+	if !strings.Contains(userdata, "systemctl enable postgresql") {
+		t.Fatalf("cloudinit userdata does not enable postgresql for reboot survival")
 	}
 
 	// VM must exist.
@@ -189,7 +193,8 @@ func testVMCreateParams() VMCreateParams {
 		Namespace:              "tenant-a",
 		CPUCores:               2,
 		MemoryMB:               4096,
-		OSImage:                "ubuntu-22.04",
+		ImageName:              "ubuntu-2204-postgres-v20260615",
+		EngineVersion:          "16",
 		DataVolumeRef:          "pg-orders-data",
 		DataVolumeSizeGB:       20,
 		DataVolumeStorageClass: "harvester-longhorn",
@@ -202,7 +207,7 @@ func testVMCreateParams() VMCreateParams {
 }
 
 func testVMImage() *unstructured.Unstructured {
-	img := newUnstructured("harvesterhci.io/v1beta1", "VirtualMachineImage", "ubuntu-22.04", "default")
+	img := newUnstructured("harvesterhci.io/v1beta1", "VirtualMachineImage", "ubuntu-2204-postgres-v20260615", "default")
 	// set status.storageClassName to indicate the fake VM Image is ready
 	_ = unstructured.SetNestedField(img.Object, "longhorn-image-ubuntu", "status", "storageClassName")
 	return img
