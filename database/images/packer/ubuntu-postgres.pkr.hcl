@@ -12,7 +12,17 @@ variable "build_date"           { default = "dev" }
 variable "pg_versions"          { default = "15 16 17" }
 variable "os_version"           { default = "22.04" }
 variable "iso_url"              { default = "" }
-variable "iso_checksum"         { default = "" }
+variable "iso_checksum" {
+  default = ""
+  # build.sh already refuses to invoke Packer without a checksum (see its
+  # images.yaml validation), but this catches a direct `packer build` call
+  # that bypasses the wrapper script — Packer silently skips base-image
+  # integrity verification when this is empty.
+  validation {
+    condition     = length(var.iso_checksum) > 0
+    error_message = "The iso_checksum variable must be set — refusing to build without base-image integrity verification."
+  }
+}
 variable "ssh_private_key_file" { default = env("PACKER_SSH_PRIVATE_KEY_FILE") }
 
 locals {

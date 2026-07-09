@@ -811,19 +811,20 @@ func (c *Client) DeleteDataVolume(ctx context.Context, ns, dvName string) error 
 
 // SwapVMOSDisk replaces the os-disk DataVolumeTemplate in the VM spec with a
 // revision-suffixed one (pg-<id>-os-<rev>) backed by the new image's
-// BackingImage StorageClass, and repoints the os-disk volume at it. It
-// returns the name of the DataVolume it replaced ("" when the VM is already
-// on the target disk) so the caller can delete the old disk afterwards —
-// distinct old/new names are what make the swap race-free.
+// BackingImage StorageClass, and repoints the os-disk volume at it. Returns
+// the name of the DataVolume it replaced ("" when the VM is already on the
+// target disk) and the name it's now on (always set), so the caller can
+// delete the old disk and persist the new name — distinct old/new names are
+// what make the swap race-free.
 //
 // The dynamic client builds VMs with real dataVolumeTemplates (unlike the
 // typed client's Harvester volumeClaimTemplates annotation), so the swap here
 // is a template replacement. NOTE: this client is legacy — kept correct and
 // compiling until it is removed; the typed client is the real implementation.
-func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, error) {
+func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, string, error) {
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
 	if err != nil {
-		return "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
+		return "", "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
 	}
 	osPrefix := fmt.Sprintf("pg-%s-os", instID)
 	newDVName := osDiskNameForImage(instID, imgName)
@@ -851,7 +852,7 @@ func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef st
 
 	vm, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("SwapVMOSDisk: get VM %s/%s: %w", ns, vmName, err)
+		return "", "", fmt.Errorf("SwapVMOSDisk: get VM %s/%s: %w", ns, vmName, err)
 	}
 
 	oldDVName := ""
@@ -868,7 +869,7 @@ func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef st
 		}
 		if name == newDVName {
 			// Already swapped (re-entered after a crash or requeue).
-			return "", nil
+			return "", newDVName, nil
 		}
 		oldDVName = name
 		templates[i] = newTemplate
@@ -879,7 +880,7 @@ func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef st
 		templates = append(templates, newTemplate)
 	}
 	if err := unstructured.SetNestedSlice(vm.Object, templates, "spec", "dataVolumeTemplates"); err != nil {
-		return "", fmt.Errorf("SwapVMOSDisk: set dataVolumeTemplates: %w", err)
+		return "", "", fmt.Errorf("SwapVMOSDisk: set dataVolumeTemplates: %w", err)
 	}
 
 	// Repoint the os-disk volume at the new DataVolume.
@@ -898,13 +899,13 @@ func (c *Client) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef st
 		}
 	}
 	if err := unstructured.SetNestedSlice(vm.Object, volumes, "spec", "template", "spec", "volumes"); err != nil {
-		return "", fmt.Errorf("SwapVMOSDisk: set volumes: %w", err)
+		return "", "", fmt.Errorf("SwapVMOSDisk: set volumes: %w", err)
 	}
 
 	if _, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Update(ctx, vm, metav1.UpdateOptions{}); err != nil {
-		return "", fmt.Errorf("SwapVMOSDisk: update VM %s/%s: %w", ns, vmName, err)
+		return "", "", fmt.Errorf("SwapVMOSDisk: update VM %s/%s: %w", ns, vmName, err)
 	}
-	return oldDVName, nil
+	return oldDVName, newDVName, nil
 }
 
 // DeletePVC deletes a PersistentVolumeClaim by name, ignoring NotFound.

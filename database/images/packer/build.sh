@@ -12,7 +12,14 @@ OS_VERSION="${3:-22.04}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGES_YAML="$SCRIPT_DIR/images.yaml"
 USER_DATA="$SCRIPT_DIR/http/user-data"
-KEY_FILE="/tmp/packer_key_$$"
+# A private, unpredictable directory rather than a PID-based /tmp path
+# (CWE-377): mktemp -d creates it atomically with 0700 perms, so another
+# user on the build host can't pre-place a symlink at a guessable name.
+# ssh-keygen still needs the destination file itself to not already exist
+# (it prompts to overwrite otherwise), so the key file lives inside this
+# dir rather than being the mktemp target directly.
+KEY_DIR="$(mktemp -d)"
+KEY_FILE="$KEY_DIR/packer_key"
 
 # Install yq if not present
 if ! command -v yq &>/dev/null; then
@@ -39,6 +46,10 @@ echo "==> OS: Ubuntu ${OS_VERSION} (EOL: ${OS_EOL}) — OK"
 
 ISO_URL=$(yq ".os_streams.\"${OS_VERSION}\".iso_url" "$IMAGES_YAML")
 ISO_CHECKSUM=$(yq ".os_streams.\"${OS_VERSION}\".checksum_url" "$IMAGES_YAML")
+if [[ "$ISO_CHECKSUM" == "null" || -z "$ISO_CHECKSUM" ]]; then
+  echo "ERROR: OS '${OS_VERSION}' has no checksum_url in images.yaml — refusing to build without base-image integrity verification"
+  exit 1
+fi
 
 # Validate PG versions from images.yaml
 echo "==> Validating PG versions against EOL policy (today: $TODAY)"
@@ -77,7 +88,7 @@ fi
 cleanup() {
   sed -i "s|ssh-ed25519 .*packer-build|PACKER_SSH_PUBLIC_KEY_PLACEHOLDER|g" \
     "$USER_DATA" 2>/dev/null || true
-  rm -f "$KEY_FILE" "${KEY_FILE}.pub"
+  rm -rf "$KEY_DIR"
 }
 trap cleanup EXIT
 

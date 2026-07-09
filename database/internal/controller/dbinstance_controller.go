@@ -313,6 +313,10 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	inst.Status.Resources.VMName = vmName
 	inst.Status.Resources.SecretName = credSecretName
 	inst.Status.Resources.CloudInitSecretName = cloudInitSecretName
+	// OS disk name at first provision is always this fixed form (no revision
+	// suffix — that only appears after a repave). Authoritative source for
+	// TeardownAll/phaseRepave from here on; see ResourceRefs.OSDiskPVCName.
+	inst.Status.Resources.OSDiskPVCName = fmt.Sprintf("pg-%s-os", id)
 	if err != nil {
 		return r.fail(ctx, inst, "VMCreateFailed", err)
 	}
@@ -750,11 +754,14 @@ func (r *DBInstanceReconciler) phaseRepave(ctx context.Context, inst *dbaasv1.DB
 
 	// Step 3: swap the OS disk to a fresh revision-suffixed disk provisioned
 	// from the new image. Returns the name of the disk it replaced ("" when the
-	// swap already happened on a previous, interrupted pass).
-	oldOSDisk, err := r.Harvester.SwapVMOSDisk(ctx, ns, vmName, inst.Name, entry.ImageName)
+	// swap already happened on a previous, interrupted pass) and the name it's
+	// now on — persisted below as the authoritative current disk name so later
+	// teardown/repave never has to re-derive it by pattern-matching PVC names.
+	oldOSDisk, newOSDisk, err := r.Harvester.SwapVMOSDisk(ctx, ns, vmName, inst.Name, entry.ImageName)
 	if err != nil {
 		return r.fail(ctx, inst, "RepaveSwapOSDiskFailed", err)
 	}
+	inst.Status.Resources.OSDiskPVCName = newOSDisk
 
 	// Step 4: remove the replaced OS disk. Stray DataVolume first — repaves
 	// that ran before the annotation-based swap left DVs that adopted the OS

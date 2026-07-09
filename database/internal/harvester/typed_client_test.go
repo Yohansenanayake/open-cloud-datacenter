@@ -655,6 +655,87 @@ func TestTypedTeardownAggregatesDeleteErrors(t *testing.T) {
 	}
 }
 
+// TestTypedCollectDiskPVCNamesDoesNotCollideAcrossInstances is a regression
+// test for a real prefix-matching bug: instance "orders" and a separate,
+// legitimately-named instance "orders-os" produce nested prefixes of each
+// other ("pg-orders-os" is itself a prefix of "orders-os"'s own disk
+// "pg-orders-os-os"). Tearing down "orders" via the old namespace-wide
+// isOSDiskName scan would also match and delete "orders-os"'s disk. This
+// must not happen once status.resources.osDiskPVCName is populated — that
+// exact name should be used instead of any prefix scan.
+func TestTypedCollectDiskPVCNamesDoesNotCollideAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	client := NewTypedClientWithClientsets(
+		harvesterfake.NewSimpleClientset(), // no VM object: simulates a teardown retry after the VM is already gone
+		kubefake.NewSimpleClientset(
+			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-os", Namespace: "tenant-a"}},
+			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-data", Namespace: "tenant-a"}},
+			// Belongs to a DIFFERENT, coexisting instance named "orders-os" — must survive "orders"'s teardown.
+			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-os-os", Namespace: "tenant-a"}},
+		),
+		kvfake.NewSimpleClientset(),
+		cdifake.NewSimpleClientset(),
+		"",
+	)
+
+	refs := dbaasv1.ResourceRefs{
+		VMName:         "pg-orders",
+		OSDiskPVCName:  "pg-orders-os",
+		DataVolumeName: "pg-orders-data",
+	}
+	names := client.collectDiskPVCNames(ctx, "orders", "tenant-a", refs)
+
+	for _, foreign := range []string{"pg-orders-os-os"} {
+		for _, n := range names {
+			if n == foreign {
+				t.Fatalf("collectDiskPVCNames(%v) = %v, must not include foreign instance's disk %q", refs, names, foreign)
+			}
+		}
+	}
+	want := map[string]bool{"pg-orders-os": true, "pg-orders-data": true}
+	for _, n := range names {
+		if !want[n] {
+			t.Fatalf("collectDiskPVCNames(%v) = %v, unexpected entry %q", refs, names, n)
+		}
+		delete(want, n)
+	}
+	if len(want) > 0 {
+		t.Fatalf("collectDiskPVCNames(%v) = %v, missing expected entries %v", refs, names, want)
+	}
+}
+
+// TestTypedCollectDiskPVCNamesFallsBackForPreFixOrphans confirms the legacy
+// scan still finds an orphaned OS disk when neither the live VM nor
+// status.resources.osDiskPVCName is available — i.e. an instance torn down
+// mid-teardown before this field existed. This path is scoped narrowly
+// (see collectDiskPVCNames doc comment) but must still work, or pre-fix
+// orphans would leak instead of being cleaned up.
+func TestTypedCollectDiskPVCNamesFallsBackForPreFixOrphans(t *testing.T) {
+	ctx := context.Background()
+	client := NewTypedClientWithClientsets(
+		harvesterfake.NewSimpleClientset(),
+		kubefake.NewSimpleClientset(
+			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-os-v20260615", Namespace: "tenant-a"}},
+		),
+		kvfake.NewSimpleClientset(),
+		cdifake.NewSimpleClientset(),
+		"",
+	)
+
+	refs := dbaasv1.ResourceRefs{VMName: "pg-orders"} // no OSDiskPVCName — pre-fix instance
+	names := client.collectDiskPVCNames(ctx, "orders", "tenant-a", refs)
+
+	found := false
+	for _, n := range names {
+		if n == "pg-orders-os-v20260615" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("collectDiskPVCNames(%v) = %v, want it to still find the pre-fix orphan pg-orders-os-v20260615", refs, names)
+	}
+}
+
 func newTestTypedClient(objs ...runtime.Object) *TypedClient {
 	return NewTypedClientWithClientsets(harvesterfake.NewSimpleClientset(objs...), kubefake.NewSimpleClientset(), kvfake.NewSimpleClientset(), cdifake.NewSimpleClientset(), "")
 }

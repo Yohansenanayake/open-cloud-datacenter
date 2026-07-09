@@ -576,17 +576,33 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 }
 
 // collectDiskPVCNames returns every disk PVC name belonging to this instance,
-// deduplicated. Primary source is the live VM's volumeClaimTemplates
-// annotation (authoritative — covers revision-suffixed repave names). If the
-// VM is already gone (teardown retry after partial failure), fall back to the
-// naming conventions: refs.DataVolumeName / pg-<id>-data for the data disk,
-// and a namespace PVC scan for pg-<id>-os / pg-<id>-os-<rev> OS disks,
-// which also sweeps up strays left by repaves that predate this code.
+// deduplicated, in priority order:
+//
+//  1. The live VM's volumeClaimTemplates annotation — authoritative and
+//     exact, covers revision-suffixed repave names. Used whenever the VM
+//     still exists.
+//  2. refs.OSDiskPVCName / refs.DataVolumeName — the names the controller
+//     itself recorded in status.resources at provision/repave time. Exact,
+//     no guessing, used when the VM is already gone (a retried teardown
+//     after partial failure) but the fields are populated.
+//  3. Naming-convention fallback (pg-<id>-data, pg-<id>-os) plus a
+//     namespace-wide prefix scan for revision-suffixed pg-<id>-os-<rev>
+//     names — ONLY for instances that predate both #1 and #2, i.e. were
+//     torn down mid-teardown before this field ever got a chance to be set.
+//     This scan is deliberately a last resort: matching by string prefix is
+//     ambiguous whenever one instance's name is itself a prefix of
+//     another's (e.g. "orders" and "orders-os" both exist — "orders"'s
+//     prefix "pg-orders-os" is also a prefix of "orders-os"'s own disk
+//     "pg-orders-os-os"). #1 and #2 are exact and carry no such risk; only
+//     reach this branch for genuinely pre-fix orphans, which is a shrinking,
+//     bounded population, not an ongoing exposure.
 func (c *TypedClient) collectDiskPVCNames(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) []string {
 	seen := map[string]bool{}
+	sawVM := false
 	if refs.VMName != "" {
 		if vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, refs.VMName, metav1.GetOptions{}); err == nil {
 			if pvcs, err := typedVolumeClaimTemplates(vm); err == nil {
+				sawVM = true
 				for _, p := range pvcs {
 					seen[p.Name] = true
 				}
@@ -596,7 +612,23 @@ func (c *TypedClient) collectDiskPVCNames(ctx context.Context, id, ns string, re
 	if refs.DataVolumeName != "" {
 		seen[refs.DataVolumeName] = true
 	}
-	seen[fmt.Sprintf("pg-%s-data", id)] = true
+	if sawVM {
+		return mapKeys(seen)
+	}
+
+	// VM already gone: prefer the exact names recorded in status over guessing.
+	if refs.OSDiskPVCName != "" {
+		seen[refs.OSDiskPVCName] = true
+	}
+	if refs.DataVolumeName == "" {
+		seen[fmt.Sprintf("pg-%s-data", id)] = true
+	}
+	if refs.OSDiskPVCName != "" {
+		return mapKeys(seen)
+	}
+
+	// Both status field and live VM are unavailable — pre-fix orphan. Fall
+	// back to the naming convention and a bounded prefix scan.
 	osPVCPrefix := fmt.Sprintf("pg-%s-os", id)
 	seen[osPVCPrefix] = true
 	if list, err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{}); err == nil {
@@ -606,8 +638,12 @@ func (c *TypedClient) collectDiskPVCNames(ctx context.Context, id, ns string, re
 			}
 		}
 	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
+	return mapKeys(seen)
+}
+
+func mapKeys(m map[string]bool) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
 		names = append(names, name)
 	}
 	return names
@@ -633,8 +669,11 @@ func (c *TypedClient) DeleteDataVolume(ctx context.Context, ns, dvName string) e
 }
 
 // SwapVMOSDisk points the VM's OS disk at a fresh PVC provisioned from the
-// image referenced by imgRef, and returns the name of the PVC it replaced
-// (empty when the VM is already on the target disk).
+// image referenced by imgRef. Returns the name of the PVC it replaced (empty
+// when the VM is already on the target disk) and the name it's now on
+// (always set) — the caller should persist the latter to
+// status.resources.osDiskPVCName as the authoritative current disk name,
+// rather than ever re-deriving it by pattern-matching PVC names later.
 //
 // The typed client builds VMs Harvester-style: disks are plain PVCs declared
 // in the harvesterhci.io/volumeClaimTemplates VM annotation and created —
@@ -646,10 +685,10 @@ func (c *TypedClient) DeleteDataVolume(ctx context.Context, ns, dvName string) e
 // image's storageClass, and the old PVC is deleted by the caller afterwards.
 // Distinct names mean creation and deletion can never fight over the same
 // object — this is what makes the swap race-free.
-func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, error) {
+func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, string, error) {
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
 	if err != nil {
-		return "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
+		return "", "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
 	}
 	osPVCPrefix := fmt.Sprintf("pg-%s-os", instID)
 	newPVCName := osDiskNameForImage(instID, imgName)
@@ -725,9 +764,9 @@ func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgR
 		return err
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return oldPVCName, nil
+	return oldPVCName, newPVCName, nil
 }
 
 // DeletePVC deletes a PersistentVolumeClaim by name. NotFound is success:

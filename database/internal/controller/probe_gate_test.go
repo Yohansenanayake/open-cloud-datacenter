@@ -75,8 +75,8 @@ func (s *stubHarvester) TeardownAll(_ context.Context, _, _ string, _ dbaasv1.Re
 func (s *stubHarvester) ClearDataVolumeOwnerRef(_ context.Context, _, _ string) error { return nil }
 func (s *stubHarvester) DeleteDataVolume(_ context.Context, _, _ string) error        { return nil }
 func (s *stubHarvester) DeletePVC(_ context.Context, _, _ string) error               { return nil }
-func (s *stubHarvester) SwapVMOSDisk(_ context.Context, _, _, _, _ string) (string, error) {
-	return "", nil
+func (s *stubHarvester) SwapVMOSDisk(_ context.Context, _, _, _, _ string) (string, string, error) {
+	return "", "", nil
 }
 
 // newWaitReadyReconciler returns a reconciler and a DBInstance wired up for

@@ -65,9 +65,11 @@ type ClientInterface interface {
 	// or displayName in namespace default). The storageClass is resolved from
 	// the image's own status.storageClassName, so this works whether the image
 	// was uploaded via kubectl (metadata.name matches) or the Harvester UI
-	// (auto-generated name, displayName matches). It returns the name of the
-	// disk it replaced ("" when the VM is already on the target disk) so the
-	// caller can delete the old disk — the two names never collide, which is
-	// what makes the swap race-free.
-	SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (oldDiskName string, err error)
+	// (auto-generated name, displayName matches). Returns the disk it replaced
+	// (oldDiskName, "" when the VM is already on the target disk) so the
+	// caller can delete it — the two names never collide, which is what makes
+	// the swap race-free — and the disk it's now on (newDiskName, always set,
+	// including on the no-op path), which the caller should persist to
+	// status.resources.osDiskPVCName as the authoritative current name.
+	SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (oldDiskName, newDiskName string, err error)
 }

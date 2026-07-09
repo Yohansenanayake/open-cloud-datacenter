@@ -41,10 +41,10 @@ type DBInstanceSpec struct {
 	DBInstanceClass string `json:"dbInstanceClass"`
 
 	// EngineVersion is the PostgreSQL major version, e.g. "16".
-	// Immutable after first reconcile.
-	// TODO: remove +kubebuilder:default once the DBInstance defaulting webhook is
-	// deployed (dbinstance_webhook.go DBInstanceDefaulter) — the webhook sets this
-	// dynamically from the BakedImages catalog instead of a hardcoded value.
+	// Immutable after first reconcile. The default below will be removed once
+	// the DBInstance defaulting webhook is deployed (dbinstance_webhook.go
+	// DBInstanceDefaulter), which will set this dynamically from the
+	// BakedImages catalog instead of a hardcoded value.
 	// +optional
 	// +kubebuilder:default="17"
 	EngineVersion string `json:"engineVersion,omitempty"`
@@ -392,6 +392,17 @@ type ResourceRefs struct {
 	// can delete it (forgetting it leaves orphan Services in the tenant ns).
 	// +optional
 	MetricsServiceName string `json:"metricsServiceName,omitempty"`
+	// OSDiskPVCName is the exact current name of the OS disk PVC: pg-<id>-os
+	// at first provision, or a revision-suffixed pg-<id>-os-<rev> after a
+	// repave. Authoritative — TeardownAll and repave's old-disk cleanup read
+	// this instead of deriving the name by string-prefix matching against a
+	// namespace-wide PVC scan, which is ambiguous whenever one instance's
+	// name is itself a prefix of another's (e.g. "orders" and "orders-os").
+	// Empty on instances provisioned before this field existed; callers fall
+	// back to reading the live VM's own volumeClaimTemplates annotation (see
+	// collectDiskPVCNames), which is exact but requires the VM to still exist.
+	// +optional
+	OSDiskPVCName string `json:"osDiskPVCName,omitempty"`
 }
 
 // +kubebuilder:object:root=true
