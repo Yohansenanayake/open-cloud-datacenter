@@ -520,15 +520,10 @@ var BakedImages = map[string]BakedImageEntry{
 		OSVersion:  "22.04",
 		PGVersions: []string{"15", "16", "17"},
 	},
-	"v20260715": {
-		ImageName:  "ubuntu-2404-postgres-v20260715",
+	"v20260701": {
+		ImageName:  "ubuntu-2404-postgres-v20260701",
 		OSVersion:  "24.04",
-		PGVersions: []string{"15", "16", "17"},
-	},
-	"v20260815": {
-		ImageName:  "ubuntu-2404-postgres-v20260815",
-		OSVersion:  "24.04",
-		PGVersions: []string{"18"}, // 15/16/17 dropped — this is the EOL trigger
+		PGVersions: []string{"15", "16", "17", "18"},
 	},
 }
 
@@ -550,7 +545,7 @@ var BakedImages = map[string]BakedImageEntry{
 // partial state where one path sees it validated and the other doesn't.
 var LatestBakedImages = map[string]BakedImageStream{
 	"22.04": {Revision: "v20260515", Validated: true},
-	"24.04": {Revision: "v20260815", Validated: true}, // was v20260715 — bumped for the PG18-only EOL test image
+	"24.04": {Revision: "v20260701", Validated: true},
 }
 
 func init() {
