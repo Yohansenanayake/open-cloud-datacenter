@@ -15,11 +15,11 @@ limitations under the License.
 */
 
 // Package resource holds the declarative-child builders: owned Kubernetes
-// objects (metrics Service/Endpoints, ServiceMonitor; Secrets from PR8 on) that
-// the controller reconciles to a desired shape with CreateOrUpdate and
-// controller owner references. Builders apply ONLY to owned declarative
-// children — the VirtualMachine and other stateful/transitional resources stay
-// with the provider and their ensure steps.
+// objects (metrics Service/Endpoints, ServiceMonitor, Secrets) that the
+// controller reconciles to a desired shape with CreateOrUpdate and controller
+// owner references. Builders apply ONLY to owned declarative children — the
+// VirtualMachine and other stateful/transitional resources stay with the
+// provider and their ensure steps.
 package resource
 
 import (

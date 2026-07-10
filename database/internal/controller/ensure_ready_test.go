@@ -40,9 +40,6 @@ func TestEnsureReadyStampsAvailableAndObservedGeneration(t *testing.T) {
 	if inst.Status.Phase != dbaasv1.StatusAvailable {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusAvailable)
 	}
-	if inst.Status.ProvisioningPhase != dbaasv1.PhaseAvailable {
-		t.Fatalf("ProvisioningPhase = %q, want %q (hand-off to phaseAvailable)", inst.Status.ProvisioningPhase, dbaasv1.PhaseAvailable)
-	}
 	if inst.Status.ObservedGeneration != 5 {
 		t.Fatalf("ObservedGeneration = %d, want 5 — only ensureReady advances it", inst.Status.ObservedGeneration)
 	}
@@ -71,9 +68,6 @@ func TestEnsureReadyStampsStoppedWhenNotRunning(t *testing.T) {
 	}
 	if inst.Status.Phase != dbaasv1.StatusStopped {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopped)
-	}
-	if inst.Status.ProvisioningPhase != dbaasv1.PhaseStopped {
-		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseStopped)
 	}
 	if inst.Status.ObservedGeneration != 4 {
 		t.Fatalf("ObservedGeneration = %d, want 4 (stop observed)", inst.Status.ObservedGeneration)

@@ -305,8 +305,8 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if ciSecret.StringData["userdata"] != redactedCloudInitUserData {
 		t.Fatalf("cloud-init userdata = %q, want redacted", ciSecret.StringData["userdata"])
 	}
-	if got.Status.Phase != dbaasv1.StatusAvailable || got.Status.ProvisioningPhase != dbaasv1.PhaseAvailable {
-		t.Fatalf("phase = %q/%q, want available/Available", got.Status.Phase, got.Status.ProvisioningPhase)
+	if got.Status.Phase != dbaasv1.StatusAvailable {
+		t.Fatalf("phase = %q, want available", got.Status.Phase)
 	}
 	if got.Status.ObservedGeneration != 3 {
 		t.Fatalf("ObservedGeneration = %d, want 3", got.Status.ObservedGeneration)

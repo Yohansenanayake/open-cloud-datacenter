@@ -33,8 +33,8 @@ type ClientInterface interface {
 	// CreatePostgresVM creates the VM from an already-provisioned cloud-init
 	// Secret (p.CloudInitSecretName) — credential/TLS material and the
 	// cloud-init payload are resolved by internal/credentials and applied by
-	// internal/resource before this is called (PR8); the provider only builds
-	// VM shape.
+	// internal/resource before this is called; the provider only builds VM
+	// shape.
 	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error)
 	GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error)
 	StopVM(ctx context.Context, ns, vmName string) error
@@ -42,16 +42,16 @@ type ClientInterface interface {
 	ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error
 
 	// Monitoring objects (metrics Service/Endpoints, ServiceMonitor) are
-	// builder-managed by the controller since PR7 (internal/resource) — no
-	// provider method. TeardownAll still deletes them by ref as the finalizer's
+	// builder-managed by the controller (internal/resource) — no provider
+	// method. TeardownAll still deletes them by ref as the finalizer's
 	// authoritative cleanup; owner-ref GC is the backup.
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error
 }
 
 // VMCreateParams bundles everything needed to create a PostgreSQL VM. Fields
 // used only for credential/cloud-init generation (DBName, MaxConnections,
-// backup/S3, VMPassword, StaticNetwork) moved to internal/credentials.
-// BootstrapParams in PR8 — the provider only builds VM shape and consumes an
+// backup/S3, VMPassword, StaticNetwork) live in internal/credentials'
+// BootstrapParams instead — the provider only builds VM shape and consumes an
 // already-provisioned cloud-init Secret. Port and MasterUser stay: the VMI
 // readiness probe embeds them directly (see buildPostgresVM).
 type VMCreateParams struct {
@@ -77,7 +77,7 @@ type VMCreateParams struct {
 	DNSServerIP string
 	// Owner, when non-nil, is stamped as the controller owner reference on the
 	// VM this call creates, so Owns() watches fire and GC backs up the
-	// finalizer teardown (PR7).
+	// finalizer teardown.
 	Owner *metav1.OwnerReference
 }
 

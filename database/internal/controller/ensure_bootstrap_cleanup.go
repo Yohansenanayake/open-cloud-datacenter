@@ -54,9 +54,10 @@ const redactedCloudInitUserData = "#cloud-config\n{}\n"
 // The Secret object itself is never deleted, so there's nothing left for
 // kubelet to fail to mount, ever.
 //
-// Runs every pass once DatabaseReady, not once — matching ensureMonitoring's
-// "cheap same-pass exception" (§4.1): resource.Apply already no-ops when
-// content is unchanged, so there's no need for one-shot bookkeeping.
+// Runs every pass once DatabaseReady, not once — matching the same
+// cheap-same-pass exception ensureMonitoring documents: resource.Apply
+// already no-ops when content is unchanged, so there's no need for one-shot
+// bookkeeping.
 func (r *DBInstanceReconciler) ensureBootstrapCleanup(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	ciName := inst.Status.Resources.CloudInitSecretName
 	if ciName == "" {

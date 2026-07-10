@@ -53,9 +53,8 @@ func TLSSecretName(inst *dbaasv1.DBInstance) string {
 
 // Resolver resolves the durable credential/TLS Material for a DBInstance. It
 // generates each backing Secret exactly once and reuses it on every later
-// call — the reuse-on-reentry invariant carried over from the pre-PR8
-// Harvester client: regenerating after a VM has already booted with the old
-// password/CA would diverge from the running instance.
+// call — regenerating after a VM has already booted with the old password/CA
+// would diverge from the running instance.
 type Resolver struct {
 	Client client.Client
 	// Scheme is used to stamp a controller owner reference on the tenant

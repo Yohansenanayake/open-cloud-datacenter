@@ -59,7 +59,6 @@ func newLifecycleFixture(t *testing.T, running bool, stub *stubHarvester) (*DBIn
 		},
 		Status: dbaasv1.DBInstanceStatus{
 			Phase:              dbaasv1.StatusAvailable,
-			ProvisioningPhase:  dbaasv1.PhaseAvailable,
 			ObservedGeneration: 1,
 			LastKnownVMIUID:    "vmi-uid-abc",
 			Resources:          dbaasv1.ResourceRefs{VMName: "pg-orders", DataVolumeName: "pg-orders-data"},
@@ -107,8 +106,7 @@ func stopConverged(t *testing.T, r *DBInstanceReconciler, req ctrl.Request, stub
 	}
 }
 
-// Port of TestStopMovesToProvisioningPhaseStopped: stopping converges to
-// phase=stopped + provisioningPhase=Stopped (now across observed passes).
+// Stopping converges to phase=stopped across observed passes.
 func TestStopConvergesToStopped(t *testing.T) {
 	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
 	r, req := newLifecycleFixture(t, false, stub)
@@ -118,9 +116,6 @@ func TestStopConvergesToStopped(t *testing.T) {
 	inst := getInst(t, r.Client)
 	if inst.Status.Phase != dbaasv1.StatusStopped {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopped)
-	}
-	if inst.Status.ProvisioningPhase != dbaasv1.PhaseStopped {
-		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseStopped)
 	}
 	if inst.Status.ObservedGeneration != 2 {
 		t.Fatalf("ObservedGeneration = %d, want 2 (stop observed)", inst.Status.ObservedGeneration)
@@ -194,8 +189,8 @@ func TestStartReentersChainAndConverges(t *testing.T) {
 		t.Fatalf("converge reconcile error: %v", err)
 	}
 	inst = getInst(t, r.Client)
-	if inst.Status.Phase != dbaasv1.StatusAvailable || inst.Status.ProvisioningPhase != dbaasv1.PhaseAvailable {
-		t.Fatalf("phase = %q/%q, want available/Available after health gate", inst.Status.Phase, inst.Status.ProvisioningPhase)
+	if inst.Status.Phase != dbaasv1.StatusAvailable {
+		t.Fatalf("phase = %q, want available after health gate", inst.Status.Phase)
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
 		t.Fatal("Ready should be True after start converges")
@@ -239,18 +234,16 @@ func TestStartWaitsForVMITeardown(t *testing.T) {
 	}
 }
 
-// Port of TestPhaseStoppedRecoversStuckStoppingPhase: a legacy instance stuck at
-// phase=stopping/provisioningPhase=Stopped with running=true routes through the
+// An instance stuck at phase=stopping with running=true routes through the
 // runner and starts, instead of dead-ending.
 func TestStuckStoppingShapeRecovers(t *testing.T) {
 	stub := &stubHarvester{} // VMI gone
 	r, req := newLifecycleFixture(t, true, stub)
 	ctx := context.Background()
 
-	// Force the historical stuck shape.
+	// Force the stuck shape.
 	inst := getInst(t, r.Client)
 	inst.Status.Phase = dbaasv1.StatusStopping
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseStopped
 	if err := r.Status().Update(ctx, inst); err != nil {
 		t.Fatalf("status seed: %v", err)
 	}

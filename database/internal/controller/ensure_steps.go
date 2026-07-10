@@ -35,8 +35,10 @@ type ensureStep struct {
 }
 
 // provisioningSteps is the ordered ensure-step chain the runner walks for
-// everything except pure steady-state (phaseAvailable) and parked-failed
-// (phaseFailed) instances — those stay legacy until PR6.
+// every DBInstance, in every state — provisioning, steady-state Available,
+// and crash-loop-parked alike. There is no separate dispatch for any of
+// those; ensureDatabaseHealth's own crash-loop guard and steady-state
+// liveness reporting are just more of the chain.
 //
 // resize runs BEFORE power deliberately: cold resize halts the VM itself and
 // stays non-Satisfied while shape drift exists, so the power step never fights
@@ -76,11 +78,13 @@ func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1
 	return satisfied()
 }
 
-// runProvisioning is the bounded-reconcile entry point for the provisioning window.
-// It walks the ensure steps, persists status once (MergeFrom + DeepEqual-skip via the
-// PR2 helper), then maps the outcome to a controller-runtime result:
+// runProvisioning is Reconcile's entry point for every non-deletion pass. It
+// walks the ensure steps, persists status once (MergeFrom + DeepEqual-skip
+// via patchStatusIfChanged), then maps the outcome to a controller-runtime
+// result:
 //
-//	Satisfied → zero Result (event-driven; ensureReady handed off to phaseAvailable)
+//	Satisfied → zero Result (event-driven; steady state is fully owned by
+//	            ensureDatabaseHealth's report-only liveness/crash-loop logic)
 //	Pending   → step's Result (zero = watch-driven, or RequeueAfter fallback)
 //	Terminal  → park: (ctrl.Result{}, nil); recovers on a spec edit / watch event
 //	Transient → return err for controller-runtime backoff
@@ -102,9 +106,9 @@ func (r *DBInstanceReconciler) runProvisioning(ctx context.Context, inst *dbaasv
 	}
 }
 
-// setStepCond sets a status condition and stamps ObservedGeneration = inst.Generation
-// (per-condition observedGeneration; plan §8.1). inst.Generation is stable for the
-// pass because the runner never re-Gets.
+// setStepCond sets a status condition and stamps ObservedGeneration =
+// inst.Generation (each condition tracks its own observedGeneration).
+// inst.Generation is stable for the pass because the runner never re-Gets.
 func setStepCond(inst *dbaasv1.DBInstance, condType string, status metav1.ConditionStatus, reason, msg string) {
 	inst.Status.SetCondition(metav1.Condition{
 		Type:               condType,
@@ -115,12 +119,12 @@ func setStepCond(inst *dbaasv1.DBInstance, condType string, status metav1.Condit
 	})
 }
 
-// markProvisioningFailed records a user-facing terminal failure for a step in the
-// provisioning window. It deliberately does NOT move ProvisioningPhase out of the
-// provisioning window, so the runner keeps ownership and re-runs (and can recover)
-// on the next spec edit / watch event — unlike the legacy fail(), which routes to
-// phaseFailed (that path expects a VM to probe, which a preflight failure has not
-// created).
+// markProvisioningFailed records a user-facing terminal failure for a step.
+// It deliberately does not change how future reconciles are routed — every
+// pass walks the same ensure-step chain regardless — so the runner keeps
+// re-running (and can recover) on the next spec edit / watch event,
+// appropriate for a failure like an invalid class, which happens before any
+// VM exists to probe.
 func markProvisioningFailed(inst *dbaasv1.DBInstance, reason, msg string) {
 	inst.Status.Phase = dbaasv1.StatusFailed
 	inst.Status.Message = msg

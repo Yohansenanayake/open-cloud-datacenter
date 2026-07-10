@@ -55,7 +55,7 @@ func (r *DBInstanceReconciler) ensurePreflight(_ context.Context, inst *dbaasv1.
 	// Immutable drift: a spec edit to a field the controller cannot re-apply
 	// (networkRef, dbName, osImage, ...) is refused loudly rather than silently
 	// advancing observedGeneration. Guards every runner entry — provisioning,
-	// stop/start toggles, and modifies alike (it sat on each legacy path before).
+	// stop/start toggles, and modifies alike, from this one place.
 	if drift := immutableDrift(inst); drift != "" {
 		msg := fmt.Sprintf("cannot modify immutable field(s) %s after create; revert the change or recreate the DBInstance", drift)
 		setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, "ImmutableFieldChanged", msg)

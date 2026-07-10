@@ -49,7 +49,6 @@ func newCaughtUpFixture(stub *stubHarvester) (*DBInstanceReconciler, *dbaasv1.DB
 	inst := newProvisionInst()
 	inst.Status.ObservedGeneration = inst.Generation
 	inst.Status.Phase = dbaasv1.StatusAvailable
-	inst.Status.ProvisioningPhase = dbaasv1.PhaseAvailable
 	inst.Status.LastKnownVMIUID = "vmi-uid-abc"
 	inst.Status.Resources.VMName = "pg-orders"
 	r := &DBInstanceReconciler{

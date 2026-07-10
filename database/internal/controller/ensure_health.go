@@ -32,13 +32,13 @@ import (
 
 const (
 	// healthRequeue is the timer fallback while waiting for the VM/PostgreSQL to
-	// come up. The VMI watch (PR1) usually re-triggers sooner; the timer covers
-	// windows with no VMI events (e.g. before the VMI object exists).
+	// come up. The VMI watch usually re-triggers sooner; the timer covers windows
+	// with no VMI events (e.g. before the VMI object exists).
 	healthRequeue = 10 * time.Second
 
 	// crashLoopParkRequeue is the cold re-probe cadence while parked under
-	// CrashLoopHalted, replacing the legacy phaseFailed 30s loop. Status is
-	// unchanged between probes, so the DeepEqual skip keeps the loop write-free.
+	// CrashLoopHalted. Status is unchanged between probes, so the DeepEqual skip
+	// keeps the loop write-free.
 	crashLoopParkRequeue = 30 * time.Second
 
 	// Crash-loop detection for unplanned restarts (KI-006 Problem A). Under
@@ -51,13 +51,12 @@ const (
 	crashLoopWindow    = 10 * time.Minute // max gap between restarts to extend the chain
 )
 
-// ensureDatabaseHealth is both the provisioning readiness gate and (since PR6)
-// the steady-state liveness monitor, all from one VMI observation per pass:
+// ensureDatabaseHealth is both the provisioning readiness gate and the
+// steady-state liveness monitor, all from one VMI observation per pass:
 //
 //  1. while parked under CrashLoopHalted it re-probes cold every 30s and
 //     auto-recovers when an operator brings the VM back healthy out-of-band;
-//  2. otherwise, the crash-loop guard runs FIRST (plan §8.3) — a gate can never
-//     starve it;
+//  2. otherwise, the crash-loop guard runs FIRST — a gate can never starve it;
 //  3. while catching up (observedGeneration != generation) it GATES: booting /
 //     probe-not-passing → Pending;
 //  4. once caught up, a probe blip is REPORT-ONLY: Degraded is set with
@@ -70,7 +69,7 @@ const (
 // controller-initiated halt is the crash-loop guard.
 func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	// Desired stopped: there is nothing to gate on — a stopped database is
-	// "converged", not "booting" (plan §5: Satisfied when desired stopped).
+	// "converged", not "booting".
 	if !wantRunning(inst) {
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
 			"Stopped", "instance is stopped")
@@ -81,14 +80,14 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			// An unobserved VMI is not a health signal: Degraded is left untouched
-			// and no VM operation is issued — the error just backs off (§8.2).
+			// and no VM operation is issued — the error just backs off.
 			return transient(err)
 		}
 		readiness = harvester.VMIReadiness{} // VMI object gone: boot gate / parked
 	}
 
-	// Parked under CrashLoopHalted (replaces legacy phaseFailed): recovery is an
-	// out-of-band operator start. Handle the parked state before restart-counting:
+	// Parked under CrashLoopHalted: recovery is an out-of-band operator start.
+	// Handle the parked state before restart-counting:
 	// the recovery VMI has a new UID by definition and must get a chance to prove
 	// healthy instead of being counted as another crash-loop restart and halted
 	// immediately.
@@ -162,8 +161,8 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 // trackRestarts detects unplanned restarts (VMI UID changes — distinct from live
 // migration, which preserves the UID) and chain-counts them into the crash-loop
 // guard. It runs before any gate so a Pending return can never starve it. The
-// restart history lives in status because it cannot be reconstructed from one VMI
-// snapshot (plan §8.3) — it is an accumulated observation, never a step gate.
+// restart history lives in status because it cannot be reconstructed from one
+// VMI snapshot — it is an accumulated observation, never a step gate.
 //
 // At the threshold the VM is halted HERE, at detection (under RunStrategyAlways
 // KubeVirt would otherwise restart it forever); ensurePowerState then refuses to

@@ -83,7 +83,7 @@ type DBInstanceReconciler struct {
 
 // Harvester resources the reconciler creates and tears down on behalf of callers.
 // list;watch added (alongside get;create;update;delete) so controller-runtime can
-// run informers for Owns()/Watches() on these child types (PR1).
+// run informers for Owns()/Watches() on these child types.
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
 // +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop;virtualmachines/restart,verbs=update
@@ -111,7 +111,7 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Reconciling", "name", inst.Name, "phase", inst.Status.ProvisioningPhase)
+	logger.Info("Reconciling", "name", inst.Name, "phase", inst.Status.Phase)
 
 	// --- Handle deletion via finalizer ---
 	if !inst.DeletionTimestamp.IsZero() {
@@ -127,17 +127,19 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.Update(ctx, &inst); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Quesion : why we explicitly requeue after successfully adding finalizer? 2 Requeues qued now
-		// 1. since resource was updated (implicit requeue by controller-runtime) and 2. explicit requeue here
-		return ctrl.Result{Requeue: true}, nil
+		// No explicit requeue needed: this Update bumps resourceVersion, which
+		// the For(&dbaasv1.DBInstance{}) watch below picks up on its own —
+		// same event-driven convention every status-changing step relies on.
+		return ctrl.Result{}, nil
 	}
 
-	// --- Dispatch (PR6): everything runs the bounded ensure-step runner. Legacy
-	// phaseAvailable/phaseFailed are gone — steady-state liveness, crash-loop
-	// halt/park/recovery, and Degraded reporting live in ensureDatabaseHealth;
-	// bootstrap cleanup in ensureBootstrapCleanup. Steady state is event-driven
-	// off the VMI watch: an all-Satisfied pass writes nothing (DeepEqual skip)
-	// and requeues nothing. ---
+	// Every DBInstance, in every state, runs the same bounded ensure-step
+	// runner — there's no separate dispatch for provisioning vs. steady-state
+	// vs. crash-loop-parked. Steady-state liveness, crash-loop halt/park/
+	// recovery, and Degraded reporting live in ensureDatabaseHealth; bootstrap
+	// cleanup in ensureBootstrapCleanup. Steady state is event-driven off the
+	// VMI watch: an all-Satisfied pass writes nothing (DeepEqual skip) and
+	// requeues nothing.
 	return r.runProvisioning(ctx, &inst)
 }
 

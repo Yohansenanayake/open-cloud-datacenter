@@ -261,10 +261,6 @@ type DBInstanceStatus struct {
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-	// ProvisioningPhase tracks which reconcile step we're on.
-	// +optional
-	ProvisioningPhase string `json:"provisioningPhase,omitempty"`
-
 	// Conditions for each sub-resource.
 	// +listType=map
 	// +listMapKey=type
@@ -317,7 +313,7 @@ type DBInstanceStatus struct {
 	RestartCount int `json:"restartCount,omitempty"`
 
 	// LastKnownVMIUID is the UID of the VMI last recorded by the controller.
-	// A UID change during phaseAvailable indicates an unplanned restart.
+	// A UID change while the instance is Available indicates an unplanned restart.
 	// +optional
 	LastKnownVMIUID string `json:"lastKnownVMIUID,omitempty"`
 
@@ -453,19 +449,6 @@ type DBInstanceList struct {
 }
 
 const (
-	// Status.ProvisioningPhase values (internal reconcile steps).
-	// No need anymore , Need to clean up
-	PhasePending             = "Pending"
-	PhaseNetworkProvisioned  = "NetworkProvisioned"
-	PhaseStorageProvisioned  = "StorageProvisioned"
-	PhaseVMCreated           = "VMCreated"
-	PhaseWaitingForCloudInit = "WaitingForCloudInit"
-	PhaseDatabaseReady       = "DatabaseReady"
-	PhaseMonitoringDeployed  = "MonitoringDeployed"
-	PhaseAvailable           = "Available"
-	PhaseStopped             = "Stopped"
-	PhaseFailed              = "Failed"
-
 	// Status.Phase values (RDS-compatible lowercase strings).
 	StatusCreating  = "creating"
 	StatusAvailable = "available"

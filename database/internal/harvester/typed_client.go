@@ -466,8 +466,8 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 		// FailureThreshold=12 @ PeriodSeconds=10 ≈ 2 min of sustained failure
 		// before Ready flips False. This probe is the single debounce for
 		// database liveness: the controller treats the resulting Ready condition
-		// as authoritative and does no further counting (see phaseAvailable). A
-		// guest-agent disconnect also trips it, since the probe execs pg_isready
+		// as authoritative and does no further counting (see ensureDatabaseHealth).
+		// A guest-agent disconnect also trips it, since the probe execs pg_isready
 		// in-guest via the agent.
 		FailureThreshold: 12,
 	}

@@ -457,7 +457,7 @@ spec:
               lastKnownVMIUID:
                 description: |-
                   LastKnownVMIUID is the UID of the VMI last recorded by the controller.
-                  A UID change during phaseAvailable indicates an unplanned restart.
+                  A UID change while the instance is Available indicates an unplanned restart.
                 type: string
               lastUnplannedRestartTime:
                 description: |-
@@ -492,9 +492,6 @@ spec:
               prometheusTarget:
                 description: PrometheusTarget is the scrape target for the instance's
                   metrics exporter.
-                type: string
-              provisioningPhase:
-                description: ProvisioningPhase tracks which reconcile step we're on.
                 type: string
               readReplicas:
                 description: ReadReplicas tracks child replica identifiers.

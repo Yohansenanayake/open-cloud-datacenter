@@ -29,15 +29,16 @@ import (
 
 // ensureMonitoring reconciles the per-instance monitoring trio — selectorless
 // metrics Service, manual Endpoints pinned to the current data-net IP, and
-// ServiceMonitor — as builder-managed, controller-owned children (PR7). Owner
-// refs make the Owns(Service/ServiceMonitor) watches live: out-of-band deletion
-// or drift is repaired on the next pass, and GC backs up the finalizer teardown.
+// ServiceMonitor — as builder-managed, controller-owned children. Owner refs
+// make the Owns(Service/ServiceMonitor) watches live: out-of-band deletion or
+// drift is repaired on the next pass, and GC backs up the finalizer teardown.
 //
 // A deploy failure is non-fatal (the database works without monitoring): it is
 // reported via MonitoringReady=False and the step still returns Satisfied so
 // provisioning completes; the next pass retries. Created/updated results also
-// return Satisfied — the documented §4.1 cheap-same-pass exception (three cached
-// idempotent applies; only the slow VM create must stop the pass).
+// return Satisfied rather than stopping the pass — applying these three is
+// cheap and idempotent, unlike the slow VM create, which is the one step
+// worth stopping a pass for.
 func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	// Desired stopped: nothing to scrape; don't deploy against a dead endpoint.
 	if !wantRunning(inst) {

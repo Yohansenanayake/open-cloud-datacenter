@@ -38,7 +38,7 @@ func (r *DBInstanceReconciler) credentialsResolver() *credentials.Resolver {
 	}
 }
 
-// ensureCredentials resolves the durable credential/TLS material (PR8): the
+// ensureCredentials resolves the durable credential/TLS material: the
 // tenant admin-credentials Secret, and the two operator-namespace private
 // Secrets (internal DB credentials, TLS). Material is generated at most once
 // per Secret — re-resolving on later passes only reads what already exists,

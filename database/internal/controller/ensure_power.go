@@ -30,8 +30,8 @@ import (
 )
 
 // powerRequeue is the timer fallback while a power transition (VMI appearing or
-// tearing down) is in flight; there is no watchable event for "VMI fully gone"
-// until owner-ref watches land in PR7.
+// tearing down) is in flight. The VMI watch usually re-triggers sooner; the
+// timer covers windows with no VMI events.
 const powerRequeue = 5 * time.Second
 
 // wantRunning is the desired power state from the user's spec: running unless

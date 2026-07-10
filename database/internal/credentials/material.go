@@ -15,11 +15,11 @@ limitations under the License.
 */
 
 // Package credentials is the durable-material source of truth for a
-// DBInstance's admin/internal passwords and TLS bundle (Phase 0 PR8). Material
-// is resolved — generated at most once, reused forever after — by Resolver,
-// never regenerated inside the Harvester provisioning client: regenerating
-// after a VM has already booted with the old password/CA would diverge from
-// the running instance (verify-ca failures, wrong credentials).
+// DBInstance's admin/internal passwords and TLS bundle. Material is resolved
+// — generated at most once, reused forever after — by Resolver, never
+// regenerated inside the Harvester provisioning client: regenerating after a
+// VM has already booted with the old password/CA would diverge from the
+// running instance (verify-ca failures, wrong credentials).
 package credentials
 
 import (

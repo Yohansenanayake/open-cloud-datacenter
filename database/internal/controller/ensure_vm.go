@@ -58,9 +58,9 @@ func ownerRefFor(inst *dbaasv1.DBInstance) *metav1.OwnerReference {
 }
 
 // ensureVM asserts the VirtualMachine resource exists with the create-time shape.
-// It observes the real VM through the manager client (KubeVirt types are in the
-// scheme since PR1) rather than trusting status.Resources.VMName — so an
-// out-of-band `kubectl delete vm` is observed as NotFound and repaired.
+// It observes the real VM through the manager client (KubeVirt types are
+// registered in the scheme) rather than trusting status.Resources.VMName — so
+// an out-of-band `kubectl delete vm` is observed as NotFound and repaired.
 //
 // Satisfied here means "the VM object exists", NOT "the VM booted": boot and
 // PostgreSQL readiness belong to ensureDatabaseHealth. This step therefore never
