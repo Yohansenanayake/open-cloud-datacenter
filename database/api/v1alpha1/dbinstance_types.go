@@ -458,10 +458,7 @@ const (
 	StatusModifying = "modifying"
 	StatusDeleting  = "deleting"
 	StatusFailed    = "failed"
-	// StatusDegraded: provisioned and supposed to be serving, but the in-guest
-	// readiness probe is failing (see the Degraded condition for attribution).
-	// Report-only — the controller never restarts on degradation.
-	StatusDegraded = "degraded"
+	StatusDegraded  = "degraded" // Report-only — the controller never restarts on degradation.
 
 	// MasterUserSecretRef.Status values.
 	SecretStatusActive   = "active"

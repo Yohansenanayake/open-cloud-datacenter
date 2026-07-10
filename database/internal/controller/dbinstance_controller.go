@@ -120,25 +120,14 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure finalizer is present
-	if !controllerutil.ContainsFinalizer(&inst, dbaasv1.FinalizerName) {
-		controllerutil.AddFinalizer(&inst, dbaasv1.FinalizerName)
-		if err := r.Update(ctx, &inst); err != nil {
-			return ctrl.Result{}, err
-		}
-		// No explicit requeue needed: this Update bumps resourceVersion, which
-		// the For(&dbaasv1.DBInstance{}) watch below picks up on its own —
-		// same event-driven convention every status-changing step relies on.
-		return ctrl.Result{}, nil
-	}
-
 	// Every DBInstance, in every state, runs the same bounded ensure-step
 	// runner — there's no separate dispatch for provisioning vs. steady-state
-	// vs. crash-loop-parked. Steady-state liveness, crash-loop halt/park/
-	// recovery, and Degraded reporting live in ensureDatabaseHealth; bootstrap
-	// cleanup in ensureBootstrapCleanup. Steady state is event-driven off the
-	// VMI watch: an all-Satisfied pass writes nothing (DeepEqual skip) and
-	// requeues nothing.
+	// vs. crash-loop-parked, including finalizer add: ensureFinalizer (first
+	// in the chain) handles that on the very first pass. Steady-state
+	// liveness, crash-loop halt/park/recovery, and Degraded reporting live in
+	// ensureDatabaseHealth; bootstrap cleanup in ensureBootstrapCleanup.
+	// Steady state is event-driven off the VMI watch: an all-Satisfied pass
+	// writes nothing (DeepEqual skip) and requeues nothing.
 	return r.runProvisioning(ctx, &inst)
 }
 
@@ -346,18 +335,10 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&dbaasv1.DBInstance{}).
-		// Children the controller reconciles to desired state. Owner references
-		// are wired in a later PR; until then these Owns watches are inert (no
-		// owned object maps back), but registering the informers now keeps
-		// SetupWithManager stable and is harmless (idempotent reconciles).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&kubevirtv1.VirtualMachine{}).
 		Owns(&monitoringv1.ServiceMonitor{}).
-		// VMIs are created by KubeVirt (owned by the VM, not the DBInstance), so
-		// they are mapped by the dbaas instance label rather than via Owns(). This
-		// makes liveness/endpoint refresh event-driven (UID/phase/Ready changes)
-		// instead of relying solely on the periodic requeue.
 		Watches(&kubevirtv1.VirtualMachineInstance{},
 			handler.EnqueueRequestsFromMapFunc(mapVMIToInstance),
 			builder.WithPredicates(vmiHealthChangedPredicate)).

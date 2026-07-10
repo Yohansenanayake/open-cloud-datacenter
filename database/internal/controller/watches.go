@@ -41,7 +41,7 @@ func mapVMIToInstance(_ context.Context, obj client.Object) []reconcile.Request 
 		return nil
 	}
 	return []reconcile.Request{{
-		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name},
+		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}, //VMI also has the same namespace as DBinstance
 	}}
 }
 
