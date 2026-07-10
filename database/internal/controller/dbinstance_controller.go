@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -225,36 +224,31 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ns := inst.Namespace
+	// Single snapshot reused across every patchStatusIfChanged call below —
+	// safe because this controller is the only status writer and reconciles
+	// are serialized per object (see patchStatusIfChanged's doc comment).
+	original := inst.DeepCopy()
 
 	if inst.Spec.DeletionProtection {
 		inst.Status.Message = "Cannot delete: DeletionProtection is enabled"
-		_ = r.statusUpdate(ctx, inst)
+		_ = r.patchStatusIfChanged(ctx, original, inst)
 		return ctrl.Result{}, fmt.Errorf("deletion protection enabled")
 	}
 
 	inst.Status.Phase = dbaasv1.StatusDeleting
 	inst.Status.Message = "Tearing down resources"
-	_ = r.statusUpdate(ctx, inst)
+	_ = r.patchStatusIfChanged(ctx, original, inst)
 
 	logger.Info("Tearing down child resources", "namespace", ns)
 	if err := r.Harvester.TeardownAll(ctx, inst.Name, ns, inst.Status.Resources); err != nil {
-		// Surface the failure on the CR and requeue. The finalizer stays
-		// in place so a partial cleanup can't leave the CR garbage-collected
-		// with live Harvester children behind it.
 		inst.Status.Message = fmt.Sprintf("Teardown failed, will retry: %v", err)
-		_ = r.statusUpdate(ctx, inst)
+		_ = r.patchStatusIfChanged(ctx, original, inst)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
-	// The tenant namespace is owned by the cluster operator (created during
-	// onboarding) — never delete it. We only remove the resources we created.
 
-	// The two private Secrets (internal DB credentials, TLS) live in the
-	// operator namespace, outside the DBInstance's own namespace, so they
-	// can't carry an owner reference for GC — the finalizer is their only
-	// cleanup path.
 	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
 		inst.Status.Message = fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err)
-		_ = r.statusUpdate(ctx, inst)
+		_ = r.patchStatusIfChanged(ctx, original, inst)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
@@ -284,8 +278,7 @@ func (r *DBInstanceReconciler) deleteOperatorSecrets(ctx context.Context, inst *
 	deleteRef(inst.Status.Resources.PrivateTLSSecretRef)
 
 	var list corev1.SecretList
-	if err := r.List(ctx, &list,
-		client.InNamespace(r.operatorNamespace()),
+	if err := r.List(ctx, &list, client.InNamespace(r.operatorNamespace()),
 		client.MatchingLabels{dbaasv1.LabelDBInstanceUID: string(inst.UID)},
 	); err != nil {
 		errs = append(errs, err)
@@ -302,20 +295,6 @@ func (r *DBInstanceReconciler) deleteOperatorSecrets(ctx context.Context, inst *
 // ============================================================
 // Helpers
 // ============================================================
-
-func (r *DBInstanceReconciler) statusUpdate(ctx context.Context, inst *dbaasv1.DBInstance) error {
-	desired := inst.Status.DeepCopy()
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Re-fetch on every attempt to get a current resourceVersion.
-		// The informer cache typically reflects writes within a few hundred ms;
-		// DefaultRetry's backoff (10ms → 160ms, 5 attempts) covers that window.
-		if err := r.Get(ctx, client.ObjectKeyFromObject(inst), inst); err != nil {
-			return err
-		}
-		inst.Status = *desired
-		return r.Status().Update(ctx, inst)
-	})
-}
 
 // specPort returns 5432 if port is 0, otherwise port.
 func specPort(port int) int {

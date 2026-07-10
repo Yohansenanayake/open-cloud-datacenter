@@ -34,6 +34,34 @@ type ensureStep struct {
 	run  func(ctx context.Context, inst *dbaasv1.DBInstance) StepResult
 }
 
+// runProvisioning is Reconcile's entry point for every non-deletion pass. It
+// walks the ensure steps, persists status once (MergeFrom + DeepEqual-skip
+// via patchStatusIfChanged), then maps the outcome to a controller-runtime
+// result:
+//
+//	Satisfied → zero Result (event-driven; steady state is fully owned by
+//	            ensureDatabaseHealth's report-only liveness/crash-loop logic)
+//	Pending   → step's Result (zero = watch-driven, or RequeueAfter fallback)
+//	Terminal  → park: (ctrl.Result{}, nil); recovers on a spec edit / watch event
+//	Transient → return err for controller-runtime backoff
+func (r *DBInstanceReconciler) runProvisioning(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	original := inst.DeepCopy()
+	res := r.runEnsureSteps(ctx, inst, r.provisioningSteps())
+
+	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	switch res.Outcome {
+	case OutcomeTerminal:
+		return ctrl.Result{}, nil
+	case OutcomeTransient:
+		return ctrl.Result{}, res.Err
+	default:
+		return res.Result, nil
+	}
+}
+
 // provisioningSteps is the ordered ensure-step chain the runner walks for
 // every DBInstance, in every state — provisioning, steady-state Available,
 // and crash-loop-parked alike. There is no separate dispatch for any of
@@ -76,34 +104,6 @@ func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1
 		}
 	}
 	return satisfied()
-}
-
-// runProvisioning is Reconcile's entry point for every non-deletion pass. It
-// walks the ensure steps, persists status once (MergeFrom + DeepEqual-skip
-// via patchStatusIfChanged), then maps the outcome to a controller-runtime
-// result:
-//
-//	Satisfied → zero Result (event-driven; steady state is fully owned by
-//	            ensureDatabaseHealth's report-only liveness/crash-loop logic)
-//	Pending   → step's Result (zero = watch-driven, or RequeueAfter fallback)
-//	Terminal  → park: (ctrl.Result{}, nil); recovers on a spec edit / watch event
-//	Transient → return err for controller-runtime backoff
-func (r *DBInstanceReconciler) runProvisioning(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	original := inst.DeepCopy()
-	res := r.runEnsureSteps(ctx, inst, r.provisioningSteps())
-
-	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	switch res.Outcome {
-	case OutcomeTerminal:
-		return ctrl.Result{}, nil
-	case OutcomeTransient:
-		return ctrl.Result{}, res.Err
-	default:
-		return res.Result, nil
-	}
 }
 
 // setStepCond sets a status condition and stamps ObservedGeneration =
