@@ -48,10 +48,10 @@ type BootstrapParams struct {
 // KubeVirt's cloudInitNoCloud datasource reads from the ephemeral cloud-init
 // Secret (internal/resource.CloudInitSecret).
 func BuildCloudInit(p BootstrapParams, m *Material) (userdata, networkdata string) {
-	return buildUserData(p, m), buildNetworkData(p)
+	return buildUserData(p, m), BuildNetworkData(p)
 }
 
-// buildNetworkData returns the cloud-init network-config v2 YAML for the
+// BuildNetworkData returns the cloud-init network-config v2 YAML for the
 // VM's two NICs. KubeVirt's cloudInitNoCloud datasource reads it from
 // the Secret key `networkdata` and applies it at the `init-local`
 // stage — before systemd-networkd starts — so each NIC has its IP,
@@ -66,7 +66,7 @@ func BuildCloudInit(p BootstrapParams, m *Material) (userdata, networkdata strin
 //     case the supplied address / gateway / DNS are written as static
 //     config. The data VLAN must have internet connectivity for
 //     cloud-init package installation to succeed.
-func buildNetworkData(p BootstrapParams) string {
+func BuildNetworkData(p BootstrapParams) string {
 	if p.StaticNetwork == nil {
 		return `version: 2
 ethernets:

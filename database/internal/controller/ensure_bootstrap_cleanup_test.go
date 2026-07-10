@@ -22,21 +22,26 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 )
 
 const cleanupCloudInitSecretName = "pg-orders-cloudinit"
 
-// newCleanupFixture wires a real fake client (with the cloud-init Secret
-// pre-created) rather than a bare stub: DeleteSecret moved off
-// harvester.ClientInterface (PR9) onto the controller's own client, so these
-// tests need something real to delete against. The client is wrapped to keep
-// recording "DeleteSecret" into stub.OpsLog alongside the Harvester calls, so
-// the FailedMount-ordering assertions below stay unchanged.
+// originalCloudInitUserData/NetworkData seed the fixture Secret with content
+// clearly distinguishable from redactedCloudInitUserData, so tests can
+// assert "redacted" vs "untouched" by content — ensureBootstrapCleanup no
+// longer deletes the Secret (a live VMI's mounted volume can't be
+// un-mounted, so deleting it just makes kubelet's periodic Secret-volume
+// resync fail with FailedMount for the rest of that pod's life).
+const originalCloudInitUserData = "ORIGINAL-USERDATA-WITH-SECRETS"
+const originalCloudInitNetworkData = "ORIGINAL-NETWORKDATA"
+
 func newCleanupFixture(t *testing.T, stub *stubHarvester, dbReady bool) (*DBInstanceReconciler, *dbaasv1.DBInstance) {
 	t.Helper()
 	inst := newProvisionInst()
@@ -48,41 +53,54 @@ func newCleanupFixture(t *testing.T, stub *stubHarvester, dbReady bool) (*DBInst
 	}
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, status, "test", "test")
 
-	ciSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Name: cleanupCloudInitSecretName, Namespace: inst.Namespace,
-	}}
+	ciSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: cleanupCloudInitSecretName, Namespace: inst.Namespace},
+		StringData: map[string]string{
+			"userdata":    originalCloudInitUserData,
+			"networkdata": originalCloudInitNetworkData,
+		},
+	}
 	r := newProvisionReconciler(t, stub, inst, ciSecret)
-	wrapClientForSecretDeleteTracking(t, r, stub, cleanupCloudInitSecretName)
 	return r, inst
 }
 
-func TestEnsureBootstrapCleanupScrubsOnceDBReady(t *testing.T) {
+func getCloudInitSecret(t *testing.T, r *DBInstanceReconciler, ns string) corev1.Secret {
+	t.Helper()
+	var got corev1.Secret
+	key := types.NamespacedName{Namespace: ns, Name: cleanupCloudInitSecretName}
+	if err := r.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get cloud-init secret: %v", err)
+	}
+	return got
+}
+
+func TestEnsureBootstrapCleanupRedactsOnceDBReady(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubHarvester{}
 	r, inst := newCleanupFixture(t, stub, true)
 
 	res := r.ensureBootstrapCleanup(ctx, inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "CloudInitScrubbed" {
-		t.Fatalf("res = %+v, want Pending/CloudInitScrubbed", res)
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied", res)
 	}
-	if inst.Status.Resources.CloudInitSecretName != "" {
-		t.Fatalf("CloudInitSecretName = %q, want cleared", inst.Status.Resources.CloudInitSecretName)
+	// The Secret is never deleted, so the ref stays recorded (TeardownAll
+	// still needs it when the whole instance is deleted).
+	if inst.Status.Resources.CloudInitSecretName != cleanupCloudInitSecretName {
+		t.Fatalf("CloudInitSecretName = %q, want kept (%q)", inst.Status.Resources.CloudInitSecretName, cleanupCloudInitSecretName)
 	}
-	// FailedMount guard: the disk reference must leave the VM spec BEFORE the
-	// secret is deleted, or a VMI restart in between mounts a missing secret.
-	if len(stub.OpsLog) != 2 || stub.OpsLog[0] != "RemoveCloudInitDisk" || stub.OpsLog[1] != "DeleteSecret" {
-		t.Fatalf("OpsLog = %v, want [RemoveCloudInitDisk DeleteSecret]", stub.OpsLog)
+	got := getCloudInitSecret(t, r, inst.Namespace)
+	if got.StringData["userdata"] != redactedCloudInitUserData {
+		t.Fatalf("userdata = %q, want redacted", got.StringData["userdata"])
 	}
-	var got corev1.Secret
-	key := types.NamespacedName{Namespace: inst.Namespace, Name: cleanupCloudInitSecretName}
-	if err := r.Get(ctx, key, &got); !apierrors.IsNotFound(err) {
-		t.Fatalf("cloud-init secret Get = %v, want NotFound", err)
+	wantNetworkData := credentials.BuildNetworkData(credentials.BootstrapParams{StaticNetwork: inst.Spec.StaticNetwork})
+	if got.StringData["networkdata"] != wantNetworkData {
+		t.Fatalf("networkdata = %q, want freshly-rendered %q, not left as the stale original", got.StringData["networkdata"], wantNetworkData)
 	}
 }
 
 // Cloud-init is only provably consumed once the in-guest probe has passed:
-// scrubbing earlier could break a first boot.
+// redacting earlier could interfere with a still-in-progress first boot.
 func TestEnsureBootstrapCleanupDefersUntilDBReady(t *testing.T) {
 	stub := &stubHarvester{}
 	r, inst := newCleanupFixture(t, stub, false)
@@ -92,11 +110,9 @@ func TestEnsureBootstrapCleanupDefersUntilDBReady(t *testing.T) {
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied (deferred)", res)
 	}
-	if inst.Status.Resources.CloudInitSecretName == "" {
-		t.Fatal("ref must be kept while cloud-init may still be needed")
-	}
-	if len(stub.OpsLog) != 0 {
-		t.Fatalf("OpsLog = %v, want no provider calls", stub.OpsLog)
+	got := getCloudInitSecret(t, r, inst.Namespace)
+	if got.StringData["userdata"] != originalCloudInitUserData {
+		t.Fatalf("userdata = %q, want untouched original", got.StringData["userdata"])
 	}
 }
 
@@ -108,34 +124,40 @@ func TestEnsureBootstrapCleanupSatisfiedWhenNothingToScrub(t *testing.T) {
 	if res := r.ensureBootstrapCleanup(context.Background(), inst); res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
-	if len(stub.OpsLog) != 0 {
-		t.Fatalf("OpsLog = %v, want no provider calls", stub.OpsLog)
+	got := getCloudInitSecret(t, r, inst.Namespace)
+	if got.StringData["userdata"] != originalCloudInitUserData {
+		t.Fatalf("userdata = %q, want untouched (no ref recorded, so nothing to act on)", got.StringData["userdata"])
 	}
 }
 
-// A failed disk removal must keep the ref (retry next pass) and must NOT delete
-// the secret — deleting after a failed removal is exactly the FailedMount trap.
-func TestEnsureBootstrapCleanupDiskRemovalFailureKeepsSecret(t *testing.T) {
+// A failed Apply must leave the Secret exactly as it was, for the next
+// pass's retry.
+func TestEnsureBootstrapCleanupApplyFailureIsTransientAndLeavesSecretUntouched(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubHarvester{removeCloudInitErr: errors.New("vm update conflict")}
+	stub := &stubHarvester{}
 	r, inst := newCleanupFixture(t, stub, true)
+
+	watchClient, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fixture's fake client does not implement client.WithWatch")
+	}
+	boom := errors.New("apiserver unavailable")
+	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if sec, ok := obj.(*corev1.Secret); ok && sec.Name == cleanupCloudInitSecretName {
+				return boom
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
 
 	res := r.ensureBootstrapCleanup(ctx, inst)
 
-	if res.Outcome != OutcomeTransient {
-		t.Fatalf("res = %+v, want Transient", res)
+	if res.Outcome != OutcomeTransient || res.Err == nil {
+		t.Fatalf("res = %+v, want Transient with error", res)
 	}
-	if inst.Status.Resources.CloudInitSecretName == "" {
-		t.Fatal("ref must survive a failed scrub for the retry")
-	}
-	for _, op := range stub.OpsLog {
-		if op == "DeleteSecret" {
-			t.Fatal("secret deleted despite disk removal failure (FailedMount trap)")
-		}
-	}
-	var got corev1.Secret
-	key := types.NamespacedName{Namespace: inst.Namespace, Name: cleanupCloudInitSecretName}
-	if err := r.Get(ctx, key, &got); err != nil {
-		t.Fatalf("cloud-init secret must survive a failed scrub, Get: %v", err)
+	got := getCloudInitSecret(t, r, inst.Namespace)
+	if got.StringData["userdata"] != originalCloudInitUserData {
+		t.Fatalf("userdata = %q, want untouched after a failed apply", got.StringData["userdata"])
 	}
 }

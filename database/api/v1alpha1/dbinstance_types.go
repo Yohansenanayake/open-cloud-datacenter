@@ -454,6 +454,7 @@ type DBInstanceList struct {
 
 const (
 	// Status.ProvisioningPhase values (internal reconcile steps).
+	// No need anymore , Need to clean up
 	PhasePending             = "Pending"
 	PhaseNetworkProvisioned  = "NetworkProvisioned"
 	PhaseStorageProvisioned  = "StorageProvisioned"
@@ -482,18 +483,6 @@ const (
 	// MasterUserSecretRef.Status values.
 	SecretStatusActive   = "active"
 	SecretStatusImpaired = "impaired"
-
-	// Condition type constants for DBInstance liveness monitoring.
-	// These are the Type field of entries in Status.Conditions.
-	ConditionDegraded = "Degraded" // readiness probe failing or guest agent disconnected (report-only)
-	ConditionFailed   = "Failed"   // crash-loop give-up, or a fatal provisioning error
-
-	// Condition reason constants (Conditions[].Reason).
-	ReasonPostgresUnreachable    = "PostgresUnreachable"
-	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
-	ReasonVMRestarting           = "VMRestarting"
-	ReasonCrashLoopDetected      = "CrashLoopDetected"
-	ReasonRecovered              = "Recovered"
 
 	// Label keys applied to all Harvester resources owned by a DBInstance.
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"

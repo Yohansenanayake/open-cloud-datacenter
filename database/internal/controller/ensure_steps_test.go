@@ -238,7 +238,6 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		Ready:   true,
 	}}
 	r := newProvisionReconciler(t, stub, inst)
-	wrapClientForSecretDeleteTracking(t, r, stub, "pg-orders-cloudinit")
 	key := client.ObjectKeyFromObject(inst)
 
 	// Pass 1: no VM observed → create it, stop the pass (event-driven Pending).
@@ -280,40 +279,31 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		t.Fatalf("create vm: %v", err)
 	}
 
-	// Pass 2: VM observed, VMI ready → health passes, then the bootstrap-cleanup
-	// step scrubs the consumed cloud-init secret and stops the pass (one
-	// meaningful mutation per reconcile).
+	// Pass 2: VM observed, VMI ready → health passes, then bootstrap-cleanup
+	// redacts the consumed cloud-init secret's userdata (a cheap idempotent
+	// apply — see ensureMonitoring's §4.1 exception, which this step now
+	// follows too), so the walk completes to Available in the same pass.
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch: %v", err)
 	}
 	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 2 = (%+v, %v), want zero Result and nil error", result, err)
 	}
-	after2 := &dbaasv1.DBInstance{}
-	if err := r.Get(ctx, key, after2); err != nil {
-		t.Fatalf("get after pass 2: %v", err)
-	}
-	if after2.Status.Resources.CloudInitSecretName != "" {
-		t.Fatalf("cloud-init ref = %q after pass 2, want scrubbed", after2.Status.Resources.CloudInitSecretName)
-	}
-	if len(stub.OpsLog) != 2 || stub.OpsLog[0] != "RemoveCloudInitDisk" || stub.OpsLog[1] != "DeleteSecret" {
-		t.Fatalf("OpsLog = %v, want [RemoveCloudInitDisk DeleteSecret]", stub.OpsLog)
-	}
-	if after2.Status.IsConditionTrue(dbaasv1.ConditionReady) {
-		t.Fatal("Ready must not be True yet — the scrub stopped pass 2")
-	}
-
-	// Pass 3: nothing left to scrub → walk to Available.
-	if err := r.Get(ctx, key, inst); err != nil {
-		t.Fatalf("refetch for pass 3: %v", err)
-	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
-		t.Fatalf("pass 3 = (%+v, %v), want zero Result and nil error", result, err)
-	}
 
 	got := &dbaasv1.DBInstance{}
 	if err := r.Get(ctx, key, got); err != nil {
-		t.Fatalf("get after pass 3: %v", err)
+		t.Fatalf("get after pass 2: %v", err)
+	}
+	// The cloud-init Secret is redacted, not deleted — the ref stays recorded.
+	if got.Status.Resources.CloudInitSecretName != "pg-orders-cloudinit" {
+		t.Fatalf("cloud-init ref = %q after pass 2, want kept (pg-orders-cloudinit)", got.Status.Resources.CloudInitSecretName)
+	}
+	var ciSecret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ciSecret); err != nil {
+		t.Fatalf("cloud-init secret missing: %v", err)
+	}
+	if ciSecret.StringData["userdata"] != redactedCloudInitUserData {
+		t.Fatalf("cloud-init userdata = %q, want redacted", ciSecret.StringData["userdata"])
 	}
 	if got.Status.Phase != dbaasv1.StatusAvailable || got.Status.ProvisioningPhase != dbaasv1.PhaseAvailable {
 		t.Fatalf("phase = %q/%q, want available/Available", got.Status.Phase, got.Status.ProvisioningPhase)
@@ -346,6 +336,26 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		if len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 			t.Fatalf("monitoring child %s owner refs = %+v, want controller-owned by the DBInstance", check.name, refs)
 		}
+	}
+
+	// Pass 3: ensureCredentials runs before ensureDatabaseHealth in step
+	// order, so on pass 2 it couldn't yet see the Endpoint health had just
+	// set that same pass — it needs one more reconcile to notice status.
+	// Endpoint is now populated and publish the connection Secret. In a real
+	// cluster this pass is triggered automatically (pass 2's status write
+	// bumps resourceVersion, firing the DBInstance watch); here it's driven
+	// manually like the others. This is unrelated to bootstrap-cleanup no
+	// longer stopping the pass — it was already true before, just masked by
+	// bootstrap-cleanup's old one-shot Pending coincidentally forcing the
+	// same extra pass.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 3: %v", err)
+	}
+	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 3 = (%+v, %v), want zero Result and nil error", result, err)
+	}
+	if err := r.Get(ctx, key, got); err != nil {
+		t.Fatalf("get after pass 3: %v", err)
 	}
 
 	// PR8: the full credential/TLS secret inventory exists — slim tenant

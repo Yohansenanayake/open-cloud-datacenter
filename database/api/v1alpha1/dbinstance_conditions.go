@@ -23,8 +23,7 @@ import (
 
 // Status condition types for the bounded-reconcile status contract. Each ensure
 // step owns one (or more) of these and stamps the condition's ObservedGeneration
-// with inst.Generation when it writes it. ConditionDegraded and ConditionFailed
-// are defined alongside the legacy constants in dbinstance_types.go.
+// with inst.Generation when it writes it.
 const (
 	ConditionAccepted         = "Accepted"
 	ConditionPreflightReady   = "PreflightReady"
@@ -36,6 +35,20 @@ const (
 	ConditionMonitoringReady  = "MonitoringReady"
 	ConditionReady            = "Ready"
 	ConditionCrashLoopHalted  = "CrashLoopHalted"
+	// ConditionDegraded is report-only: the instance is provisioned and supposed
+	// to serve, but readiness or guest-agent attribution says it is unhealthy.
+	ConditionDegraded = "Degraded"
+	// ConditionFailed marks crash-loop give-up or a fatal provisioning error.
+	ConditionFailed = "Failed"
+)
+
+// Condition reason constants used in Conditions[].Reason and related events.
+const (
+	ReasonPostgresUnreachable    = "PostgresUnreachable"
+	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
+	ReasonVMRestarting           = "VMRestarting"
+	ReasonCrashLoopDetected      = "CrashLoopDetected"
+	ReasonRecovered              = "Recovered"
 )
 
 // SetCondition adds or updates a status condition. meta.SetStatusCondition only

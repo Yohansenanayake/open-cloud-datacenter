@@ -26,15 +26,18 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// CloudInitSecretName returns the deterministic ephemeral cloud-init Secret
-// name KubeVirt's cloudInitNoCloud datasource reads userdata/networkdata from.
+// CloudInitSecretName returns the deterministic cloud-init Secret name
+// KubeVirt's cloudInitNoCloud datasource reads userdata/networkdata from.
 func CloudInitSecretName(inst *dbaasv1.DBInstance) string {
 	return fmt.Sprintf("pg-%s-cloudinit", inst.Name)
 }
 
-// CloudInitSecret is the ephemeral bootstrap payload. ensureVM applies it
-// before creating the VM; ensureBootstrapCleanup deletes it once the database
-// is provably up.
+// CloudInitSecret is the bootstrap payload. ensureVM applies it before
+// creating the VM; ensureBootstrapCleanup redacts UserData in place once the
+// database is provably up (the object itself is never deleted — a live
+// VMI's mounted volume can't be un-mounted, so deleting it would just make
+// kubelet's periodic Secret-volume resync fail with FailedMount for the rest
+// of that pod's life).
 type CloudInitSecret struct {
 	Instance    *dbaasv1.DBInstance
 	UserData    string

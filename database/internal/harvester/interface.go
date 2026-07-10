@@ -41,14 +41,6 @@ type ClientInterface interface {
 	StartVM(ctx context.Context, ns, vmName string) error
 	ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error
 
-	// RemoveCloudInitDisk patches the VM spec to remove the cloudinit disk and
-	// volume so future VMI restarts don't try to mount the cloud-init secret.
-	// The caller must remove this reference before deleting the cloud-init
-	// Secret itself (a plain corev1.Secret, deleted directly via the
-	// controller's own client — not a Harvester resource); otherwise
-	// poweroff/restart leaves the VM stuck in Starting with FailedMount.
-	RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error
-
 	// Monitoring objects (metrics Service/Endpoints, ServiceMonitor) are
 	// builder-managed by the controller since PR7 (internal/resource) — no
 	// provider method. TeardownAll still deletes them by ref as the finalizer's

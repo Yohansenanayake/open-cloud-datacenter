@@ -19,40 +19,61 @@ package controller
 import (
 	"context"
 
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
-// ensureBootstrapCleanup is the home for one-shot cleanups of bootstrap-only
-// artifacts once the database is provably up (future first-boot cleanups land
-// here too). Today it owns the ephemeral cloud-init Secret: the disk reference is
-// removed from the VM spec first (otherwise a later VMI restart hits FailedMount
-// on the deleted Secret — see RemoveCloudInitDisk's doc comment), then the Secret
-// (a plain corev1.Secret — not a Harvester resource, so deleted via the
-// controller's own client rather than r.Harvester) is deleted and the ref cleared.
+// redactedCloudInitUserData replaces the ephemeral cloud-init Secret's
+// userdata once it's no longer needed. A minimal valid no-op cloud-config
+// rather than an empty string, in case anything ever re-parses it.
+const redactedCloudInitUserData = "#cloud-config\n{}\n"
+
+// ensureBootstrapCleanup redacts the sensitive half of the ephemeral
+// cloud-init Secret once the database is provably up. It does NOT delete the
+// Secret and does NOT touch the VM.
 //
-// It acts only while DatabaseReady=True: a passing in-guest probe proves
-// cloud-init was consumed, so deleting it can no longer break a first boot.
+// It used to delete the Secret outright (and strip the disk reference from
+// the VM template first, to keep a future VMI restart from trying to mount
+// a Secret that was about to disappear). That broke in practice: a live
+// VMI/pod's mounted volumes are immutable — patching the VM template never
+// affects the *already-running* pod, only some hypothetical future VMI
+// generation. So the running pod kept referencing the cloud-init volume for
+// its whole life, and once the Secret was deleted, kubelet's periodic
+// Secret-volume re-sync kept failing with FailedMount for as long as that
+// pod lived (harmless to the already-mounted data, but noisy indefinitely).
+//
+// Redacting in place instead: `userdata` carries the actual sensitive
+// bootstrap material (admin/repl/exporter passwords, TLS private key) via
+// cloud-init's runcmd/write_files modules, which run at the default
+// once-per-instance frequency — provably never re-consulted on a
+// same-instance reboot, so blanking it is safe. `networkdata` (netplan
+// config) is left byte-for-byte correct: cloud-init's network stage is one
+// of the few that commonly runs on every boot, so its content is kept valid
+// rather than risking a future boot losing static IP/gateway/DNS config.
+// The Secret object itself is never deleted, so there's nothing left for
+// kubelet to fail to mount, ever.
+//
+// Runs every pass once DatabaseReady, not once — matching ensureMonitoring's
+// "cheap same-pass exception" (§4.1): resource.Apply already no-ops when
+// content is unchanged, so there's no need for one-shot bookkeeping.
 func (r *DBInstanceReconciler) ensureBootstrapCleanup(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	ciName := inst.Status.Resources.CloudInitSecretName
 	if ciName == "" {
-		return satisfied() // nothing left to scrub
+		return satisfied() // no VM yet, nothing to redact
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		// Not provably consumed yet (booting, stopped, degraded) — defer.
 		return satisfied()
 	}
 
-	if err := r.Harvester.RemoveCloudInitDisk(ctx, inst.Namespace, vmNameFor(inst)); err != nil {
+	networkdata := credentials.BuildNetworkData(credentials.BootstrapParams{StaticNetwork: inst.Spec.StaticNetwork})
+	if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, resource.CloudInitSecret{
+		Instance:    inst,
+		UserData:    redactedCloudInitUserData,
+		NetworkData: networkdata,
+	}); err != nil {
 		return transient(err)
 	}
-	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: inst.Namespace, Name: ciName}}
-	if err := r.Delete(ctx, sec); err != nil && !apierrors.IsNotFound(err) {
-		return transient(err)
-	}
-	inst.Status.Resources.CloudInitSecretName = ""
-	return pending("CloudInitScrubbed", "removed bootstrap cloud-init disk and secret")
+	return satisfied()
 }
