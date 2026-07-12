@@ -121,6 +121,11 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 	}
 
 	// desired stopped (spec.running=false) — crash-loop halt already returned above.
+	// This step runs before ensureDatabaseHealth, so health won't get a chance to
+	// re-observe the VM this pass while the stop is in flight — the two Pending
+	// branches below set DatabaseReady=False themselves so it (and Ready, derived
+	// from it) don't stay stale-True for the whole stop transition (same
+	// reasoning as the crash-loop halt and the cold-resize halt).
 	switch {
 	case declaredRunning:
 		if err := r.Harvester.StopVM(ctx, inst.Namespace, vmNameFor(inst)); err != nil {
@@ -129,6 +134,7 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		inst.Status.Phase = dbaasv1.StatusStopping
 		msg := "requested VM stop"
 		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, "Stopping", msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "Stopping", msg)
 		inst.Status.Message = msg
 		return pending("Stopping", msg)
 
@@ -136,6 +142,7 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		inst.Status.Phase = dbaasv1.StatusStopping
 		msg := "VM stopping; waiting for VMI teardown"
 		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, "Stopping", msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "Stopping", msg)
 		inst.Status.Message = msg
 		return pendingAfter("Stopping", msg, powerRequeue)
 

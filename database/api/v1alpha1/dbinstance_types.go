@@ -450,15 +450,16 @@ type DBInstanceList struct {
 
 const (
 	// Status.Phase values (RDS-compatible lowercase strings).
-	StatusCreating  = "creating"
-	StatusAvailable = "available"
-	StatusStopping  = "stopping"
-	StatusStopped   = "stopped"
-	StatusStarting  = "starting"
-	StatusModifying = "modifying"
-	StatusDeleting  = "deleting"
-	StatusFailed    = "failed"
-	StatusDegraded  = "degraded" // Report-only — the controller never restarts on degradation.
+	StatusCreating               = "creating"
+	StatusAvailable              = "available"
+	StatusStopping               = "stopping"
+	StatusStopped                = "stopped"
+	StatusStarting               = "starting"
+	StatusModifying              = "modifying"
+	StatusDeleting               = "deleting"
+	StatusFailed                 = "failed"
+	StatusDegraded               = "degraded"                // Report-only — the controller never restarts on degradation.
+	StatusIncompatibleParameters = "incompatible-parameters" // A requested change was rejected; the existing database, if any, is unaffected.
 
 	// MasterUserSecretRef.Status values.
 	SecretStatusActive   = "active"

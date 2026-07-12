@@ -26,34 +26,70 @@ import (
 
 // ensureReady runs only when every prior ensure step returned Satisfied for this
 // pass. It is the single place the top-level status.observedGeneration advances
-// and where Ready is stamped for the converged state — Available for a running
-// instance, Stopped for a deliberately stopped one (Ready=False, never
-// stale-True). Setting Status.Phase here is just a status value; there's no
-// separate dispatch keyed on it — every subsequent pass walks the same
-// ensure-step chain, where ensureDatabaseHealth owns steady-state liveness,
-// crash-loop handling, and endpoint refresh, and the whole chain idles cold
-// (all steps Satisfied, no writes) once nothing has changed.
+// and status.phase is stamped Available/Stopped for the converged state — that
+// specifically means "the whole chain converged for this generation", which is
+// why it's gated: ensureDatabaseHealth's own caughtUp check depends on
+// ObservedGeneration only ever advancing once a pass has actually gone all the
+// way through. The Ready *condition* is a different question — "is the
+// database reachable right now" — and is deliberately NOT set here; see
+// syncReadyCondition, which runs unconditionally every pass regardless of
+// where the chain stopped, so Ready can never go stale while parked (e.g.
+// crash-loop halted, mid-resize, or any other Terminal/Pending park).
 func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBInstance) StepResult {
 	if !wantRunning(inst) {
 		inst.Status.Phase = dbaasv1.StatusStopped
 		inst.Status.ObservedGeneration = inst.Generation
 		inst.Status.Message = "Stopped. Storage preserved."
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, "Stopped", "instance is deliberately stopped")
 		return satisfied()
 	}
 
 	inst.Status.ObservedGeneration = inst.Generation
 
-	// A caught-up probe blip reaches here as report-only (health returned
-	// Satisfied with DatabaseReady=False and Phase=degraded). Ready must reflect
-	// that — never stale-True — and phase stays "degraded" as health set it.
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, "Degraded", "database degraded; see the Degraded condition for attribution")
 		return satisfied()
 	}
 
 	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.Message = "Database instance is available"
-	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue, "DBInstanceReady", "all ensure steps satisfied")
 	return satisfied()
+}
+
+// syncReadyCondition recomputes Ready every pass, independent of where the
+// ensure-step chain stopped this time — a pure derivation from currently-known
+// status, safe and cheap to run unconditionally. It intentionally checks only
+// wantRunning and DatabaseReady: DatabaseReady is kept honest by whichever step
+// actually takes the VM down (ensureDatabaseHealth's crash-loop halt,
+// ensureResize's cold-resize halt, ensurePowerState's stop transition), so
+// Ready never needs to special-case those itself. It deliberately does NOT
+// check Failed or StorageReady/PreflightReady directly — a rejected request
+// (invalid class, immutable-field edit, unsupported shrink) never touches the
+// VM, so DatabaseReady/Ready correctly stay whatever they already were; see
+// markProvisioningFailed for how that's surfaced instead
+// (Phase=IncompatibleParameters, not Failed).
+//
+// Today Ready reduces to "DatabaseReady plus the wantRunning override" — a
+// deliberate choice, not evidence it's redundant. Ready is the summary
+// condition external tooling conventionally looks for (kubectl wait
+// --for=condition=Ready, kstatus-style dashboards); DatabaseReady is a
+// narrower, single-purpose signal about Postgres's own reachability. Keeping
+// them distinct now means a future gating concern that isn't about Postgres
+// being reachable (e.g. a fatal TLS rotation failure) can fold into this
+// function without redefining what DatabaseReady means.
+func (r *DBInstanceReconciler) syncReadyCondition(inst *dbaasv1.DBInstance) {
+	if !wantRunning(inst) {
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, "Stopped", "instance is deliberately stopped")
+		return
+	}
+
+	dbReady := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
+	if dbReady == nil || dbReady.Status != metav1.ConditionTrue {
+		reason, msg := "Provisioning", "database not yet ready"
+		if dbReady != nil {
+			reason, msg = dbReady.Reason, dbReady.Message
+		}
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, reason, msg)
+		return
+	}
+
+	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue, "DBInstanceReady", "database ready")
 }

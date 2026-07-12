@@ -77,6 +77,9 @@ func TestEnsureStorageResizeClassDriftStopsVM(t *testing.T) {
 	if inst.Status.Phase != dbaasv1.StatusModifying {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusModifying)
 	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
+		t.Fatal("DatabaseReady must go False once the VM is halted for resize")
+	}
 }
 
 // Halt requested but the VMI is still tearing down: wait, no repeat StopVM.
@@ -90,6 +93,9 @@ func TestEnsureStorageResizeWaitsForTeardown(t *testing.T) {
 	}
 	if stub.StopVMCalls != 0 || stub.ResizeVMCalls != 0 {
 		t.Fatalf("no provider calls during teardown wait, got stop:%d resize:%d", stub.StopVMCalls, stub.ResizeVMCalls)
+	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
+		t.Fatal("DatabaseReady must stay False while waiting for teardown")
 	}
 }
 
@@ -107,6 +113,9 @@ func TestEnsureStorageResizeAppliesClassWhenDown(t *testing.T) {
 	}
 	if stub.ResizeDVCalls != 0 {
 		t.Fatalf("ResizeDVCalls = %d, want 0 (storage unchanged)", stub.ResizeDVCalls)
+	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
+		t.Fatal("DatabaseReady must stay False while the VM is down for resize")
 	}
 }
 
@@ -145,6 +154,9 @@ func TestEnsureStorageResizeShrinkIsTerminal(t *testing.T) {
 	cond := inst.Status.GetCondition(dbaasv1.ConditionStorageReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "UnsupportedShrink" {
 		t.Fatalf("StorageReady = %+v, want False/UnsupportedShrink", cond)
+	}
+	if inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady) != nil {
+		t.Fatal("DatabaseReady must be untouched — the VM was never halted for a rejected shrink")
 	}
 }
 

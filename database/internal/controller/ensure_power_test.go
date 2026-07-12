@@ -120,6 +120,8 @@ func TestEnsurePowerStateWaitsForBoot(t *testing.T) {
 
 func TestEnsurePowerStateStopsRunningVM(t *testing.T) {
 	r, inst, stub := newPowerFixture(t, false, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	// Was Available immediately before the stop request — DatabaseReady starts True.
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
 
 	res := r.ensurePowerState(context.Background(), inst)
 
@@ -132,12 +134,16 @@ func TestEnsurePowerStateStopsRunningVM(t *testing.T) {
 	if inst.Status.Phase != dbaasv1.StatusStopping {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopping)
 	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
+		t.Fatal("DatabaseReady must go False immediately when a stop is requested, not wait for health to run")
+	}
 }
 
 // Once runStrategy is observed Halted, StopVM is NOT re-requested — the step
 // waits for the VMI to disappear.
 func TestEnsurePowerStateStopWaitsForTeardownWithoutRepeatStop(t *testing.T) {
 	r, inst, stub := newPowerFixture(t, false, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{Running: true})
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
 
 	res := r.ensurePowerState(context.Background(), inst)
 
@@ -146,6 +152,9 @@ func TestEnsurePowerStateStopWaitsForTeardownWithoutRepeatStop(t *testing.T) {
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatalf("StopVMCalls = %d, want 0 (declared layer already Halted)", stub.StopVMCalls)
+	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
+		t.Fatal("DatabaseReady must stay False while waiting for VMI teardown")
 	}
 }
 

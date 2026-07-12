@@ -92,6 +92,11 @@ func observeShapeDrift(vm *kubevirtv1.VirtualMachine, inst *dbaasv1.DBInstance, 
 // Ordered BEFORE ensurePowerState so the two never fight: this step holds the VM
 // down only while drift exists; once the shape converges, the power step observes
 // "desired running, declared Halted" and restarts.
+//
+// This step runs before ensureDatabaseHealth, so health never gets a chance to
+// re-observe the VM while a resize holds it down — each halting branch sets
+// DatabaseReady=False itself so Ready doesn't stay stale-True for the whole
+// resize window (same reasoning as the crash-loop halt in ensure_health.go).
 func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	class, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
 	if !ok {
@@ -133,6 +138,7 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 		}
 		msg := fmt.Sprintf("stopping VM for cold resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, "ResizeStopping", msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "ResizeStopping", msg)
 		inst.Status.Message = msg
 		return pending("ResizeStopping", msg)
 	}
@@ -144,6 +150,7 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	if err == nil && readiness.Running {
 		msg := "waiting for VM to stop before resize"
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, "ResizeWaitingForTeardown", msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "ResizeWaitingForTeardown", msg)
 		inst.Status.Message = msg
 		return pendingAfter("ResizeWaitingForTeardown", msg, powerRequeue)
 	}
@@ -162,6 +169,7 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	}
 	msg := fmt.Sprintf("applied resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
 	setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, "ResizeApplied", msg)
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "ResizeApplied", msg)
 	inst.Status.Message = msg
 	// Next pass re-observes the shape: no drift → Satisfied → ensurePowerState restarts.
 	return pending("ResizeApplied", msg)

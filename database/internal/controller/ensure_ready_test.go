@@ -43,17 +43,10 @@ func TestEnsureReadyStampsAvailableAndObservedGeneration(t *testing.T) {
 	if inst.Status.ObservedGeneration != 5 {
 		t.Fatalf("ObservedGeneration = %d, want 5 — only ensureReady advances it", inst.Status.ObservedGeneration)
 	}
-	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
-	if cond == nil || cond.ObservedGeneration != 5 {
-		t.Fatalf("Ready condition = %+v, want True with ObservedGeneration 5", cond)
-	}
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
-		t.Fatal("Ready should be True")
-	}
 }
 
-// A deliberately stopped instance converges to phase=stopped with Ready=False —
-// stopped is a converged state, and Ready is never left stale-True.
+// A deliberately stopped instance converges to phase=stopped — stopped is a
+// converged state, so ObservedGeneration still advances.
 func TestEnsureReadyStampsStoppedWhenNotRunning(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
@@ -72,17 +65,12 @@ func TestEnsureReadyStampsStoppedWhenNotRunning(t *testing.T) {
 	if inst.Status.ObservedGeneration != 4 {
 		t.Fatalf("ObservedGeneration = %d, want 4 (stop observed)", inst.Status.ObservedGeneration)
 	}
-	if inst.Status.GetCondition(dbaasv1.ConditionReady) == nil {
-		t.Fatal("Ready condition missing")
-	}
-	if inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
-		t.Fatal("Ready must be False on a stopped instance")
-	}
 }
 
-// A caught-up degraded blip reaches ready as report-only: Ready must read False
-// (never stale-True) and phase must stay "degraded" as health set it.
-func TestEnsureReadyReflectsDegraded(t *testing.T) {
+// A caught-up degraded blip reaches ready as report-only: phase must stay
+// "degraded" as health set it — ensureReady must not overwrite it with
+// Available just because ObservedGeneration is advancing.
+func TestEnsureReadyDoesNotOverwritePhaseWhenDegraded(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
 	inst.Generation = 6
@@ -98,14 +86,68 @@ func TestEnsureReadyReflectsDegraded(t *testing.T) {
 	if inst.Status.Phase != dbaasv1.StatusDegraded {
 		t.Fatalf("Phase = %q, want %q (must not overwrite with available)", inst.Status.Phase, dbaasv1.StatusDegraded)
 	}
-	if inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
-		t.Fatal("Ready must be False while degraded")
-	}
-	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
-	if cond == nil || cond.Reason != "Degraded" {
-		t.Fatalf("Ready condition = %+v, want False/Degraded", cond)
-	}
 	if inst.Status.ObservedGeneration != 6 {
 		t.Fatalf("ObservedGeneration = %d, want 6 (generation converged; degradation is runtime)", inst.Status.ObservedGeneration)
+	}
+}
+
+// --- syncReadyCondition: recomputed every pass, independent of ensureReady ---
+
+func TestSyncReadyConditionTrueWhenDatabaseReady(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
+
+	r.syncReadyCondition(inst)
+
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+		t.Fatal("Ready should be True when DatabaseReady is True")
+	}
+}
+
+func TestSyncReadyConditionFalseWhenStopped(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	stopped := false
+	inst.Spec.Running = &stopped
+	// Even a stale True DatabaseReady must not leak through: wantRunning wins.
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
+
+	r.syncReadyCondition(inst)
+
+	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "Stopped" {
+		t.Fatalf("Ready = %+v, want False/Stopped", cond)
+	}
+}
+
+// Ready mirrors DatabaseReady's own reason/message rather than hardcoding one,
+// since syncReadyCondition runs regardless of which step last touched
+// DatabaseReady (health's degraded report, a crash-loop halt, a resize halt).
+func TestSyncReadyConditionMirrorsDatabaseReadyReason(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+		"PostgresUnreachable", "probe failing")
+
+	r.syncReadyCondition(inst)
+
+	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "PostgresUnreachable" {
+		t.Fatalf("Ready = %+v, want False/PostgresUnreachable", cond)
+	}
+}
+
+// A brand-new instance has no DatabaseReady condition at all yet — must fall
+// back to a generic reason rather than nil-dereferencing.
+func TestSyncReadyConditionFalseWhenDatabaseReadyNeverSet(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+
+	r.syncReadyCondition(inst)
+
+	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready = %+v, want False", cond)
 	}
 }

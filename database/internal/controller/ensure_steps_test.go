@@ -398,3 +398,69 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		}
 	}
 }
+
+// --- markProvisioningFailed: Phase depends on whether a working instance exists ---
+
+// A never-converged instance (ObservedGeneration == 0) has no prior good state
+// to protect — Phase reflects the failure directly.
+func TestMarkProvisioningFailedNeverConvergedSetsFailed(t *testing.T) {
+	inst := newProvisionInst()
+
+	markProvisioningFailed(inst, "InvalidClass", "unknown class")
+
+	if inst.Status.Phase != dbaasv1.StatusFailed {
+		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusFailed)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
+		t.Fatal("Failed condition not set")
+	}
+}
+
+// An already-converged, healthy instance hitting a rejected request (immutable
+// drift, unsupported shrink, a bad class edit) keeps its Phase — RDS-style,
+// the rejection is IncompatibleParameters, not Failed, since the database
+// itself was never touched.
+func TestMarkProvisioningFailedAlreadyConvergedSetsIncompatibleParameters(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Status.ObservedGeneration = inst.Generation
+	inst.Status.Phase = dbaasv1.StatusAvailable
+
+	markProvisioningFailed(inst, "ImmutableFieldChanged", "cannot modify immutable field networkRef")
+
+	if inst.Status.Phase != dbaasv1.StatusIncompatibleParameters {
+		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusIncompatibleParameters)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
+		t.Fatal("Failed condition not set")
+	}
+}
+
+// Same as above but the instance was previously Stopped (also a converged
+// state) rather than Available — Phase must still avoid Failed.
+func TestMarkProvisioningFailedAlreadyConvergedStoppedSetsIncompatibleParameters(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Status.ObservedGeneration = inst.Generation
+	inst.Status.Phase = dbaasv1.StatusStopped
+
+	markProvisioningFailed(inst, "UnsupportedShrink", "allocatedStorage below current size")
+
+	if inst.Status.Phase != dbaasv1.StatusIncompatibleParameters {
+		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusIncompatibleParameters)
+	}
+}
+
+// A rejected request arriving while the instance is ALSO crash-loop-halted
+// must not hide the more urgent, genuine failure behind IncompatibleParameters
+// — Phase stays Failed even though ObservedGeneration > 0.
+func TestMarkProvisioningFailedCrashLoopHaltedTakesPriority(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Status.ObservedGeneration = inst.Generation
+	inst.Status.Phase = dbaasv1.StatusFailed
+	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, "CrashLoopDetected", "halted")
+
+	markProvisioningFailed(inst, "ImmutableFieldChanged", "cannot modify immutable field networkRef")
+
+	if inst.Status.Phase != dbaasv1.StatusFailed {
+		t.Fatalf("Phase = %q, want %q (crash-loop halt must take priority)", inst.Status.Phase, dbaasv1.StatusFailed)
+	}
+}

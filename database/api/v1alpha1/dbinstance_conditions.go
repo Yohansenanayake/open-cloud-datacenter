@@ -31,10 +31,21 @@ const (
 	ConditionVMReady          = "VMReady"
 	ConditionPowerStateReady  = "PowerStateReady"
 	ConditionStorageReady     = "StorageReady"
-	ConditionDatabaseReady    = "DatabaseReady"
-	ConditionMonitoringReady  = "MonitoringReady"
-	ConditionReady            = "Ready"
-	ConditionCrashLoopHalted  = "CrashLoopHalted"
+	// ConditionDatabaseReady is the narrow, single-purpose signal for "is
+	// Postgres itself reachable right now" — set by whichever step actually
+	// takes the VM down (ensureDatabaseHealth, ensureResize, ensurePowerState),
+	// probed via the VMI readiness gate elsewhere.
+	ConditionDatabaseReady   = "DatabaseReady"
+	ConditionMonitoringReady = "MonitoringReady"
+	// ConditionReady is the overall summary condition external tooling
+	// conventionally looks for by name (kubectl wait --for=condition=Ready,
+	// kstatus-style dashboards). It's derived from DatabaseReady today (see
+	// syncReadyCondition) — behaviorally near-identical — but kept as its own
+	// condition on purpose: a future gating concern that isn't about Postgres's
+	// own reachability can fold into it without redefining what
+	// ConditionDatabaseReady means.
+	ConditionReady           = "Ready"
+	ConditionCrashLoopHalted = "CrashLoopHalted"
 	// ConditionDegraded is report-only: the instance is provisioned and supposed
 	// to serve, but readiness or guest-agent attribution says it is unhealthy.
 	ConditionDegraded = "Degraded"
