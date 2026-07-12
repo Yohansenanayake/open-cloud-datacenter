@@ -80,10 +80,9 @@ func observeShapeDrift(vm *kubevirtv1.VirtualMachine, inst *dbaasv1.DBInstance, 
 	return drift
 }
 
-// ensureStorageResize converges the VM's declared shape (cpu/memory from the
+// ensureResize converges the VM's declared shape (cpu/memory from the
 // instance class, data-disk size from spec.allocatedStorage) via a cold resize:
-// halt → apply → let ensurePowerState (ordered after this step) restart. Progress
-// is re-derived from observed state each pass — no persisted phase pointer:
+// halt → apply → let ensurePowerState (ordered after this step) restart.
 //
 //	shape matches            → Satisfied
 //	drift, runStrategy!=Halted → StopVM            → Pending
@@ -93,7 +92,7 @@ func observeShapeDrift(vm *kubevirtv1.VirtualMachine, inst *dbaasv1.DBInstance, 
 // Ordered BEFORE ensurePowerState so the two never fight: this step holds the VM
 // down only while drift exists; once the shape converges, the power step observes
 // "desired running, declared Halted" and restarts.
-func (r *DBInstanceReconciler) ensureStorageResize(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	class, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
 	if !ok {
 		// ensurePreflight terminals on this first; defensive.

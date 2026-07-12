@@ -54,7 +54,7 @@ const (
 // ensureDatabaseHealth is both the provisioning readiness gate and the
 // steady-state liveness monitor, all from one VMI observation per pass:
 //
-//  1. while parked under CrashLoopHalted it re-probes cold every 30s and
+//  1. while parked under CrashLoopHalted it re-probes every 30s and
 //     auto-recovers when an operator brings the VM back healthy out-of-band;
 //  2. otherwise, the crash-loop guard runs FIRST — a gate can never starve it;
 //  3. while catching up (observedGeneration != generation) it GATES: booting /
@@ -68,8 +68,7 @@ const (
 // and the controller never restarts on readiness failure — the only
 // controller-initiated halt is the crash-loop guard.
 func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
-	// Desired stopped: there is nothing to gate on — a stopped database is
-	// "converged", not "booting".
+	// Desired stopped: there is nothing to gate on
 	if !wantRunning(inst) {
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
 			"Stopped", "instance is stopped")
@@ -100,6 +99,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// unplanned restart.
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
 			inst.Status.RecentUnplannedRestarts = 0
+			// why continue ? instead of setting Phase=Recovering and returning ?
 		} else {
 			msg := "crash-loop halted; VM kept down — start the VM out-of-band once repaired to recover"
 			inst.Status.Message = msg
@@ -122,7 +122,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	if !readiness.Running || readiness.IP == "" {
 		if caughtUp {
 			r.reportDegraded(inst, readiness)
-			return satisfied()
+			return satisfied() //Report only by design, nothing left controller can do, Also Stale Ready Condition would appear
 		}
 		msg := "VM booting; waiting for guest agent and data-net IP"
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "VMBooting", msg)
@@ -211,8 +211,8 @@ func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.
 	msg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
 		inst.Status.RecentUnplannedRestarts, crashLoopWindow)
 	r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonCrashLoopDetected, "%s", msg)
-	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
-		dbaasv1.ReasonCrashLoopDetected, msg)
+	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, msg)
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonCrashLoopDetected, msg)
 	removeCondition(inst, dbaasv1.ConditionDegraded)
 	inst.Status.Phase = dbaasv1.StatusFailed
 	inst.Status.Message = msg

@@ -79,6 +79,7 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		if !apierrors.IsNotFound(err) {
 			return transient(err)
 		}
+		//VMI is gone (not found) - treat as stopped.
 		readiness = harvester.VMIReadiness{}
 	}
 
@@ -119,7 +120,7 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		}
 	}
 
-	// desired stopped (spec.running=false, or crash-loop halt).
+	// desired stopped (spec.running=false) — crash-loop halt already returned above.
 	switch {
 	case declaredRunning:
 		if err := r.Harvester.StopVM(ctx, inst.Namespace, vmNameFor(inst)); err != nil {

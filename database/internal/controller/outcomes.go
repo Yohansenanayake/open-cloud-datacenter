@@ -22,25 +22,23 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// StepOutcome is the result kind of one ensure step. It drives the bounded
-// reconcile runner: only OutcomeSatisfied continues to the next step; every other
-// outcome stops the pass after status is patched.
+// StepOutcome is the result kind of one ensure step. Only Satisfied continues
+// to the next step; every other outcome stops the pass after status is patched.
+//
+//   - Satisfied: nothing left to do this pass — converged, or a report-only /
+//     non-fatal concern that shouldn't block the chain. Also what the whole
+//     chain reports once every step in it is Satisfied (see runEnsureSteps).
+//   - Pending: made a change, or waiting on async state. StepResult.Result
+//     carries the requeue policy: zero is event-driven, RequeueAfter is a
+//     timer fallback.
+//   - Terminal: needs user action to unblock. Park — no error, no requeue.
+//   - Transient: retryable failure. Return Err for controller-runtime backoff.
 type StepOutcome string
 
 const (
-	// OutcomeSatisfied: observed state already matches desired. Continue.
 	OutcomeSatisfied StepOutcome = "Satisfied"
-	// OutcomePending: not converged yet — the step made a change, or is waiting on
-	// asynchronous runtime state. Patch status and stop. The requeue policy lives on
-	// StepResult.Result: a zero Result is event-driven (rely on Owns()/VMI watches);
-	// a RequeueAfter is a timer fallback for a watch-less wait. Pending merges the
-	// former Progress ("made a change") and Waiting ("waiting on runtime"): they did
-	// the identical thing in the runner and differed only in requeue policy.
-	OutcomePending StepOutcome = "Pending"
-	// OutcomeTerminal: current spec/config cannot be reconciled without user action.
-	// Park — no error, no requeue; recovers on a spec edit / watch event.
-	OutcomeTerminal StepOutcome = "Terminal"
-	// OutcomeTransient: retryable failure. Return Err for controller-runtime backoff.
+	OutcomePending   StepOutcome = "Pending"
+	OutcomeTerminal  StepOutcome = "Terminal"
 	OutcomeTransient StepOutcome = "Transient"
 )
 
@@ -63,8 +61,8 @@ type StepResult struct {
 	Message string
 }
 
-// satisfied reports that observed state already matches desired; the runner
-// continues to the next step.
+// satisfied reports that this step has no further action to take this pass;
+// the runner continues to the next step.
 func satisfied() StepResult { return StepResult{Outcome: OutcomeSatisfied} }
 
 // pending reports that the step made a change this pass. The zero Result makes it

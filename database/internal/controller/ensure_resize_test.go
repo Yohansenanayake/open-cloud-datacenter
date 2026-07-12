@@ -46,7 +46,7 @@ func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.V
 func TestEnsureStorageResizeNoDriftSatisfied(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.small", 20, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 
-	res := r.ensureStorageResize(context.Background(), inst)
+	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
@@ -63,7 +63,7 @@ func TestEnsureStorageResizeNoDriftSatisfied(t *testing.T) {
 func TestEnsureStorageResizeClassDriftStopsVM(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.medium", 20, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 
-	res := r.ensureStorageResize(context.Background(), inst)
+	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomePending || res.Reason != "ResizeStopping" {
 		t.Fatalf("res = %+v, want Pending/ResizeStopping", res)
@@ -83,7 +83,7 @@ func TestEnsureStorageResizeClassDriftStopsVM(t *testing.T) {
 func TestEnsureStorageResizeWaitsForTeardown(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.medium", 20, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{Running: true})
 
-	res := r.ensureStorageResize(context.Background(), inst)
+	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomePending || res.Reason != "ResizeWaitingForTeardown" {
 		t.Fatalf("res = %+v, want Pending/ResizeWaitingForTeardown", res)
@@ -97,7 +97,7 @@ func TestEnsureStorageResizeWaitsForTeardown(t *testing.T) {
 func TestEnsureStorageResizeAppliesClassWhenDown(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.medium", 20, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
 
-	res := r.ensureStorageResize(context.Background(), inst)
+	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomePending || res.Reason != "ResizeApplied" {
 		t.Fatalf("res = %+v, want Pending/ResizeApplied", res)
@@ -114,7 +114,7 @@ func TestEnsureStorageResizeAppliesClassWhenDown(t *testing.T) {
 func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.small", 50, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
 
-	res := r.ensureStorageResize(context.Background(), inst)
+	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomePending || res.Reason != "ResizeApplied" {
 		t.Fatalf("res = %+v, want Pending/ResizeApplied", res)
@@ -131,7 +131,7 @@ func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 func TestEnsureStorageResizeShrinkIsTerminal(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.small", 10, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 
-	res := r.ensureStorageResize(context.Background(), inst)
+	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomeTerminal || res.Reason != "UnsupportedShrink" {
 		t.Fatalf("res = %+v, want Terminal/UnsupportedShrink", res)
@@ -161,7 +161,7 @@ func TestEnsureStorageResizeMissingShapeSatisfied(t *testing.T) {
 	bare.Spec.Template = &kubevirtv1.VirtualMachineInstanceTemplateSpec{}
 	r := newProvisionReconciler(t, stub, inst, bare)
 
-	res := r.ensureStorageResize(context.Background(), inst)
+	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied (unobservable shape is skipped)", res)

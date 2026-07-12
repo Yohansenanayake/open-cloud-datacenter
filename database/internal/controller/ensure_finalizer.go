@@ -36,6 +36,7 @@ func (r *DBInstanceReconciler) ensureFinalizer(ctx context.Context, inst *dbaasv
 	if err := r.Update(ctx, inst); err != nil {
 		return transient(err)
 	}
-	// The metadata update generates a watch event on the DBInstance itself.
+	// The metadata update generates a watch event on the DBInstance itself. NO need to explicitly requeue.
+	// Pending returns a Zero ControllerResult, - no explicit requeue.
 	return pending("FinalizerAdded", "added cleanup finalizer")
 }

@@ -38,8 +38,7 @@ func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBIn
 		inst.Status.Phase = dbaasv1.StatusStopped
 		inst.Status.ObservedGeneration = inst.Generation
 		inst.Status.Message = "Stopped. Storage preserved."
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse,
-			"Stopped", "instance is deliberately stopped")
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, "Stopped", "instance is deliberately stopped")
 		return satisfied()
 	}
 
@@ -49,14 +48,12 @@ func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBIn
 	// Satisfied with DatabaseReady=False and Phase=degraded). Ready must reflect
 	// that — never stale-True — and phase stays "degraded" as health set it.
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse,
-			"Degraded", "database degraded; see the Degraded condition for attribution")
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, "Degraded", "database degraded; see the Degraded condition for attribution")
 		return satisfied()
 	}
 
 	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.Message = "Database instance is available"
-	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue,
-		"DBInstanceReady", "all ensure steps satisfied")
+	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue, "DBInstanceReady", "all ensure steps satisfied")
 	return satisfied()
 }

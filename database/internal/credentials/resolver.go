@@ -133,6 +133,7 @@ func (r *Resolver) getOrCreateTenant(ctx context.Context, inst *dbaasv1.DBInstan
 		if !apierrors.IsAlreadyExists(err) {
 			return "", "", err
 		}
+		// race winner already created the secret
 		var won corev1.Secret
 		if gerr := r.Client.Get(ctx, key, &won); gerr != nil {
 			return "", "", gerr

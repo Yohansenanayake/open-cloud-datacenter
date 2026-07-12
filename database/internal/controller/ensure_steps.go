@@ -39,7 +39,7 @@ type ensureStep struct {
 // via patchStatusIfChanged), then maps the outcome to a controller-runtime
 // result:
 //
-//	Satisfied → zero Result (event-driven; steady state is fully owned by
+//	Satisfied → zero Result,converged (event-driven; steady state is fully owned by
 //	            ensureDatabaseHealth's report-only liveness/crash-loop logic)
 //	Pending   → step's Result (zero = watch-driven, or RequeueAfter fallback)
 //	Terminal  → park: (ctrl.Result{}, nil); recovers on a spec edit / watch event
@@ -78,19 +78,22 @@ func (r *DBInstanceReconciler) provisioningSteps() []ensureStep {
 		{"preflight", r.ensurePreflight},
 		{"credentials", r.ensureCredentials},
 		{"vm", r.ensureVM},
-		{"resize", r.ensureStorageResize},
+		{"resize", r.ensureResize},
 		{"power", r.ensurePowerState},
 		{"health", r.ensureDatabaseHealth},
-		{"bootstrap-cleanup", r.ensureBootstrapCleanup},
 		{"monitoring", r.ensureMonitoring},
+		{"bootstrap-cleanup", r.ensureBootstrapCleanup},
 		{"ready", r.ensureReady},
 	}
 }
 
 // runEnsureSteps walks the ordered steps, continuing only while each is Satisfied
-// and returning the first non-Satisfied result. An unknown outcome is treated as
-// Transient defensively. Steps are a parameter so runner mechanics are testable
-// with injected steps; production callers pass r.provisioningSteps().
+// and returning the first non-Satisfied result. If every step is Satisfied, it
+// returns satisfied() too — no separate "all steps satisfied" outcome, since a
+// chain of steps is itself satisfied precisely when every step in it is. An
+// unknown outcome is treated as Transient defensively. Steps are a parameter so
+// runner mechanics are testable with injected steps; production callers pass
+// r.provisioningSteps().
 func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1.DBInstance, steps []ensureStep) StepResult {
 	for _, step := range steps {
 		res := step.run(ctx, inst)
