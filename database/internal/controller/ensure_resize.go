@@ -118,7 +118,7 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	if drift.storageShrink {
 		msg := fmt.Sprintf("allocatedStorage %dGi is below the currently provisioned size; storage shrink is not supported — revert the change", inst.Spec.AllocatedStorage)
 		setStepCond(inst, dbaasv1.ConditionStorageChangeRejected, metav1.ConditionTrue, dbaasv1.ReasonUnsupportedShrink, msg)
-		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink, msg)
+		removeCondition(inst, dbaasv1.ConditionResizeInProgress)
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionUnknown, dbaasv1.ReasonUnsupportedShrink, msg)
 		return terminal(dbaasv1.ReasonUnsupportedShrink, msg)
 	}
@@ -128,21 +128,31 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	removeCondition(inst, dbaasv1.ConditionStorageChangeRejected)
 
 	if !drift.any() {
-		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionFalse,
-			dbaasv1.ReasonShapeConverged, "no resize is in progress")
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionTrue,
 			dbaasv1.ReasonShapeConverged, "VM class and storage match the spec")
+		if inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) {
+			setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue,
+				dbaasv1.ReasonResizeApplied, "resize applied; waiting for the database to return to its desired state")
+		} else {
+			// Activity conditions are absent while idle; do not retain a noisy
+			// steady-state False condition.
+			removeCondition(inst, dbaasv1.ConditionResizeInProgress)
+		}
 		return satisfied()
 	}
+
+	// A resize outage is intentional, not degradation. The activity condition
+	// and modifying phase carry the user-visible explanation until recovery.
+	removeCondition(inst, dbaasv1.ConditionDegraded)
 
 	halted := vm.Spec.RunStrategy != nil && *vm.Spec.RunStrategy == kubevirtv1.RunStrategyHalted
 
 	if !halted {
+		msg := fmt.Sprintf("stopping VM for cold resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
+		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue, dbaasv1.ReasonResizeStopping, msg)
 		if err := r.Harvester.StopVM(ctx, inst.Namespace, vmNameFor(inst)); err != nil {
 			return transient(err)
 		}
-		msg := fmt.Sprintf("stopping VM for cold resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
-		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue, dbaasv1.ReasonResizeStopping, msg)
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, dbaasv1.ReasonResizeStopping, msg)
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonResizeStopping, msg)
 		return pending(dbaasv1.ReasonResizeStopping, msg)
@@ -162,6 +172,8 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 
 	// VM is down: apply whichever shape elements drifted. Both provider calls are
 	// idempotent, so a crash between them re-applies safely next pass.
+	msg := fmt.Sprintf("applying resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
+	setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue, dbaasv1.ReasonResizeApplied, msg)
 	if drift.cpuMem {
 		if err := r.Harvester.ResizeVM(ctx, inst.Namespace, vmNameFor(inst), class.CPUCores, class.MemoryMB); err != nil {
 			return transient(err)
@@ -172,7 +184,7 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 			return transient(err)
 		}
 	}
-	msg := fmt.Sprintf("applied resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
+	msg = fmt.Sprintf("applied resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
 	setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue, dbaasv1.ReasonResizeApplied, msg)
 	setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, dbaasv1.ReasonResizeApplied, msg)
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonResizeApplied, msg)

@@ -74,6 +74,28 @@ func (r *DBInstanceReconciler) syncInterventionRequiredCondition(inst *dbaasv1.D
 		dbaasv1.ReasonNoInterventionRequired, "no operator intervention required")
 }
 
+// syncResizeInProgressCondition completes the user-visible resize lifecycle.
+// Shape convergence happens before ensurePowerState and ensureDatabaseHealth,
+// so ensureResize cannot clear this condition without making the resize appear
+// complete while the VM or PostgreSQL is still recovering.
+func (r *DBInstanceReconciler) syncResizeInProgressCondition(inst *dbaasv1.DBInstance) {
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) ||
+		!inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionStorageReady, inst.Generation) {
+		return
+	}
+
+	if wantRunning(inst) {
+		if inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionReady, inst.Generation) {
+			removeCondition(inst, dbaasv1.ConditionResizeInProgress)
+		}
+		return
+	}
+
+	if inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionPowerStateReady, inst.Generation) {
+		removeCondition(inst, dbaasv1.ConditionResizeInProgress)
+	}
+}
+
 func conditionMessage(inst *dbaasv1.DBInstance, typ, fallback string) string {
 	if c := inst.Status.GetCondition(typ); c != nil && c.Message != "" {
 		return c.Message
@@ -84,6 +106,7 @@ func conditionMessage(inst *dbaasv1.DBInstance, typ, fallback string) string {
 func (r *DBInstanceReconciler) finalizeStatus(inst *dbaasv1.DBInstance) {
 	r.syncAcceptedCondition(inst)
 	r.syncReadyCondition(inst)
+	r.syncResizeInProgressCondition(inst)
 	r.syncInterventionRequiredCondition(inst)
 	// Normalize status written by older controller versions. Failed used to
 	// conflate rejected specs and crash-loop halts.

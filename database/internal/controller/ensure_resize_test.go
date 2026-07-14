@@ -59,8 +59,40 @@ func TestEnsureStorageResizeNoDriftSatisfied(t *testing.T) {
 	if inst.Status.GetCondition(dbaasv1.ConditionStorageChangeRejected) != nil {
 		t.Fatal("StorageChangeRejected should be absent once the request is supported")
 	}
+	if inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress) != nil {
+		t.Fatal("ResizeInProgress should be absent when no resize was active")
+	}
 	if stub.StopVMCalls+stub.ResizeVMCalls+stub.ResizeDVCalls != 0 {
 		t.Fatal("no provider calls expected with no drift")
+	}
+}
+
+func TestEnsureStorageResizeKeepsActivityUntilDatabaseRecovers(t *testing.T) {
+	r, inst, _ := newResizeFixture(t, "db.t3.small", 20, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue,
+		dbaasv1.ReasonResizeApplied, "resize applied")
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+		dbaasv1.ReasonVMBooting, "VM booting")
+
+	if res := r.ensureResize(context.Background(), inst); res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied after shape convergence", res)
+	}
+	r.finalizeStatus(inst)
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) {
+		t.Fatal("ResizeInProgress must remain True while the database is recovering")
+	}
+	if inst.Status.Phase != dbaasv1.StatusModifying {
+		t.Fatalf("phase = %q, want %q while database is recovering", inst.Status.Phase, dbaasv1.StatusModifying)
+	}
+
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
+		dbaasv1.ReasonPostgresReady, "PostgreSQL is ready")
+	r.finalizeStatus(inst)
+	if inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress) != nil {
+		t.Fatal("ResizeInProgress must be removed after shape and database readiness converge")
+	}
+	if inst.Status.Phase != dbaasv1.StatusAvailable {
+		t.Fatalf("phase = %q, want %q after resize completion", inst.Status.Phase, dbaasv1.StatusAvailable)
 	}
 }
 
@@ -139,6 +171,26 @@ func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 	}
 	if stub.ResizeVMCalls != 0 {
 		t.Fatalf("ResizeVMCalls = %d, want 0 (class unchanged)", stub.ResizeVMCalls)
+	}
+	r.finalizeStatus(inst)
+	if inst.Status.Phase != dbaasv1.StatusModifying {
+		t.Fatalf("phase = %q, want %q for storage growth", inst.Status.Phase, dbaasv1.StatusModifying)
+	}
+}
+
+func TestEnsureStorageResizeAppliesClassAndStorageTogether(t *testing.T) {
+	r, inst, stub := newResizeFixture(t, "db.t3.medium", 50, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
+
+	res := r.ensureResize(context.Background(), inst)
+
+	if res.Outcome != OutcomePending || res.Reason != "ResizeApplied" {
+		t.Fatalf("res = %+v, want Pending/ResizeApplied", res)
+	}
+	if stub.ResizeVMCalls != 1 || stub.ResizeDVCalls != 1 {
+		t.Fatalf("resize calls = VM:%d storage:%d, want 1 each", stub.ResizeVMCalls, stub.ResizeDVCalls)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) {
+		t.Fatal("ResizeInProgress must be True for a combined class and storage resize")
 	}
 }
 
