@@ -163,6 +163,9 @@ func TestStartReentersChainAndConverges(t *testing.T) {
 	// User flips running back to true.
 	inst := getInst(t, r.Client)
 	inst.Spec.Running = boolPtr(true)
+	// The fake client does not implement API-server generation increments.
+	// Model the real spec-update behavior so health remains a convergence gate.
+	inst.Generation++
 	if err := r.Update(ctx, inst); err != nil {
 		t.Fatalf("spec update: %v", err)
 	}
@@ -181,9 +184,21 @@ func TestStartReentersChainAndConverges(t *testing.T) {
 		t.Fatalf("LastKnownVMIUID = %q, want cleared (planned start must not count as unplanned restart)", inst.Status.LastKnownVMIUID)
 	}
 
-	// Simulate the start subresource flipping runStrategy and the VM coming up.
+	// Simulate the start subresource flipping runStrategy and the VM coming up,
+	// but PostgreSQL not being ready yet. An established instance must stay in
+	// Starting rather than falling back to Creating after power converges.
 	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyAlways)
-	stub.readiness = harvester.VMIReadiness{Running: true, IP: "192.168.40.50", Ready: true, AgentConnected: true, VMIUID: "vmi-uid-new"}
+	stub.readiness = harvester.VMIReadiness{Running: true, IP: "192.168.40.50", AgentConnected: true, VMIUID: "vmi-uid-new"}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("database recovery reconcile error: %v", err)
+	}
+	inst = getInst(t, r.Client)
+	if inst.Status.Phase != dbaasv1.StatusStarting {
+		t.Fatalf("phase = %q, want starting while PostgreSQL initializes", inst.Status.Phase)
+	}
+
+	stub.readiness.Ready = true
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("converge reconcile error: %v", err)

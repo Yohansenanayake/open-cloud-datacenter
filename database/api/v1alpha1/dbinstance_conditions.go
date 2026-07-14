@@ -255,6 +255,11 @@ func DerivePhaseSummary(inst *DBInstance) PhaseSummary {
 		s.IsCurrentConditionFalse(ConditionPowerStateReady, inst.Generation) &&
 		currentConditionHasReason(s, ConditionPowerStateReady, inst.Generation, ReasonStarting, ReasonStartWaitingForTeardown):
 		return PhaseSummary{StatusStarting, conditionMessage(s, ConditionPowerStateReady, "Starting database instance")}
+	case s.ObservedGeneration > 0 && desiredRunning(inst) &&
+		s.IsCurrentConditionFalse(ConditionReady, inst.Generation):
+		// Power convergence is only the first half of starting a stopped
+		// instance. Keep the lifecycle phase until PostgreSQL is ready too.
+		return PhaseSummary{StatusStarting, conditionMessage(s, ConditionReady, "Starting database instance")}
 	case s.IsConditionTrue(ConditionReady):
 		return PhaseSummary{StatusAvailable, "Database instance is available"}
 	default:

@@ -62,7 +62,9 @@ func TestDerivePhaseSummary(t *testing.T) {
 		{"stopped", withCond(DBInstanceSpec{Running: &stopped}, 2, 1, ConditionPowerStateReady, metav1.ConditionTrue, ReasonStopped), StatusStopped},
 		{"stopping", withCond(DBInstanceSpec{Running: &stopped}, 2, 1, ConditionPowerStateReady, metav1.ConditionFalse, ReasonStopping), StatusStopping},
 		{"starting-established", withCond(DBInstanceSpec{Running: &running}, 2, 1, ConditionPowerStateReady, metav1.ConditionFalse, ReasonStarting), StatusStarting},
+		{"starting-established-database-recovery", withCond(DBInstanceSpec{Running: &running}, 2, 1, ConditionReady, metav1.ConditionFalse, ReasonPostgresInitializing), StatusStarting},
 		{"initial-boot-is-creating", withCond(DBInstanceSpec{Running: &running}, 1, 0, ConditionPowerStateReady, metav1.ConditionFalse, ReasonStarting), StatusCreating},
+		{"initial-boot-database-recovery-is-creating", withCond(DBInstanceSpec{Running: &running}, 1, 0, ConditionReady, metav1.ConditionFalse, ReasonPostgresInitializing), StatusCreating},
 		{"resize-active", withCond(DBInstanceSpec{Running: &running}, 2, 1, ConditionResizeInProgress, metav1.ConditionTrue, ReasonResizeStopping), StatusModifying},
 		{"generation-lag-only-is-creating", &DBInstance{Spec: DBInstanceSpec{Running: &running}, ObjectMeta: metav1.ObjectMeta{Generation: 2}, Status: DBInstanceStatus{ObservedGeneration: 1}}, StatusCreating},
 	}
