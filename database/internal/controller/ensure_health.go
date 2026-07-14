@@ -99,7 +99,12 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// unplanned restart.
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
 			inst.Status.RecentUnplannedRestarts = 0
-			// why continue ? instead of setting Phase=Recovering and returning ?
+			// Falls through rather than returning: readiness was already fetched
+			// once above and just proved fully healthy, so the checks below
+			// (using that same snapshot) re-derive Endpoint/DatabaseReady/Phase in
+			// this same pass instead of wasting a reconcile on a "Recovering"
+			// state no observer could ever reliably catch. The Recorder event
+			// above is the durable record that a recovery happened.
 		} else {
 			msg := "crash-loop halted; VM kept down — start the VM out-of-band once repaired to recover"
 			inst.Status.Message = msg
@@ -122,7 +127,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	if !readiness.Running || readiness.IP == "" {
 		if caughtUp {
 			r.reportDegraded(inst, readiness)
-			return satisfied() //Report only by design, nothing left controller can do, Also Stale Ready Condition would appear
+			return satisfied() //Report only by design, nothing left controller can do
 		}
 		msg := "VM booting; waiting for guest agent and data-net IP"
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "VMBooting", msg)
