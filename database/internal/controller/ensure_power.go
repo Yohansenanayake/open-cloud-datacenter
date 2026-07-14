@@ -59,7 +59,7 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 	// before health can observe it healthy. Satisfied lets the pass reach health.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse,
-			"CrashLoopHalted", "power management suspended during crash-loop halt")
+			dbaasv1.ReasonCrashLoopHalted, "power management suspended during crash-loop halt")
 		return satisfied()
 	}
 
@@ -89,9 +89,8 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		// KubeVirt start subresource rejects while a VMI object exists, so wait.
 		case !declaredRunning && readiness.Running:
 			msg := "waiting for previous VMI to finish stopping before start"
-			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, "StartWaitingForTeardown", msg)
-			inst.Status.Message = msg
-			return pendingAfter("StartWaitingForTeardown", msg, powerRequeue)
+			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, dbaasv1.ReasonStartWaitingForTeardown, msg)
+			return pendingAfter(dbaasv1.ReasonStartWaitingForTeardown, msg, powerRequeue)
 
 		// Declared layer wrong → request the start.
 		case !declaredRunning:
@@ -101,21 +100,18 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 			// Planned start: reset the UID baseline so the new VMI is not
 			// counted as an unplanned restart by the liveness monitor.
 			inst.Status.LastKnownVMIUID = ""
-			inst.Status.Phase = dbaasv1.StatusStarting
 			msg := "requested VM start"
-			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, "Starting", msg)
-			inst.Status.Message = msg
-			return pending("Starting", msg)
+			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, dbaasv1.ReasonStarting, msg)
+			return pending(dbaasv1.ReasonStarting, msg)
 
 		// Declared right, runtime catching up (boot in progress).
 		case !readiness.Running:
 			msg := "VM starting; waiting for VMI to run"
-			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, "Starting", msg)
-			inst.Status.Message = msg
-			return pendingAfter("Starting", msg, 2*powerRequeue)
+			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, dbaasv1.ReasonStarting, msg)
+			return pendingAfter(dbaasv1.ReasonStarting, msg, 2*powerRequeue)
 
 		default:
-			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionTrue, "Running", "VM running")
+			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionTrue, dbaasv1.ReasonRunning, "VM running")
 			return satisfied()
 		}
 	}
@@ -131,26 +127,22 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		if err := r.Harvester.StopVM(ctx, inst.Namespace, vmNameFor(inst)); err != nil {
 			return transient(err)
 		}
-		inst.Status.Phase = dbaasv1.StatusStopping
 		msg := "requested VM stop"
-		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, "Stopping", msg)
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "Stopping", msg)
-		inst.Status.Message = msg
-		return pending("Stopping", msg)
+		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, dbaasv1.ReasonStopping, msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonStopping, msg)
+		return pending(dbaasv1.ReasonStopping, msg)
 
 	case readiness.Running:
-		inst.Status.Phase = dbaasv1.StatusStopping
 		msg := "VM stopping; waiting for VMI teardown"
-		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, "Stopping", msg)
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "Stopping", msg)
-		inst.Status.Message = msg
-		return pendingAfter("Stopping", msg, powerRequeue)
+		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, dbaasv1.ReasonStopping, msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonStopping, msg)
+		return pendingAfter(dbaasv1.ReasonStopping, msg, powerRequeue)
 
 	default:
 		// Fully stopped: clear a Degraded left over from the running steady state —
 		// a stopped database is not degraded.
 		removeCondition(inst, dbaasv1.ConditionDegraded)
-		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionTrue, "Stopped", "VM stopped")
+		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionTrue, dbaasv1.ReasonStopped, "VM stopped")
 		return satisfied()
 	}
 }

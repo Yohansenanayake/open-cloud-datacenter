@@ -102,8 +102,8 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	if !ok {
 		// ensurePreflight terminals on this first; defensive.
 		msg := fmt.Sprintf("unknown dbInstanceClass %q", inst.Spec.DBInstanceClass)
-		markProvisioningFailed(inst, "InvalidClass", msg)
-		return terminal("InvalidClass", msg)
+		setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, msg)
+		return terminal(dbaasv1.ReasonInvalidClass, msg)
 	}
 
 	var vm kubevirtv1.VirtualMachine
@@ -117,19 +117,24 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	// shrink would never converge — fail loudly instead of halt-looping forever.
 	if drift.storageShrink {
 		msg := fmt.Sprintf("allocatedStorage %dGi is below the currently provisioned size; storage shrink is not supported — revert the change", inst.Spec.AllocatedStorage)
-		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, "UnsupportedShrink", msg)
-		markProvisioningFailed(inst, "UnsupportedShrink", msg)
-		return terminal("UnsupportedShrink", msg)
+		setStepCond(inst, dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink, msg)
+		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink, msg)
+		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionUnknown, dbaasv1.ReasonUnsupportedShrink, msg)
+		return terminal(dbaasv1.ReasonUnsupportedShrink, msg)
 	}
 
 	if !drift.any() {
+		setStepCond(inst, dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionTrue,
+			dbaasv1.ReasonStorageChangeAccepted, "requested VM class and storage are supported")
+		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionFalse,
+			dbaasv1.ReasonShapeConverged, "no resize is in progress")
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionTrue,
-			"ShapeConverged", "VM class and storage match the spec")
+			dbaasv1.ReasonShapeConverged, "VM class and storage match the spec")
 		return satisfied()
 	}
 
-	// Cold resize in progress.
-	inst.Status.Phase = dbaasv1.StatusModifying
+	setStepCond(inst, dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionTrue,
+		dbaasv1.ReasonStorageChangeAccepted, "requested VM class and storage are supported")
 	halted := vm.Spec.RunStrategy != nil && *vm.Spec.RunStrategy == kubevirtv1.RunStrategyHalted
 
 	if !halted {
@@ -137,10 +142,10 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 			return transient(err)
 		}
 		msg := fmt.Sprintf("stopping VM for cold resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
-		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, "ResizeStopping", msg)
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "ResizeStopping", msg)
-		inst.Status.Message = msg
-		return pending("ResizeStopping", msg)
+		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue, dbaasv1.ReasonResizeStopping, msg)
+		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, dbaasv1.ReasonResizeStopping, msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonResizeStopping, msg)
+		return pending(dbaasv1.ReasonResizeStopping, msg)
 	}
 
 	readiness, err := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, vmNameFor(inst))
@@ -149,10 +154,10 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	}
 	if err == nil && readiness.Running {
 		msg := "waiting for VM to stop before resize"
-		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, "ResizeWaitingForTeardown", msg)
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "ResizeWaitingForTeardown", msg)
-		inst.Status.Message = msg
-		return pendingAfter("ResizeWaitingForTeardown", msg, powerRequeue)
+		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue, dbaasv1.ReasonResizeWaitingForTeardown, msg)
+		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, dbaasv1.ReasonResizeWaitingForTeardown, msg)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonResizeWaitingForTeardown, msg)
+		return pendingAfter(dbaasv1.ReasonResizeWaitingForTeardown, msg, powerRequeue)
 	}
 
 	// VM is down: apply whichever shape elements drifted. Both provider calls are
@@ -168,9 +173,9 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 		}
 	}
 	msg := fmt.Sprintf("applied resize to %s / %dGi", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
-	setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, "ResizeApplied", msg)
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "ResizeApplied", msg)
-	inst.Status.Message = msg
+	setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue, dbaasv1.ReasonResizeApplied, msg)
+	setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionFalse, dbaasv1.ReasonResizeApplied, msg)
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonResizeApplied, msg)
 	// Next pass re-observes the shape: no drift → Satisfied → ensurePowerState restarts.
-	return pending("ResizeApplied", msg)
+	return pending(dbaasv1.ReasonResizeApplied, msg)
 }

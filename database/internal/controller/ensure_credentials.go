@@ -49,7 +49,7 @@ func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaa
 	material, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {
 		setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionFalse,
-			"CredentialsResolveFailed", err.Error())
+			dbaasv1.ReasonCredentialsResolveFailed, err.Error())
 		return transient(err)
 	}
 
@@ -62,7 +62,7 @@ func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaa
 		Status: dbaasv1.SecretStatusActive,
 	}
 	setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
-		"CredentialsProvisioned", "admin credentials and private material resolved")
+		dbaasv1.ReasonCredentialsProvisioned, "admin credentials and private material resolved")
 
 	// The connection Secret needs a reachable endpoint; ensureDatabaseHealth
 	// (later in the step order) hasn't run yet on a fresh instance, so this

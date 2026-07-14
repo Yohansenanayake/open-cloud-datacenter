@@ -38,5 +38,5 @@ func (r *DBInstanceReconciler) ensureFinalizer(ctx context.Context, inst *dbaasv
 	}
 	// The metadata update generates a watch event on the DBInstance itself. NO need to explicitly requeue.
 	// Pending returns a Zero ControllerResult, - no explicit requeue.
-	return pending("FinalizerAdded", "added cleanup finalizer")
+	return pending(dbaasv1.ReasonFinalizerAdded, "added cleanup finalizer")
 }

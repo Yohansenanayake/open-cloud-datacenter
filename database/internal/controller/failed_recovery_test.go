@@ -79,8 +79,9 @@ func TestCrashLoopHaltsAtThreshold(t *testing.T) {
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		t.Fatal("CrashLoopHalted not set at threshold")
 	}
-	if inst.Status.Phase != dbaasv1.StatusFailed {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusFailed)
+	r.finalizeStatus(inst)
+	if inst.Status.Phase != dbaasv1.StatusCrashLoopHalted {
+		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusCrashLoopHalted)
 	}
 }
 
@@ -123,7 +124,7 @@ func seedCrashLoopPark(t *testing.T, r *DBInstanceReconciler) {
 	inst.Status.Conditions = []metav1.Condition{{
 		Type:               dbaasv1.ConditionCrashLoopHalted,
 		Status:             metav1.ConditionTrue,
-		Reason:             dbaasv1.ReasonCrashLoopDetected,
+		Reason:             string(dbaasv1.ReasonCrashLoopDetected),
 		Message:            "seeded",
 		LastTransitionTime: metav1.Now(),
 	}}
@@ -154,8 +155,8 @@ func TestCrashLoopParkDoesNotHotLoop(t *testing.T) {
 		t.Fatalf("VM calls while parked (stop=%d start=%d), want none — spec.running=true must not resurrect", stub.StopVMCalls, stub.StartVMCalls)
 	}
 	inst := getInst(t, r.Client)
-	if inst.Status.Phase != dbaasv1.StatusFailed {
-		t.Fatalf("parked instance drifted to phase %q, want failed", inst.Status.Phase)
+	if inst.Status.Phase != dbaasv1.StatusCrashLoopHalted {
+		t.Fatalf("parked instance drifted to phase %q, want crash-loop-halted", inst.Status.Phase)
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		t.Fatal("CrashLoopHalted lost while parked")

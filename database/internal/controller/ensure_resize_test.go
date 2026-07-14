@@ -74,6 +74,7 @@ func TestEnsureStorageResizeClassDriftStopsVM(t *testing.T) {
 	if stub.ResizeVMCalls != 0 {
 		t.Fatal("must not resize while the VM may still be running")
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusModifying {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusModifying)
 	}
@@ -145,15 +146,15 @@ func TestEnsureStorageResizeShrinkIsTerminal(t *testing.T) {
 	if res.Outcome != OutcomeTerminal || res.Reason != "UnsupportedShrink" {
 		t.Fatalf("res = %+v, want Terminal/UnsupportedShrink", res)
 	}
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
-		t.Fatal("Failed condition not set")
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
+		t.Fatal("rejected shrink must not set legacy Failed")
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not halt the VM for a change that can never be applied")
 	}
-	cond := inst.Status.GetCondition(dbaasv1.ConditionStorageReady)
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "UnsupportedShrink" {
-		t.Fatalf("StorageReady = %+v, want False/UnsupportedShrink", cond)
+	cond := inst.Status.GetCondition(dbaasv1.ConditionStorageChangeAccepted)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonUnsupportedShrink) {
+		t.Fatalf("StorageChangeAccepted = %+v, want False/UnsupportedShrink", cond)
 	}
 	if inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady) != nil {
 		t.Fatal("DatabaseReady must be untouched — the VM was never halted for a rejected shrink")

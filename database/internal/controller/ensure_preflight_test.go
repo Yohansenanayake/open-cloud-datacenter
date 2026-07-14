@@ -39,11 +39,12 @@ func TestEnsurePreflightUnknownClassIsTerminal(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "InvalidClass" {
 		t.Fatalf("PreflightReady = %+v, want False/InvalidClass", cond)
 	}
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
-		t.Fatal("Failed condition not set")
+	r.finalizeStatus(inst)
+	if !inst.Status.IsCurrentConditionFalse(dbaasv1.ConditionAccepted, inst.Generation) {
+		t.Fatal("Accepted should be False")
 	}
-	if inst.Status.Phase != dbaasv1.StatusFailed {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusFailed)
+	if inst.Status.Phase != dbaasv1.StatusIncompatibleParameters {
+		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusIncompatibleParameters)
 	}
 }
 
@@ -71,6 +72,7 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	if inst.Status.Resources.NADName != "tenant-a/data-net" {
 		t.Fatalf("NADName = %q, want tenant-a/data-net", inst.Status.Resources.NADName)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusCreating {
 		t.Fatalf("Phase = %q, want %q on first entry", inst.Status.Phase, dbaasv1.StatusCreating)
 	}
@@ -96,8 +98,9 @@ func TestEnsurePreflightImmutableDriftIsTerminal(t *testing.T) {
 	if res.Outcome != OutcomeTerminal || res.Reason != "ImmutableFieldChanged" {
 		t.Fatalf("res = %+v, want Terminal/ImmutableFieldChanged", res)
 	}
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
-		t.Fatal("Failed condition not set on drift")
+	r.finalizeStatus(inst)
+	if !inst.Status.IsCurrentConditionFalse(dbaasv1.ConditionAccepted, inst.Generation) {
+		t.Fatal("Accepted should be False on immutable drift")
 	}
 }
 
@@ -106,13 +109,14 @@ func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
 	inst.Status.Phase = dbaasv1.StatusFailed
-	setStepCond(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue, "InvalidClass", "unknown class")
+	setStepCond(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue, dbaasv1.ReasonInvalidClass, "unknown class")
 
 	res := r.ensurePreflight(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.GetCondition(dbaasv1.ConditionFailed) != nil {
 		t.Fatal("Failed condition should be cleared after spec fix")
 	}

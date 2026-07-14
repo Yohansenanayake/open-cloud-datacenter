@@ -43,7 +43,7 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 	// Desired stopped: nothing to scrape; don't deploy against a dead endpoint.
 	if !wantRunning(inst) {
 		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
-			"InstanceStopped", "instance is stopped")
+			dbaasv1.ReasonInstanceStopped, "instance is stopped")
 		return satisfied()
 	}
 
@@ -51,8 +51,8 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 	// defensive wait if not.
 	if inst.Status.Endpoint == nil || inst.Status.Endpoint.Address == "" {
 		msg := "waiting for database endpoint before monitoring setup"
-		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse, "WaitingForEndpoint", msg)
-		return pendingAfter("WaitingForEndpoint", msg, healthRequeue)
+		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse, dbaasv1.ReasonWaitingForEndpoint, msg)
+		return pendingAfter(dbaasv1.ReasonWaitingForEndpoint, msg, healthRequeue)
 	}
 
 	builders := []resource.Builder{
@@ -64,7 +64,7 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 		if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, b); err != nil {
 			log.FromContext(ctx).Error(err, "monitoring reconcile failed (non-fatal)")
 			setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
-				"MonitoringDeployFailed", err.Error())
+				dbaasv1.ReasonMonitoringDeployFailed, err.Error())
 			return satisfied()
 		}
 	}
@@ -75,6 +75,6 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 	inst.Status.GrafanaURL = fmt.Sprintf("%s/d/dbaas-%s/postgresql-%s", r.GrafanaBaseURL, inst.Name, inst.Name)
 	inst.Status.PrometheusTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, inst.Namespace)
 	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue,
-		"MonitoringDeployed", "metrics Service, Endpoints, and ServiceMonitor reconciled")
+		dbaasv1.ReasonMonitoringDeployed, "metrics Service, Endpoints, and ServiceMonitor reconciled")
 	return satisfied()
 }

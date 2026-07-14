@@ -219,24 +219,31 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 	original := inst.DeepCopy()
 
 	if inst.Spec.DeletionProtection {
-		inst.Status.Message = "Cannot delete: DeletionProtection is enabled"
+		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
+			dbaasv1.ReasonDeletionProtected, "Cannot delete: DeletionProtection is enabled")
+		r.finalizeStatus(inst)
 		_ = r.patchStatusIfChanged(ctx, original, inst)
 		return ctrl.Result{}, fmt.Errorf("deletion protection enabled")
 	}
 
-	inst.Status.Phase = dbaasv1.StatusDeleting
-	inst.Status.Message = "Tearing down resources"
+	setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,
+		dbaasv1.ReasonDeletionProgressing, "Tearing down resources")
+	r.finalizeStatus(inst)
 	_ = r.patchStatusIfChanged(ctx, original, inst)
 
 	logger.Info("Tearing down child resources", "namespace", ns)
 	if err := r.Harvester.TeardownAll(ctx, inst.Name, ns, inst.Status.Resources); err != nil {
-		inst.Status.Message = fmt.Sprintf("Teardown failed, will retry: %v", err)
+		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
+			dbaasv1.ReasonTeardownFailed, fmt.Sprintf("Teardown failed, will retry: %v", err))
+		r.finalizeStatus(inst)
 		_ = r.patchStatusIfChanged(ctx, original, inst)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
 	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
-		inst.Status.Message = fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err)
+		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
+			dbaasv1.ReasonOperatorSecretCleanupFailed, fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err))
+		r.finalizeStatus(inst)
 		_ = r.patchStatusIfChanged(ctx, original, inst)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
@@ -305,10 +312,10 @@ func (r *DBInstanceReconciler) operatorNamespace() string {
 // hasConditionReason reports whether a condition of condType is present, True,
 // and carries the given reason. Used to emit Warning events only on a Degraded
 // transition (entry or cause change) rather than on every reconcile.
-func hasConditionReason(inst *dbaasv1.DBInstance, condType, reason string) bool {
+func hasConditionReason(inst *dbaasv1.DBInstance, condType string, reason dbaasv1.ConditionReason) bool {
 	for _, c := range inst.Status.Conditions {
 		if c.Type == condType {
-			return c.Status == metav1.ConditionTrue && c.Reason == reason
+			return c.Status == metav1.ConditionTrue && c.Reason == string(reason)
 		}
 	}
 	return false

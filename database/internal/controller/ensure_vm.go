@@ -77,7 +77,7 @@ func (r *DBInstanceReconciler) ensureVM(ctx context.Context, inst *dbaasv1.DBIns
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName
 		setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionTrue,
-			"VMPresent", "virtualmachine exists")
+			dbaasv1.ReasonVMPresent, "virtualmachine exists")
 		return satisfied()
 
 	case apierrors.IsNotFound(err):
@@ -100,8 +100,8 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		// ensurePreflight validates this first; defensive so ensureVM alone can
 		// never create a VM from an unknown class.
 		msg := fmt.Sprintf("unknown dbInstanceClass %q", inst.Spec.DBInstanceClass)
-		markProvisioningFailed(inst, "InvalidClass", msg)
-		return terminal("InvalidClass", msg)
+		setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, msg)
+		return terminal(dbaasv1.ReasonInvalidClass, msg)
 	}
 
 	masterUser := inst.Spec.MasterUsername
@@ -180,7 +180,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 	inst.Status.Resources.VMName = vmName
 	if err != nil {
 		setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionFalse,
-			"VMCreateFailed", err.Error())
+			dbaasv1.ReasonVMCreateFailed, err.Error())
 		return transient(err)
 	}
 
@@ -198,11 +198,10 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		StaticNetwork:  inst.Spec.StaticNetwork.DeepCopy(),
 	}
 	setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionFalse,
-		"VMCreated", "created virtualmachine, waiting for it to register")
-	inst.Status.Message = "VM created, waiting for PostgreSQL to initialize"
+		dbaasv1.ReasonVMCreated, "created virtualmachine, waiting for it to register")
 
 	// Event-driven Pending: this pass changed status (Resources/conditions), so the
 	// status patch re-triggers a reconcile immediately; the VMI watch covers boot
 	// progress after that. No timer needed.
-	return pending("VMCreated", "created virtualmachine")
+	return pending(dbaasv1.ReasonVMCreated, "created virtualmachine")
 }

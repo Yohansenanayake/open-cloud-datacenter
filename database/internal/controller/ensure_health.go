@@ -71,7 +71,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	// Desired stopped: there is nothing to gate on
 	if !wantRunning(inst) {
 		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
-			"Stopped", "instance is stopped")
+			dbaasv1.ReasonStopped, "instance is stopped")
 		return satisfied()
 	}
 
@@ -92,7 +92,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	// immediately.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		if readiness.Running && readiness.Ready && readiness.AgentConnected {
-			r.Recorder.Eventf(inst, corev1.EventTypeNormal, dbaasv1.ReasonRecovered,
+			r.Recorder.Eventf(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonRecovered),
 				"VM healthy again after crash-loop halt; resuming reconciliation")
 			removeCondition(inst, dbaasv1.ConditionCrashLoopHalted)
 			// Re-snapshot the recovered VMI so its UID is not counted as another
@@ -107,8 +107,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// above is the durable record that a recovery happened.
 		} else {
 			msg := "crash-loop halted; VM kept down — start the VM out-of-band once repaired to recover"
-			inst.Status.Message = msg
-			return pendingAfter("CrashLoopHalted", msg, crashLoopParkRequeue)
+			return pendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue)
 		}
 	}
 
@@ -130,9 +129,8 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			return satisfied() //Report only by design, nothing left controller can do
 		}
 		msg := "VM booting; waiting for guest agent and data-net IP"
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "VMBooting", msg)
-		inst.Status.Message = msg
-		return pendingAfter("VMBooting", msg, healthRequeue)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonVMBooting, msg)
+		return pendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
 	}
 
 	if !readiness.Ready {
@@ -141,9 +139,8 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			return satisfied()
 		}
 		msg := fmt.Sprintf("PostgreSQL initializing; readiness probe not passing at %s:%d", readiness.IP, port)
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, "PostgresInitializing", msg)
-		inst.Status.Message = msg
-		return pendingAfter("PostgresInitializing", msg, healthRequeue)
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonPostgresInitializing, msg)
+		return pendingAfter(dbaasv1.ReasonPostgresInitializing, msg, healthRequeue)
 	}
 
 	// Healthy: clear any Degraded, refresh the endpoint (the data-net IP can
@@ -159,7 +156,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 		JDBCURL: fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-ca", readiness.IP, port, dbName),
 	}
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
-		"PostgresReady", "PostgreSQL is ready")
+		dbaasv1.ReasonPostgresReady, "PostgreSQL is ready")
 	return satisfied()
 }
 
@@ -187,7 +184,7 @@ func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.
 
 	log.FromContext(ctx).Info("unplanned VMI restart detected",
 		"oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
-	r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
+	r.Recorder.Eventf(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonVMRestarting),
 		"Unplanned VMI restart detected (UID %s → %s)", inst.Status.LastKnownVMIUID, readiness.VMIUID)
 	inst.Status.RestartCount++ // observability only
 	inst.Status.LastKnownVMIUID = readiness.VMIUID
@@ -215,13 +212,11 @@ func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.
 	}
 	msg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
 		inst.Status.RecentUnplannedRestarts, crashLoopWindow)
-	r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonCrashLoopDetected, "%s", msg)
+	r.Recorder.Eventf(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonCrashLoopDetected), "%s", msg)
 	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, msg)
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonCrashLoopDetected, msg)
 	removeCondition(inst, dbaasv1.ConditionDegraded)
-	inst.Status.Phase = dbaasv1.StatusFailed
-	inst.Status.Message = msg
-	return pendingAfter("CrashLoopHalted", msg, crashLoopParkRequeue), true
+	return pendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue), true
 }
 
 // reportDegraded records a report-only degradation on a caught-up instance.
@@ -250,10 +245,8 @@ func (r *DBInstanceReconciler) reportDegraded(inst *dbaasv1.DBInstance, readines
 	// every pass: the condition carries the persistent signal, and spamming status
 	// would defeat the DeepEqual write-skip and self-trigger reconciles.
 	if !hasConditionReason(inst, dbaasv1.ConditionDegraded, reason) {
-		r.Recorder.Eventf(inst, corev1.EventTypeWarning, reason, "%s", msg)
+		r.Recorder.Eventf(inst, corev1.EventTypeWarning, string(reason), "%s", msg)
 	}
 	setStepCond(inst, dbaasv1.ConditionDegraded, metav1.ConditionTrue, reason, msg)
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, reason, msg)
-	inst.Status.Phase = dbaasv1.StatusDegraded
-	inst.Status.Message = msg
 }

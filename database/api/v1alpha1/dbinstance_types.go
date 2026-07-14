@@ -460,6 +460,7 @@ const (
 	StatusFailed                 = "failed"
 	StatusDegraded               = "degraded"                // Report-only — the controller never restarts on degradation.
 	StatusIncompatibleParameters = "incompatible-parameters" // A requested change was rejected; the existing database, if any, is unaffected.
+	StatusCrashLoopHalted        = "crash-loop-halted"
 
 	// MasterUserSecretRef.Status values.
 	SecretStatusActive   = "active"

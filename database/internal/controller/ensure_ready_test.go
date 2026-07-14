@@ -30,13 +30,14 @@ func TestEnsureReadyStampsAvailableAndObservedGeneration(t *testing.T) {
 	inst := newProvisionInst()
 	inst.Generation = 5
 	// In the real flow ensureDatabaseHealth sets this before ready runs.
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
 
 	res := r.ensureReady(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusAvailable {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusAvailable)
 	}
@@ -53,12 +54,14 @@ func TestEnsureReadyStampsStoppedWhenNotRunning(t *testing.T) {
 	inst.Generation = 4
 	stopped := false
 	inst.Spec.Running = &stopped
+	setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionTrue, dbaasv1.ReasonStopped, "VM stopped")
 
 	res := r.ensureReady(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusStopped {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopped)
 	}

@@ -37,9 +37,7 @@ import (
 // crash-loop halted, mid-resize, or any other Terminal/Pending park).
 func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBInstance) StepResult {
 	if !wantRunning(inst) {
-		inst.Status.Phase = dbaasv1.StatusStopped
 		inst.Status.ObservedGeneration = inst.Generation
-		inst.Status.Message = "Stopped. Storage preserved."
 		return satisfied()
 	}
 
@@ -49,8 +47,6 @@ func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBIn
 		return satisfied()
 	}
 
-	inst.Status.Phase = dbaasv1.StatusAvailable
-	inst.Status.Message = "Database instance is available"
 	return satisfied()
 }
 
@@ -61,11 +57,10 @@ func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBIn
 // actually takes the VM down (ensureDatabaseHealth's crash-loop halt,
 // ensureResize's cold-resize halt, ensurePowerState's stop transition), so
 // Ready never needs to special-case those itself. It deliberately does NOT
-// check Failed or StorageReady/PreflightReady directly — a rejected request
+// check Accepted or StorageReady/PreflightReady directly — a rejected request
 // (invalid class, immutable-field edit, unsupported shrink) never touches the
-// VM, so DatabaseReady/Ready correctly stay whatever they already were; see
-// markProvisioningFailed for how that's surfaced instead
-// (Phase=IncompatibleParameters, not Failed).
+// VM, so DatabaseReady/Ready correctly stay whatever they already were.
+// Accepted and phase surface the rejection independently.
 //
 // Today Ready reduces to "DatabaseReady plus the wantRunning override" — a
 // deliberate choice, not evidence it's redundant. Ready is the summary
@@ -76,20 +71,27 @@ func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBIn
 // being reachable (e.g. a fatal TLS rotation failure) can fold into this
 // function without redefining what DatabaseReady means.
 func (r *DBInstanceReconciler) syncReadyCondition(inst *dbaasv1.DBInstance) {
+	if !inst.DeletionTimestamp.IsZero() {
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, dbaasv1.ReasonDeleting, "instance is deleting")
+		return
+	}
 	if !wantRunning(inst) {
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, "Stopped", "instance is deliberately stopped")
+		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, dbaasv1.ReasonStopped, "instance is deliberately stopped")
 		return
 	}
 
 	dbReady := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
 	if dbReady == nil || dbReady.Status != metav1.ConditionTrue {
-		reason, msg := "Provisioning", "database not yet ready"
+		reason, msg := dbaasv1.ReasonProvisioning, "database not yet ready"
 		if dbReady != nil {
-			reason, msg = dbReady.Reason, dbReady.Message
+			if parsed, ok := dbaasv1.ParseConditionReason(dbReady.Reason); ok {
+				reason = parsed
+			}
+			msg = dbReady.Message
 		}
 		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, reason, msg)
 		return
 	}
 
-	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue, "DBInstanceReady", "database ready")
+	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "database ready")
 }

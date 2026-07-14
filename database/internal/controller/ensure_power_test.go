@@ -65,6 +65,7 @@ func TestEnsurePowerStateRunningSatisfied(t *testing.T) {
 func TestEnsurePowerStateStartsHaltedVM(t *testing.T) {
 	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
 	inst.Status.LastKnownVMIUID = "old-uid"
+	inst.Status.ObservedGeneration = inst.Generation - 1
 
 	res := r.ensurePowerState(context.Background(), inst)
 
@@ -74,6 +75,7 @@ func TestEnsurePowerStateStartsHaltedVM(t *testing.T) {
 	if stub.StartVMCalls != 1 {
 		t.Fatalf("StartVMCalls = %d, want 1", stub.StartVMCalls)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusStarting {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStarting)
 	}
@@ -131,6 +133,7 @@ func TestEnsurePowerStateStopsRunningVM(t *testing.T) {
 	if stub.StopVMCalls != 1 {
 		t.Fatalf("StopVMCalls = %d, want 1", stub.StopVMCalls)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusStopping {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopping)
 	}

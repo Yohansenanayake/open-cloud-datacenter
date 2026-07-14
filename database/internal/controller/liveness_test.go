@@ -72,9 +72,10 @@ func TestHealthCaughtUpProbeFailureSetsDegraded(t *testing.T) {
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied (report-only)", res)
 	}
-	if got := degradedReason(inst); got != dbaasv1.ReasonPostgresUnreachable {
+	if got := degradedReason(inst); got != string(dbaasv1.ReasonPostgresUnreachable) {
 		t.Fatalf("Degraded reason = %q, want %q", got, dbaasv1.ReasonPostgresUnreachable)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusDegraded {
 		t.Fatalf("Phase = %q, want %q (user-facing honesty)", inst.Status.Phase, dbaasv1.StatusDegraded)
 	}
@@ -98,7 +99,7 @@ func TestHealthCaughtUpAgentDisconnectAttributed(t *testing.T) {
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
-	if got := degradedReason(inst); got != dbaasv1.ReasonGuestAgentDisconnected {
+	if got := degradedReason(inst); got != string(dbaasv1.ReasonGuestAgentDisconnected) {
 		t.Fatalf("Degraded reason = %q, want %q", got, dbaasv1.ReasonGuestAgentDisconnected)
 	}
 	if stub.StopVMCalls != 0 || stub.StartVMCalls != 0 {
@@ -117,7 +118,7 @@ func TestHealthCaughtUpVMIGoneAttributedRestarting(t *testing.T) {
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
-	if got := degradedReason(inst); got != dbaasv1.ReasonVMRestarting {
+	if got := degradedReason(inst); got != string(dbaasv1.ReasonVMRestarting) {
 		t.Fatalf("Degraded reason = %q, want %q", got, dbaasv1.ReasonVMRestarting)
 	}
 }
@@ -196,6 +197,7 @@ func TestHealthCaughtUpRestartBelowThresholdAbsorbed(t *testing.T) {
 	if inst.Status.LastKnownVMIUID != "vmi-uid-new" {
 		t.Fatalf("LastKnownVMIUID = %q, want re-baselined to the new UID", inst.Status.LastKnownVMIUID)
 	}
+	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusDegraded {
 		t.Fatalf("Phase = %q, want %q while rebooting", inst.Status.Phase, dbaasv1.StatusDegraded)
 	}

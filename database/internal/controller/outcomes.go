@@ -20,6 +20,8 @@ import (
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
 // StepOutcome is the result kind of one ensure step. Only Satisfied continues
@@ -57,7 +59,7 @@ type StepResult struct {
 	// Reason and Message describe the outcome for status conditions / events. Reason
 	// carries the "creating" vs "waiting" nuance that a single OutcomePending no
 	// longer encodes in the enum.
-	Reason  string
+	Reason  dbaasv1.ConditionReason
 	Message string
 }
 
@@ -68,13 +70,13 @@ func satisfied() StepResult { return StepResult{Outcome: OutcomeSatisfied} }
 // pending reports that the step made a change this pass. The zero Result makes it
 // event-driven: the mutation's Owns()/VMI watch (and the status patch) re-trigger
 // the next reconcile.
-func pending(reason, msg string) StepResult {
+func pending(reason dbaasv1.ConditionReason, msg string) StepResult {
 	return StepResult{Outcome: OutcomePending, Reason: reason, Message: msg}
 }
 
 // pendingAfter reports that the step is waiting on asynchronous state that may emit
 // no watch event; RequeueAfter is a timer fallback.
-func pendingAfter(reason, msg string, after time.Duration) StepResult {
+func pendingAfter(reason dbaasv1.ConditionReason, msg string, after time.Duration) StepResult {
 	return StepResult{
 		Outcome: OutcomePending,
 		Reason:  reason,
@@ -85,7 +87,7 @@ func pendingAfter(reason, msg string, after time.Duration) StepResult {
 
 // terminal reports that the current spec cannot be reconciled without user action;
 // the runner parks (no error, no requeue).
-func terminal(reason, msg string) StepResult {
+func terminal(reason dbaasv1.ConditionReason, msg string) StepResult {
 	return StepResult{Outcome: OutcomeTerminal, Reason: reason, Message: msg}
 }
 

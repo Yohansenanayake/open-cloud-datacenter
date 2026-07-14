@@ -52,12 +52,12 @@ func TestEnsureDatabaseHealthPendingWhileVMINotRunning(t *testing.T) {
 	if res.Result.RequeueAfter != healthRequeue {
 		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
 	}
-	if !strings.Contains(inst.Status.Message, "VM booting") {
-		t.Fatalf("Message = %q, want gate-1 (VM booting) message", inst.Status.Message)
-	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Fatalf("DatabaseReady = %+v, want False", cond)
+	}
+	if !strings.Contains(cond.Message, "VM booting") {
+		t.Fatalf("condition message = %q, want gate-1 message", cond.Message)
 	}
 }
 
@@ -94,8 +94,8 @@ func TestEnsureDatabaseHealthPendingWhileProbeNotPassing(t *testing.T) {
 	if res.Result.RequeueAfter != healthRequeue {
 		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
 	}
-	if !strings.Contains(inst.Status.Message, "PostgreSQL initializing") {
-		t.Fatalf("Message = %q, want gate-2 (PostgreSQL initializing) message", inst.Status.Message)
+	if cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady); cond == nil || !strings.Contains(cond.Message, "PostgreSQL initializing") {
+		t.Fatalf("DatabaseReady = %+v, want gate-2 condition message", cond)
 	}
 }
 

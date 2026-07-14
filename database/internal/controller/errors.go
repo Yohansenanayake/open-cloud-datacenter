@@ -19,6 +19,8 @@ package controller
 import (
 	"errors"
 	"fmt"
+
+	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
 // TerminalError marks a spec/config problem that retrying the same spec cannot fix
@@ -26,7 +28,7 @@ import (
 // return it from deep in its call stack; classifyError maps it to OutcomeTerminal
 // so the runner parks instead of hot-looping on a change that can never succeed.
 type TerminalError struct {
-	Reason  string
+	Reason  dbaasv1.ConditionReason
 	Message string
 }
 
@@ -38,7 +40,7 @@ func (e *TerminalError) Error() string {
 var _ error = (*TerminalError)(nil)
 
 // terminalErr builds a TerminalError for a spec/config problem.
-func terminalErr(reason, msg string) error {
+func terminalErr(reason dbaasv1.ConditionReason, msg string) error {
 	return &TerminalError{Reason: reason, Message: msg}
 }
 

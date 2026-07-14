@@ -47,7 +47,7 @@ type ensureStep struct {
 func (r *DBInstanceReconciler) runProvisioning(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	original := inst.DeepCopy()
 	res := r.runEnsureSteps(ctx, inst, r.provisioningSteps())
-	r.syncReadyCondition(inst)
+	r.finalizeStatus(inst)
 
 	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
 		return ctrl.Result{}, err
@@ -113,35 +113,12 @@ func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1
 // setStepCond sets a status condition and stamps ObservedGeneration =
 // inst.Generation (each condition tracks its own observedGeneration).
 // inst.Generation is stable for the pass because the runner never re-Gets.
-func setStepCond(inst *dbaasv1.DBInstance, condType string, status metav1.ConditionStatus, reason, msg string) {
+func setStepCond(inst *dbaasv1.DBInstance, condType string, status metav1.ConditionStatus, reason dbaasv1.ConditionReason, msg string) {
 	inst.Status.SetCondition(metav1.Condition{
 		Type:               condType,
 		Status:             status,
-		Reason:             reason,
+		Reason:             string(reason),
 		Message:            msg,
 		ObservedGeneration: inst.Generation,
 	})
-}
-
-// markProvisioningFailed records a user-facing terminal failure for a step.
-// It deliberately does not change how future reconciles are routed — every
-// pass walks the same ensure-step chain regardless — so the runner keeps
-// re-running (and can recover) on the next spec edit / watch event.
-//
-// Phase only becomes Failed if there is no working instance to fall back on
-// (never converged, or already crash-loop-halted). Otherwise this is a
-// rejected request against an otherwise-fine database (e.g. an immutable-field
-// edit or an unsupported storage shrink) — RDS-style, Phase reflects that as
-// IncompatibleParameters instead, and DatabaseReady/Ready (untouched here)
-// remain the single source of truth for actual availability.
-func markProvisioningFailed(inst *dbaasv1.DBInstance, reason, msg string) {
-	inst.Status.Message = msg
-	setStepCond(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue, reason, msg)
-
-	hasWorkingInstance := inst.Status.ObservedGeneration > 0 && !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted)
-	if hasWorkingInstance {
-		inst.Status.Phase = dbaasv1.StatusIncompatibleParameters
-	} else {
-		inst.Status.Phase = dbaasv1.StatusFailed
-	}
 }

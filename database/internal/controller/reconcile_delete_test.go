@@ -123,3 +123,29 @@ func TestReconcileDeleteSweepDoesNotTouchOtherInstances(t *testing.T) {
 		t.Fatalf("unrelated instance's secret was deleted: %v", err)
 	}
 }
+
+func TestReconcileDeleteProtectionPublishesBlockedSummary(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	inst.Spec.DeletionProtection = true
+	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+
+	if _, err := r.reconcileDelete(ctx, inst); err == nil {
+		t.Fatal("reconcileDelete should report deletion protection")
+	}
+
+	got := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(inst), got); err != nil {
+		t.Fatalf("get protected instance: %v", err)
+	}
+	if got.Status.Phase != dbaasv1.StatusDeleting {
+		t.Fatalf("phase = %q, want deleting", got.Status.Phase)
+	}
+	blocked := got.Status.GetCondition(dbaasv1.ConditionDeletionBlocked)
+	if blocked == nil || blocked.Status != metav1.ConditionTrue || blocked.Reason != string(dbaasv1.ReasonDeletionProtected) {
+		t.Fatalf("DeletionBlocked = %+v, want True/DeletionProtected", blocked)
+	}
+	if got.Status.Message != blocked.Message {
+		t.Fatalf("summary message = %q, want blocked message %q", got.Status.Message, blocked.Message)
+	}
+}
