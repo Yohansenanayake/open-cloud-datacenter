@@ -117,15 +117,17 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 	// shrink would never converge — fail loudly instead of halt-looping forever.
 	if drift.storageShrink {
 		msg := fmt.Sprintf("allocatedStorage %dGi is below the currently provisioned size; storage shrink is not supported — revert the change", inst.Spec.AllocatedStorage)
-		setStepCond(inst, dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink, msg)
+		setStepCond(inst, dbaasv1.ConditionStorageChangeRejected, metav1.ConditionTrue, dbaasv1.ReasonUnsupportedShrink, msg)
 		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink, msg)
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionUnknown, dbaasv1.ReasonUnsupportedShrink, msg)
 		return terminal(dbaasv1.ReasonUnsupportedShrink, msg)
 	}
 
+	// StorageChangeRejected is abnormal-only: its absence is the healthy state.
+	// Remove a prior rejection as soon as the requested shape is supported.
+	removeCondition(inst, dbaasv1.ConditionStorageChangeRejected)
+
 	if !drift.any() {
-		setStepCond(inst, dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionTrue,
-			dbaasv1.ReasonStorageChangeAccepted, "requested VM class and storage are supported")
 		setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionFalse,
 			dbaasv1.ReasonShapeConverged, "no resize is in progress")
 		setStepCond(inst, dbaasv1.ConditionStorageReady, metav1.ConditionTrue,
@@ -133,8 +135,6 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 		return satisfied()
 	}
 
-	setStepCond(inst, dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionTrue,
-		dbaasv1.ReasonStorageChangeAccepted, "requested VM class and storage are supported")
 	halted := vm.Spec.RunStrategy != nil && *vm.Spec.RunStrategy == kubevirtv1.RunStrategyHalted
 
 	if !halted {

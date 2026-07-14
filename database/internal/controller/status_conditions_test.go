@@ -32,11 +32,11 @@ func TestSyncAcceptedConditionTruthTable(t *testing.T) {
 		want       metav1.ConditionStatus
 		wantReason dbaasv1.ConditionReason
 	}{
-		{"pending when validator missing", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionTrue, dbaasv1.ReasonPreflightPassed, 3), nil, metav1.ConditionUnknown, dbaasv1.ReasonValidationPending},
-		{"accepted when all true", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionTrue, dbaasv1.ReasonPreflightPassed, 3), condition(dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionTrue, dbaasv1.ReasonStorageChangeAccepted, 3), metav1.ConditionTrue, dbaasv1.ReasonSpecAccepted},
-		{"preflight rejection", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, 3), condition(dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionTrue, dbaasv1.ReasonStorageChangeAccepted, 3), metav1.ConditionFalse, dbaasv1.ReasonInvalidClass},
-		{"storage rejection", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionTrue, dbaasv1.ReasonPreflightPassed, 3), condition(dbaasv1.ConditionStorageChangeAccepted, metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink, 3), metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink},
-		{"stale rejection ignored", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, 2), nil, metav1.ConditionUnknown, dbaasv1.ReasonValidationPending},
+		{"pending when preflight missing", nil, nil, metav1.ConditionUnknown, dbaasv1.ReasonValidationPending},
+		{"accepted without abnormal condition", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionTrue, dbaasv1.ReasonPreflightPassed, 3), nil, metav1.ConditionTrue, dbaasv1.ReasonSpecAccepted},
+		{"preflight rejection", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, 3), nil, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass},
+		{"storage rejection", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionTrue, dbaasv1.ReasonPreflightPassed, 3), condition(dbaasv1.ConditionStorageChangeRejected, metav1.ConditionTrue, dbaasv1.ReasonUnsupportedShrink, 3), metav1.ConditionFalse, dbaasv1.ReasonUnsupportedShrink},
+		{"stale storage rejection ignored", condition(dbaasv1.ConditionPreflightReady, metav1.ConditionTrue, dbaasv1.ReasonPreflightPassed, 3), condition(dbaasv1.ConditionStorageChangeRejected, metav1.ConditionTrue, dbaasv1.ReasonUnsupportedShrink, 2), metav1.ConditionTrue, dbaasv1.ReasonSpecAccepted},
 	}
 
 	for _, tc := range tests {

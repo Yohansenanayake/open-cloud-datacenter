@@ -32,32 +32,35 @@ func conditionReason(c *metav1.Condition) dbaasv1.ConditionReason {
 }
 
 func (r *DBInstanceReconciler) syncAcceptedCondition(inst *dbaasv1.DBInstance) {
-	inputs := []string{
-		dbaasv1.ConditionPreflightReady,
-		dbaasv1.ConditionStorageChangeAccepted,
-	}
-	allTrue := true
-	for _, typ := range inputs {
-		c := inst.Status.GetCurrentCondition(typ, inst.Generation)
-		if c == nil || c.Status == metav1.ConditionUnknown {
-			allTrue = false
-			continue
-		}
-		if c.Status == metav1.ConditionFalse {
-			setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionFalse, conditionReason(c), c.Message)
-			return
-		}
-		if c.Status != metav1.ConditionTrue {
-			allTrue = false
-		}
-	}
-	if allTrue {
-		setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionTrue,
-			dbaasv1.ReasonSpecAccepted, "current specification is accepted")
+	preflight := inst.Status.GetCurrentCondition(dbaasv1.ConditionPreflightReady, inst.Generation)
+	if preflight == nil || preflight.Status == metav1.ConditionUnknown {
+		setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionUnknown,
+			dbaasv1.ReasonValidationPending, "current specification has not been fully evaluated")
 		return
 	}
-	setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionUnknown,
-		dbaasv1.ReasonValidationPending, "current specification has not been fully evaluated")
+	if preflight.Status == metav1.ConditionFalse {
+		setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionFalse,
+			conditionReason(preflight), preflight.Message)
+		return
+	}
+
+	// StorageChangeRejected is abnormal-only. Absence means there is no known
+	// current-generation rejection; it does not require a positive counterpart.
+	if rejected := inst.Status.GetCurrentCondition(dbaasv1.ConditionStorageChangeRejected, inst.Generation); rejected != nil {
+		switch rejected.Status {
+		case metav1.ConditionTrue:
+			setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionFalse,
+				conditionReason(rejected), rejected.Message)
+			return
+		case metav1.ConditionUnknown:
+			setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionUnknown,
+				dbaasv1.ReasonValidationPending, "storage change validation is incomplete")
+			return
+		}
+	}
+
+	setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionTrue,
+		dbaasv1.ReasonSpecAccepted, "current specification is accepted")
 }
 
 func (r *DBInstanceReconciler) syncInterventionRequiredCondition(inst *dbaasv1.DBInstance) {
@@ -83,8 +86,7 @@ func (r *DBInstanceReconciler) finalizeStatus(inst *dbaasv1.DBInstance) {
 	r.syncReadyCondition(inst)
 	r.syncInterventionRequiredCondition(inst)
 	// Normalize status written by older controller versions. Failed used to
-	// conflate rejected specs and crash-loop halts; Accepted and
-	// InterventionRequired now preserve those facts without the ambiguity.
+	// conflate rejected specs and crash-loop halts.
 	removeCondition(inst, dbaasv1.ConditionFailed)
 	summary := dbaasv1.DerivePhaseSummary(inst)
 	inst.Status.Phase = summary.Phase

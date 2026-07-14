@@ -45,6 +45,8 @@ func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.V
 
 func TestEnsureStorageResizeNoDriftSatisfied(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.small", 20, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	setStepCond(inst, dbaasv1.ConditionStorageChangeRejected, metav1.ConditionTrue,
+		dbaasv1.ReasonUnsupportedShrink, "previous rejection")
 
 	res := r.ensureResize(context.Background(), inst)
 
@@ -53,6 +55,9 @@ func TestEnsureStorageResizeNoDriftSatisfied(t *testing.T) {
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionStorageReady) {
 		t.Fatal("StorageReady should be True with no drift")
+	}
+	if inst.Status.GetCondition(dbaasv1.ConditionStorageChangeRejected) != nil {
+		t.Fatal("StorageChangeRejected should be absent once the request is supported")
 	}
 	if stub.StopVMCalls+stub.ResizeVMCalls+stub.ResizeDVCalls != 0 {
 		t.Fatal("no provider calls expected with no drift")
@@ -152,9 +157,9 @@ func TestEnsureStorageResizeShrinkIsTerminal(t *testing.T) {
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not halt the VM for a change that can never be applied")
 	}
-	cond := inst.Status.GetCondition(dbaasv1.ConditionStorageChangeAccepted)
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonUnsupportedShrink) {
-		t.Fatalf("StorageChangeAccepted = %+v, want False/UnsupportedShrink", cond)
+	cond := inst.Status.GetCondition(dbaasv1.ConditionStorageChangeRejected)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonUnsupportedShrink) {
+		t.Fatalf("StorageChangeRejected = %+v, want True/UnsupportedShrink", cond)
 	}
 	if inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady) != nil {
 		t.Fatal("DatabaseReady must be untouched — the VM was never halted for a rejected shrink")

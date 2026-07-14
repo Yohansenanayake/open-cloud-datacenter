@@ -35,7 +35,7 @@ const (
 	ConditionVMReady               = "VMReady"
 	ConditionPowerStateReady       = "PowerStateReady"
 	ConditionStorageReady          = "StorageReady"
-	ConditionStorageChangeAccepted = "StorageChangeAccepted"
+	ConditionStorageChangeRejected = "StorageChangeRejected"
 	ConditionResizeInProgress      = "ResizeInProgress"
 	// ConditionDatabaseReady is the narrow, single-purpose signal for "is
 	// Postgres itself reachable right now" — set by whichever step actually
@@ -75,7 +75,6 @@ const (
 	ReasonVMPresent                   ConditionReason = "VMPresent"
 	ReasonVMCreateFailed              ConditionReason = "VMCreateFailed"
 	ReasonVMCreated                   ConditionReason = "VMCreated"
-	ReasonStorageChangeAccepted       ConditionReason = "StorageChangeAccepted"
 	ReasonUnsupportedShrink           ConditionReason = "UnsupportedShrink"
 	ReasonShapeConverged              ConditionReason = "ShapeConverged"
 	ReasonResizeStopping              ConditionReason = "ResizeStopping"
@@ -124,7 +123,6 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonVMPresent):                   ReasonVMPresent,
 	string(ReasonVMCreateFailed):              ReasonVMCreateFailed,
 	string(ReasonVMCreated):                   ReasonVMCreated,
-	string(ReasonStorageChangeAccepted):       ReasonStorageChangeAccepted,
 	string(ReasonUnsupportedShrink):           ReasonUnsupportedShrink,
 	string(ReasonShapeConverged):              ReasonShapeConverged,
 	string(ReasonResizeStopping):              ReasonResizeStopping,
