@@ -58,10 +58,12 @@ func (b CloudInitSecret) Update(obj client.Object) error {
 	}
 	sec.Labels = map[string]string{dbaasv1.LabelInstance: b.Instance.Name}
 	sec.Type = corev1.SecretTypeOpaque
-	sec.Data = nil
-	sec.StringData = map[string]string{
-		"userdata":    b.UserData,
-		"networkdata": b.NetworkData,
+	// Data is stable across API round-trips. StringData is write-only and would
+	// force a no-op CreateOrUpdate to report Updated on every reconciliation.
+	sec.StringData = nil
+	sec.Data = map[string][]byte{
+		"userdata":    []byte(b.UserData),
+		"networkdata": []byte(b.NetworkData),
 	}
 	return nil
 }

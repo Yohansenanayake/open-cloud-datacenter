@@ -55,9 +55,9 @@ func newCleanupFixture(t *testing.T, stub *stubHarvester, dbReady bool) (*DBInst
 
 	ciSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: cleanupCloudInitSecretName, Namespace: inst.Namespace},
-		StringData: map[string]string{
-			"userdata":    originalCloudInitUserData,
-			"networkdata": originalCloudInitNetworkData,
+		Data: map[string][]byte{
+			"userdata":    []byte(originalCloudInitUserData),
+			"networkdata": []byte(originalCloudInitNetworkData),
 		},
 	}
 	r := newProvisionReconciler(t, stub, inst, ciSecret)
@@ -90,12 +90,12 @@ func TestEnsureBootstrapCleanupRedactsOnceDBReady(t *testing.T) {
 		t.Fatalf("CloudInitSecretName = %q, want kept (%q)", inst.Status.Resources.CloudInitSecretName, cleanupCloudInitSecretName)
 	}
 	got := getCloudInitSecret(t, r, inst.Namespace)
-	if got.StringData["userdata"] != redactedCloudInitUserData {
-		t.Fatalf("userdata = %q, want redacted", got.StringData["userdata"])
+	if string(got.Data["userdata"]) != redactedCloudInitUserData {
+		t.Fatalf("userdata = %q, want redacted", got.Data["userdata"])
 	}
 	wantNetworkData := credentials.BuildNetworkData(credentials.BootstrapParams{StaticNetwork: inst.Spec.StaticNetwork})
-	if got.StringData["networkdata"] != wantNetworkData {
-		t.Fatalf("networkdata = %q, want freshly-rendered %q, not left as the stale original", got.StringData["networkdata"], wantNetworkData)
+	if string(got.Data["networkdata"]) != wantNetworkData {
+		t.Fatalf("networkdata = %q, want freshly-rendered %q, not left as the stale original", got.Data["networkdata"], wantNetworkData)
 	}
 }
 
@@ -111,8 +111,8 @@ func TestEnsureBootstrapCleanupDefersUntilDBReady(t *testing.T) {
 		t.Fatalf("res = %+v, want Satisfied (deferred)", res)
 	}
 	got := getCloudInitSecret(t, r, inst.Namespace)
-	if got.StringData["userdata"] != originalCloudInitUserData {
-		t.Fatalf("userdata = %q, want untouched original", got.StringData["userdata"])
+	if string(got.Data["userdata"]) != originalCloudInitUserData {
+		t.Fatalf("userdata = %q, want untouched original", got.Data["userdata"])
 	}
 }
 
@@ -125,8 +125,8 @@ func TestEnsureBootstrapCleanupSatisfiedWhenNothingToScrub(t *testing.T) {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
 	got := getCloudInitSecret(t, r, inst.Namespace)
-	if got.StringData["userdata"] != originalCloudInitUserData {
-		t.Fatalf("userdata = %q, want untouched (no ref recorded, so nothing to act on)", got.StringData["userdata"])
+	if string(got.Data["userdata"]) != originalCloudInitUserData {
+		t.Fatalf("userdata = %q, want untouched (no ref recorded, so nothing to act on)", got.Data["userdata"])
 	}
 }
 
@@ -157,7 +157,7 @@ func TestEnsureBootstrapCleanupApplyFailureIsTransientAndLeavesSecretUntouched(t
 		t.Fatalf("res = %+v, want Transient with error", res)
 	}
 	got := getCloudInitSecret(t, r, inst.Namespace)
-	if got.StringData["userdata"] != originalCloudInitUserData {
-		t.Fatalf("userdata = %q, want untouched after a failed apply", got.StringData["userdata"])
+	if string(got.Data["userdata"]) != originalCloudInitUserData {
+		t.Fatalf("userdata = %q, want untouched after a failed apply", got.Data["userdata"])
 	}
 }

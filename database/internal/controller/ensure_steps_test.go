@@ -314,7 +314,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &unredacted); err != nil {
 		t.Fatalf("cloud-init secret missing after pass 4: %v", err)
 	}
-	if unredacted.StringData["userdata"] == redactedCloudInitUserData {
+	if string(unredacted.Data["userdata"]) == redactedCloudInitUserData {
 		t.Fatal("bootstrap cleanup ran in the monitoring mutation pass")
 	}
 
@@ -338,8 +338,8 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ciSecret); err != nil {
 		t.Fatalf("cloud-init secret missing: %v", err)
 	}
-	if ciSecret.StringData["userdata"] != redactedCloudInitUserData {
-		t.Fatalf("cloud-init userdata = %q, want redacted", ciSecret.StringData["userdata"])
+	if string(ciSecret.Data["userdata"]) != redactedCloudInitUserData {
+		t.Fatalf("cloud-init userdata = %q, want redacted", ciSecret.Data["userdata"])
 	}
 	if got.Status.Phase != dbaasv1.StatusAvailable {
 		t.Fatalf("phase = %q, want available", got.Status.Phase)
@@ -400,8 +400,8 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-connect"}, &conn); err != nil {
 		t.Fatalf("connection secret missing: %v", err)
 	}
-	if conn.StringData["host"] != "192.168.40.50" || conn.StringData["ca.crt"] == "" {
-		t.Fatalf("connection secret StringData = %+v", conn.StringData)
+	if string(conn.Data["host"]) != "192.168.40.50" || len(conn.Data["ca.crt"]) == 0 {
+		t.Fatalf("connection secret Data = %+v", conn.Data)
 	}
 
 	for _, name := range []string{"dbi-orders-uid-internal", "dbi-orders-uid-tls"} {

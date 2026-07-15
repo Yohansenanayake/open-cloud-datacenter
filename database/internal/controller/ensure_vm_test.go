@@ -93,8 +93,8 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ci); err != nil {
 		t.Fatalf("cloud-init secret missing: %v", err)
 	}
-	if ci.StringData["userdata"] == "" || ci.StringData["networkdata"] == "" {
-		t.Fatalf("cloud-init secret has empty userdata/networkdata: %+v", ci.StringData)
+	if len(ci.Data["userdata"]) == 0 || len(ci.Data["networkdata"]) == 0 {
+		t.Fatalf("cloud-init secret has empty userdata/networkdata: %+v", ci.Data)
 	}
 	if refs := ci.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 		t.Fatalf("cloud-init secret owner refs = %+v, want controller-owned", refs)

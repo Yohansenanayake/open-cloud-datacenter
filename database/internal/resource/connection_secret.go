@@ -57,14 +57,17 @@ func (b ConnectionSecret) Update(obj client.Object) error {
 	}
 	sec.Labels = map[string]string{dbaasv1.LabelInstance: b.Instance.Name}
 	sec.Type = corev1.SecretTypeOpaque
-	sec.Data = nil // StringData is authoritative; clear any stale keys from a prior shape
-	sec.StringData = map[string]string{
-		"host":    b.Address,
-		"port":    fmt.Sprintf("%d", b.Port),
-		"dbname":  b.DBName,
-		"jdbcUrl": fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-ca", b.Address, b.Port, b.DBName),
-		"sslmode": "verify-ca",
-		"ca.crt":  b.CACertPEM,
+	// Data is the canonical persisted representation. StringData is write-only
+	// API input and is omitted from GET responses, so using it in CreateOrUpdate
+	// would make every observation look changed and keep the bounded step Pending.
+	sec.StringData = nil
+	sec.Data = map[string][]byte{
+		"host":    []byte(b.Address),
+		"port":    []byte(fmt.Sprintf("%d", b.Port)),
+		"dbname":  []byte(b.DBName),
+		"jdbcUrl": []byte(fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-ca", b.Address, b.Port, b.DBName)),
+		"sslmode": []byte("verify-ca"),
+		"ca.crt":  []byte(b.CACertPEM),
 	}
 	return nil
 }

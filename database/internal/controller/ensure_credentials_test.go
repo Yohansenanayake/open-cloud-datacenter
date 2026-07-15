@@ -112,10 +112,10 @@ func TestEnsureCredentialsPublishesConnectionSecretOnceEndpointKnown(t *testing.
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-connect"}, &conn); err != nil {
 		t.Fatalf("connection secret missing: %v", err)
 	}
-	if conn.StringData["host"] != "192.168.40.50" || conn.StringData["dbname"] != "orders" {
-		t.Fatalf("StringData = %+v", conn.StringData)
+	if string(conn.Data["host"]) != "192.168.40.50" || string(conn.Data["dbname"]) != "orders" {
+		t.Fatalf("Data = %+v", conn.Data)
 	}
-	if conn.StringData["ca.crt"] == "" {
+	if len(conn.Data["ca.crt"]) == 0 {
 		t.Fatal("connection secret must carry the CA cert once TLS material is resolved")
 	}
 	if refs := conn.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" {
