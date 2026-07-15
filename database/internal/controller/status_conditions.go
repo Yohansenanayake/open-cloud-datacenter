@@ -105,12 +105,9 @@ func conditionMessage(inst *dbaasv1.DBInstance, typ, fallback string) string {
 
 func (r *DBInstanceReconciler) finalizeStatus(inst *dbaasv1.DBInstance) {
 	r.syncAcceptedCondition(inst)
-	r.syncReadyCondition(inst)
-	r.syncResizeInProgressCondition(inst)
-	r.syncInterventionRequiredCondition(inst)
-	// Normalize status written by older controller versions. Failed used to
-	// conflate rejected specs and crash-loop halts.
-	removeCondition(inst, dbaasv1.ConditionFailed)
+	r.syncReadyCondition(inst) 
+	r.syncResizeInProgressCondition(inst) // aggregate resize lifecycle into a single condition
+	r.syncInterventionRequiredCondition(inst) // aggregation of crash-loop halt and other intervention-required conditions
 	summary := dbaasv1.DerivePhaseSummary(inst)
 	inst.Status.Phase = summary.Phase
 	inst.Status.Message = summary.Message
