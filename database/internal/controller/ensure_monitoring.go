@@ -65,7 +65,7 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 			log.FromContext(ctx).Error(err, "monitoring reconcile failed (non-fatal)")
 			setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
 				dbaasv1.ReasonMonitoringDeployFailed, err.Error())
-			return satisfied()
+			return satisfied() // should we continue ?
 		}
 	}
 

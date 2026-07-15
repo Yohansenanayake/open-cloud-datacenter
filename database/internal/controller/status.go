@@ -31,7 +31,7 @@ import (
 // Mechanism: only this controller writes DBInstance status, and controller-runtime
 // serializes reconciles per object, so there is a single writer — no optimistic
 // lock or re-Get is needed. Because we never re-Get during a pass, inst.Generation
-// is stable, so steps (and ensureReady) can stamp observedGeneration from it
+// is stable, so steps (and markGenerationReconciled) can stamp observedGeneration from it
 // directly. The DeepEqual skip prevents an unchanged status from triggering a
 // self-reconcile loop.
 //

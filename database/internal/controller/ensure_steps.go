@@ -85,7 +85,7 @@ func (r *DBInstanceReconciler) provisioningSteps() []ensureStep {
 		{"connection-secret", r.ensureConnectionSecret},
 		{"monitoring", r.ensureMonitoring},
 		{"bootstrap-cleanup", r.ensureBootstrapCleanup},
-		{"ready", r.ensureReady},
+		{"generation-reconciled", r.markGenerationReconciled},
 	}
 }
 

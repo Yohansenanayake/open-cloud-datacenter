@@ -17,38 +17,10 @@ limitations under the License.
 package controller
 
 import (
-	"context"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
-
-// ensureReady runs only when every prior ensure step returned Satisfied for this
-// pass. It is the single place the top-level status.observedGeneration advances
-// and status.phase is stamped Available/Stopped for the converged state — that
-// specifically means "the whole chain converged for this generation", which is
-// why it's gated: ensureDatabaseHealth's own caughtUp check depends on
-// ObservedGeneration only ever advancing once a pass has actually gone all the
-// way through. The Ready *condition* is a different question — "is the
-// database reachable right now" — and is deliberately NOT set here; see
-// syncReadyCondition, which runs unconditionally every pass regardless of
-// where the chain stopped, so Ready can never go stale while parked (e.g.
-// crash-loop halted, mid-resize, or any other Terminal/Pending park).
-func (r *DBInstanceReconciler) ensureReady(_ context.Context, inst *dbaasv1.DBInstance) StepResult {
-	if !wantRunning(inst) {
-		inst.Status.ObservedGeneration = inst.Generation
-		return satisfied()
-	}
-
-	inst.Status.ObservedGeneration = inst.Generation
-
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
-		return satisfied()
-	}
-
-	return satisfied()
-}
 
 // syncReadyCondition recomputes Ready every pass, independent of where the
 // ensure-step chain stopped this time — a pure derivation from currently-known
