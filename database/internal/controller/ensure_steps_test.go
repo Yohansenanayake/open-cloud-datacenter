@@ -222,6 +222,7 @@ func TestRunProvisioningTransientReturnsError(t *testing.T) {
 	stub := &stubHarvester{readinessErr: boom}
 	// VM object present so the pass reaches the health gate.
 	r := newProvisionReconciler(t, stub, inst, testVM("pg-orders", "tenant-a"))
+	convergeCredentials(t, context.Background(), r, inst)
 
 	_, err := r.runProvisioning(context.Background(), inst)
 	if !errors.Is(err, boom) {
@@ -240,24 +241,19 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	r := newProvisionReconciler(t, stub, inst)
 	key := client.ObjectKeyFromObject(inst)
 
-	// Pass 1: no VM observed → create it, stop the pass (event-driven Pending).
+	// Pass 1: durable credential Secrets are created and stop the pass.
 	result, err := r.runProvisioning(ctx, inst)
-	if err != nil || result != (ctrl.Result{}) {
-		t.Fatalf("pass 1 = (%+v, %v), want zero Result and nil error", result, err)
+	if err != nil || result.RequeueAfter != credentialRequeue {
+		t.Fatalf("pass 1 = (%+v, %v), want credential fallback requeue", result, err)
 	}
-	if stub.CreateVMCalls != 1 {
-		t.Fatalf("CreateVMCalls = %d, want 1", stub.CreateVMCalls)
+	if stub.CreateVMCalls != 0 {
+		t.Fatalf("CreateVMCalls = %d, want 0 before credential re-observation", stub.CreateVMCalls)
 	}
 	after1 := &dbaasv1.DBInstance{}
 	if err := r.Get(ctx, key, after1); err != nil {
 		t.Fatalf("get after pass 1: %v", err)
 	}
-	if after1.Status.Resources.VMName != "pg-orders" {
-		t.Fatalf("VMName = %q, want pg-orders", after1.Status.Resources.VMName)
-	}
-	// ensureCredentials runs before ensureVM in step order, so the tenant
-	// credentials ref and the two operator-namespace refs are already set
-	// after pass 1 — before the VM (and its cloud-init Secret) even exist.
+	// Deterministic credential refs are recorded in the creation pass.
 	if after1.Status.Resources.SecretName != "pg-orders-credentials" {
 		t.Fatalf("SecretName = %q after pass 1, want pg-orders-credentials", after1.Status.Resources.SecretName)
 	}
@@ -270,8 +266,19 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if after1.Status.IsConditionTrue(dbaasv1.ConditionReady) {
 		t.Fatal("Ready must not be True after pass 1")
 	}
-	if cond := after1.Status.GetCondition(dbaasv1.ConditionVMReady); cond == nil || cond.Reason != "VMCreated" {
-		t.Fatalf("VMReady condition = %+v, want reason VMCreated", cond)
+	if cond := after1.Status.GetCondition(dbaasv1.ConditionVMReady); cond != nil {
+		t.Fatalf("VMReady condition = %+v, want absent before ensureVM runs", cond)
+	}
+
+	// Pass 2: credentials are observed, then the absent VM is created.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 2: %v", err)
+	}
+	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 2 = (%+v, %v), want event-driven VM-create Pending", result, err)
+	}
+	if stub.CreateVMCalls != 1 {
+		t.Fatalf("CreateVMCalls = %d, want 1", stub.CreateVMCalls)
 	}
 
 	// KubeVirt "creates" the VM out of band.
@@ -279,20 +286,26 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		t.Fatalf("create vm: %v", err)
 	}
 
-	// Pass 2: VM observed, VMI ready → health passes, then bootstrap-cleanup
-	// redacts the consumed cloud-init secret's userdata (a cheap idempotent
-	// apply — see ensureMonitoring's §4.1 exception, which this step now
-	// follows too), so the walk completes to Available in the same pass.
+	// Pass 3: VM and health converge, then the connection Secret is created and
+	// stops the pass before monitoring/ready.
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch: %v", err)
 	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
-		t.Fatalf("pass 2 = (%+v, %v), want zero Result and nil error", result, err)
+	if result, err = r.runProvisioning(ctx, inst); err != nil || result.RequeueAfter != credentialRequeue {
+		t.Fatalf("pass 3 = (%+v, %v), want connection-secret fallback requeue", result, err)
 	}
 
+	// Pass 4: the connection Secret is observed unchanged; the remaining steps
+	// complete and the cloud-init Secret is redacted.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 4: %v", err)
+	}
+	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 4 = (%+v, %v), want zero Result and nil error", result, err)
+	}
 	got := &dbaasv1.DBInstance{}
 	if err := r.Get(ctx, key, got); err != nil {
-		t.Fatalf("get after pass 2: %v", err)
+		t.Fatalf("get after pass 4: %v", err)
 	}
 	// The cloud-init Secret is redacted, not deleted — the ref stays recorded.
 	if got.Status.Resources.CloudInitSecretName != "pg-orders-cloudinit" {
@@ -336,26 +349,6 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		if len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 			t.Fatalf("monitoring child %s owner refs = %+v, want controller-owned by the DBInstance", check.name, refs)
 		}
-	}
-
-	// Pass 3: ensureCredentials runs before ensureDatabaseHealth in step
-	// order, so on pass 2 it couldn't yet see the Endpoint health had just
-	// set that same pass — it needs one more reconcile to notice status.
-	// Endpoint is now populated and publish the connection Secret. In a real
-	// cluster this pass is triggered automatically (pass 2's status write
-	// bumps resourceVersion, firing the DBInstance watch); here it's driven
-	// manually like the others. This is unrelated to bootstrap-cleanup no
-	// longer stopping the pass — it was already true before, just masked by
-	// bootstrap-cleanup's old one-shot Pending coincidentally forcing the
-	// same extra pass.
-	if err := r.Get(ctx, key, inst); err != nil {
-		t.Fatalf("refetch for pass 3: %v", err)
-	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
-		t.Fatalf("pass 3 = (%+v, %v), want zero Result and nil error", result, err)
-	}
-	if err := r.Get(ctx, key, got); err != nil {
-		t.Fatalf("get after pass 3: %v", err)
 	}
 
 	// PR8: the full credential/TLS secret inventory exists — slim tenant

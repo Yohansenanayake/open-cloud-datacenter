@@ -58,16 +58,12 @@ func TestSyncAcceptedConditionTruthTable(t *testing.T) {
 	}
 }
 
-func TestFinalizeStatusNormalizesLegacyFailedAndAggregatesIntervention(t *testing.T) {
+func TestFinalizeStatusAggregatesIntervention(t *testing.T) {
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, "legacy")
 	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, "halted")
 
 	(&DBInstanceReconciler{}).finalizeStatus(inst)
 
-	if inst.Status.GetCondition(dbaasv1.ConditionFailed) != nil {
-		t.Fatal("legacy Failed condition was not removed")
-	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionInterventionRequired) {
 		t.Fatal("InterventionRequired should aggregate CrashLoopHalted")
 	}

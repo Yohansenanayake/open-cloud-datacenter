@@ -71,7 +71,9 @@ const (
 	ReasonImmutableFieldChanged       ConditionReason = "ImmutableFieldChanged"
 	ReasonPreflightPassed             ConditionReason = "PreflightPassed"
 	ReasonCredentialsResolveFailed    ConditionReason = "CredentialsResolveFailed"
+	ReasonCredentialsCreated          ConditionReason = "CredentialsCreated"
 	ReasonCredentialsProvisioned      ConditionReason = "CredentialsProvisioned"
+	ReasonConnectionSecretReconciled  ConditionReason = "ConnectionSecretReconciled"
 	ReasonVMPresent                   ConditionReason = "VMPresent"
 	ReasonVMCreateFailed              ConditionReason = "VMCreateFailed"
 	ReasonVMCreated                   ConditionReason = "VMCreated"
@@ -119,7 +121,9 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonImmutableFieldChanged):       ReasonImmutableFieldChanged,
 	string(ReasonPreflightPassed):             ReasonPreflightPassed,
 	string(ReasonCredentialsResolveFailed):    ReasonCredentialsResolveFailed,
+	string(ReasonCredentialsCreated):          ReasonCredentialsCreated,
 	string(ReasonCredentialsProvisioned):      ReasonCredentialsProvisioned,
+	string(ReasonConnectionSecretReconciled):  ReasonConnectionSecretReconciled,
 	string(ReasonVMPresent):                   ReasonVMPresent,
 	string(ReasonVMCreateFailed):              ReasonVMCreateFailed,
 	string(ReasonVMCreated):                   ReasonVMCreated,

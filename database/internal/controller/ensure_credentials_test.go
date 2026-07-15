@@ -39,8 +39,8 @@ func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 
 	res := r.ensureCredentials(ctx, inst)
 
-	if res.Outcome != OutcomeSatisfied {
-		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
+	if res.Outcome != OutcomePending || res.Result.RequeueAfter != credentialRequeue {
+		t.Fatalf("first result = %+v, want timed Pending", res)
 	}
 	refs := inst.Status.Resources
 	if refs.SecretName != "pg-orders-credentials" {
@@ -58,6 +58,14 @@ func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCredentialsReady) {
 		t.Fatal("CredentialsReady should be True")
+	}
+	if got := inst.Status.GetCondition(dbaasv1.ConditionCredentialsReady).Reason; got != string(dbaasv1.ReasonCredentialsCreated) {
+		t.Fatalf("CredentialsReady reason = %q, want CredentialsCreated", got)
+	}
+
+	res = r.ensureCredentials(ctx, inst)
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("second result = %+v, want Satisfied after observation", res)
 	}
 
 	// No endpoint yet: the connection Secret must not be created or referenced.
@@ -90,10 +98,11 @@ func TestEnsureCredentialsPublishesConnectionSecretOnceEndpointKnown(t *testing.
 	inst.Status.Endpoint = &dbaasv1.Endpoint{Address: "192.168.40.50", Port: defaultPort}
 	r := newProvisionReconciler(t, &stubHarvester{}, inst)
 
-	res := r.ensureCredentials(ctx, inst)
+	convergeCredentials(t, ctx, r, inst)
+	res := r.ensureConnectionSecret(ctx, inst)
 
-	if res.Outcome != OutcomeSatisfied {
-		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
+	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonConnectionSecretReconciled {
+		t.Fatalf("first connection result = %+v, want Pending/ConnectionSecretReconciled", res)
 	}
 	if inst.Status.Resources.ConnectionSecretName != "pg-orders-connect" {
 		t.Fatalf("ConnectionSecretName = %q, want pg-orders-connect", inst.Status.Resources.ConnectionSecretName)
@@ -111,6 +120,9 @@ func TestEnsureCredentialsPublishesConnectionSecretOnceEndpointKnown(t *testing.
 	}
 	if refs := conn.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" {
 		t.Fatalf("connection secret owner refs = %+v, want controller-owned", refs)
+	}
+	if res = r.ensureConnectionSecret(ctx, inst); res.Outcome != OutcomeSatisfied {
+		t.Fatalf("second connection result = %+v, want Satisfied", res)
 	}
 }
 
@@ -138,15 +150,14 @@ func TestEnsureCredentialsResolveFailureIsTransient(t *testing.T) {
 	}
 }
 
-// The connection Secret is a convenience, not required for the database to
-// function — a failure to apply it must not block provisioning.
-func TestEnsureCredentialsConnectionSecretFailureIsNonFatal(t *testing.T) {
+func TestEnsureConnectionSecretFailureIsTransient(t *testing.T) {
 	ctx := context.Background()
 	inst := newProvisionInst()
 	inst.Status.Endpoint = &dbaasv1.Endpoint{Address: "192.168.40.50", Port: defaultPort}
 
 	boom := errors.New("apiserver unavailable")
 	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	convergeCredentials(t, ctx, r, inst)
 	watchClient, ok := r.Client.(client.WithWatch)
 	if !ok {
 		t.Fatal("fixture's fake client does not implement client.WithWatch")
@@ -160,17 +171,44 @@ func TestEnsureCredentialsConnectionSecretFailureIsNonFatal(t *testing.T) {
 		},
 	})
 
-	res := r.ensureCredentials(ctx, inst)
+	res := r.ensureConnectionSecret(ctx, inst)
 
-	if res.Outcome != OutcomeSatisfied {
-		t.Fatalf("Outcome = %q, want Satisfied (non-fatal)", res.Outcome)
-	}
-	// Material resolution itself succeeded, so CredentialsReady stays True;
-	// only the connection-secret ref is left unset for the next pass to retry.
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCredentialsReady) {
-		t.Fatal("CredentialsReady should remain True — material resolution succeeded")
+	if res.Outcome != OutcomeTransient || !errors.Is(res.Err, boom) {
+		t.Fatalf("result = %+v, want Transient with apply error", res)
 	}
 	if inst.Status.Resources.ConnectionSecretName != "" {
 		t.Fatalf("ConnectionSecretName = %q, want unset after a failed apply", inst.Status.Resources.ConnectionSecretName)
+	}
+}
+
+func TestEnsureConnectionSecretWaitsForEndpoint(t *testing.T) {
+	ctx := context.Background()
+	inst := newProvisionInst()
+	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	convergeCredentials(t, ctx, r, inst)
+
+	res := r.ensureConnectionSecret(ctx, inst)
+	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonWaitingForEndpoint || res.Result.RequeueAfter != credentialRequeue {
+		t.Fatalf("result = %+v, want timed Pending/WaitingForEndpoint", res)
+	}
+}
+
+func convergeCredentials(t *testing.T, ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) {
+	t.Helper()
+	if res := r.ensureCredentials(ctx, inst); res.Outcome != OutcomePending {
+		t.Fatalf("credential create result = %+v, want Pending", res)
+	}
+	if res := r.ensureCredentials(ctx, inst); res.Outcome != OutcomeSatisfied {
+		t.Fatalf("credential observe result = %+v, want Satisfied", res)
+	}
+}
+
+func convergeConnectionSecret(t *testing.T, ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) {
+	t.Helper()
+	if res := r.ensureConnectionSecret(ctx, inst); res.Outcome != OutcomePending {
+		t.Fatalf("connection secret apply result = %+v, want Pending", res)
+	}
+	if res := r.ensureConnectionSecret(ctx, inst); res.Outcome != OutcomeSatisfied {
+		t.Fatalf("connection secret observe result = %+v, want Satisfied", res)
 	}
 }

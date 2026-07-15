@@ -61,11 +61,14 @@ func newLifecycleFixture(t *testing.T, running bool, stub *stubHarvester) (*DBIn
 			Phase:              dbaasv1.StatusAvailable,
 			ObservedGeneration: 1,
 			LastKnownVMIUID:    "vmi-uid-abc",
+			Endpoint:           &dbaasv1.Endpoint{Address: "192.168.40.50", Port: defaultPort},
 			Resources:          dbaasv1.ResourceRefs{VMName: "pg-orders", DataVolumeName: "pg-orders-data"},
 		},
 	}
 	vm := testVM("pg-orders", "tenant-a") // shaped, runStrategy Always
 	r := newProvisionReconciler(t, stub, inst, vm)
+	convergeCredentials(t, context.Background(), r, inst)
+	convergeConnectionSecret(t, context.Background(), r, inst)
 	r.Recorder = record.NewFakeRecorder(10)
 	return r, ctrl.Request{NamespacedName: types.NamespacedName{Name: "orders", Namespace: "tenant-a"}}
 }

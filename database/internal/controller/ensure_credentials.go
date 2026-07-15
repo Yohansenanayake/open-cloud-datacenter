@@ -19,14 +19,15 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
-	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
+
+const credentialRequeue = 5 * time.Second
 
 // credentialsResolver builds the Resolver for this pass. Cheap: no external
 // deps beyond the manager client and the configured operator namespace.
@@ -43,10 +44,10 @@ func (r *DBInstanceReconciler) credentialsResolver() *credentials.Resolver {
 // Secrets (internal DB credentials, TLS). Material is generated at most once
 // per Secret — re-resolving on later passes only reads what already exists,
 // preserving the reuse-on-reentry invariant (a regenerated password/CA would
-// diverge from an already-booted VM). Once the database endpoint is known, it
-// also publishes the tenant connection Secret.
+// diverge from an already-booted VM). Creation stops this pass so the next pass
+// re-observes the persisted material before ensureVM is allowed to proceed.
 func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
-	material, err := r.credentialsResolver().Resolve(ctx, inst)
+	result, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {
 		setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionFalse,
 			dbaasv1.ReasonCredentialsResolveFailed, err.Error())
@@ -61,34 +62,14 @@ func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaa
 		Name:   inst.Status.Resources.SecretName,
 		Status: dbaasv1.SecretStatusActive,
 	}
+	if result.Changed {
+		msg := "credential material created; waiting for observation"
+		setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
+			dbaasv1.ReasonCredentialsCreated, msg)
+		return pendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
+	}
+
 	setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
-		dbaasv1.ReasonCredentialsProvisioned, "admin credentials and private material resolved")
-
-	// The connection Secret needs a reachable endpoint; ensureDatabaseHealth
-	// (later in the step order) hasn't run yet on a fresh instance, so this
-	// converges on the pass after health first publishes one — and refreshes
-	// on every later IP change since this step re-applies on every pass.
-	if inst.Status.Endpoint == nil || inst.Status.Endpoint.Address == "" {
-		return satisfied()
-	}
-
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
-	if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, resource.ConnectionSecret{
-		Instance:  inst,
-		Address:   inst.Status.Endpoint.Address,
-		Port:      inst.Status.Endpoint.Port,
-		DBName:    dbName,
-		CACertPEM: material.TLS.CACertPEM,
-	}); err != nil {
-		// Non-fatal, like monitoring: the connection Secret is a convenience,
-		// not required for the database to function. Retry next pass.
-		log.FromContext(ctx).Error(err, "connection secret reconcile failed (non-fatal)")
-		return satisfied()
-	}
-	inst.Status.Resources.ConnectionSecretName = resource.ConnectionSecretName(inst)
-
+		dbaasv1.ReasonCredentialsProvisioned, "admin credentials and private material observed")
 	return satisfied()
 }

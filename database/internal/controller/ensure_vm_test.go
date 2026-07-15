@@ -34,6 +34,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{}
 	r := newProvisionReconciler(t, stub, inst)
+	convergeCredentials(t, ctx, r, inst)
 
 	res := r.ensureVM(ctx, inst)
 
@@ -87,8 +88,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 
 	// PR8: the cloud-init Secret must exist, owner-ref'd, with rendered content
-	// — built from Material that ensureVM resolved as a side effect (its own
-	// step, ensureCredentials, wasn't called in this test).
+	// built from the durable Material observed by ensureVM.
 	var ci corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ci); err != nil {
 		t.Fatalf("cloud-init secret missing: %v", err)
@@ -100,8 +100,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 		t.Fatalf("cloud-init secret owner refs = %+v, want controller-owned", refs)
 	}
 
-	// The tenant credentials Secret was created as a side effect of resolving
-	// Material for cloud-init.
+	// The tenant credentials Secret created by ensureCredentials is reused.
 	var cred corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: credentials.TenantCredentialsSecretName(inst)}, &cred); err != nil {
 		t.Fatalf("tenant credentials secret missing: %v", err)
@@ -122,6 +121,7 @@ func TestEnsureVMSnapshotsVMPasswordAndStaticNetwork(t *testing.T) {
 	}
 	stub := &stubHarvester{}
 	r := newProvisionReconciler(t, stub, inst)
+	convergeCredentials(t, context.Background(), r, inst)
 
 	r.ensureVM(context.Background(), inst)
 
@@ -168,6 +168,7 @@ func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {
 	inst.Status.Resources.VMName = "pg-orders" // status remembers a VM that no longer exists
 	stub := &stubHarvester{}
 	r := newProvisionReconciler(t, stub, inst) // no VM object in the cluster
+	convergeCredentials(t, context.Background(), r, inst)
 
 	res := r.ensureVM(context.Background(), inst)
 
@@ -183,6 +184,7 @@ func TestEnsureVMCreateErrorIsTransientAndRecordsRefs(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{createVMErr: errors.New("harvester unavailable")}
 	r := newProvisionReconciler(t, stub, inst)
+	convergeCredentials(t, context.Background(), r, inst)
 
 	res := r.ensureVM(context.Background(), inst)
 

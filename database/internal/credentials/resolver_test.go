@@ -21,10 +21,14 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
@@ -60,10 +64,14 @@ func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
 	inst := testInst()
 	r := newTestResolver(t)
 
-	m, err := r.Resolve(ctx, inst)
+	result, err := r.Resolve(ctx, inst)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	if !result.Changed {
+		t.Fatal("first Resolve reported Changed=false, want true")
+	}
+	m := result.Material
 	if m.AdminUser != defaultMasterUser || m.AdminPassword == "" {
 		t.Fatalf("Material admin fields = %+v", m)
 	}
@@ -132,14 +140,18 @@ func TestResolveReusesExistingMaterialOnReentry(t *testing.T) {
 	inst := testInst()
 	r := newTestResolver(t)
 
-	m1, err := r.Resolve(ctx, inst)
+	first, err := r.Resolve(ctx, inst)
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
-	m2, err := r.Resolve(ctx, inst)
+	second, err := r.Resolve(ctx, inst)
 	if err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
+	if !first.Changed || second.Changed {
+		t.Fatalf("Changed = first:%t second:%t, want true then false", first.Changed, second.Changed)
+	}
+	m1, m2 := first.Material, second.Material
 
 	if m1.AdminPassword != m2.AdminPassword {
 		t.Fatalf("admin password changed across re-entry: %q -> %q", m1.AdminPassword, m2.AdminPassword)
@@ -160,7 +172,7 @@ func TestResolveReusesMaterialWhenOnlyDurableSecretsSurvive(t *testing.T) {
 	inst := testInst()
 	r := newTestResolver(t)
 
-	m1, err := r.Resolve(ctx, inst)
+	first, err := r.Resolve(ctx, inst)
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
@@ -168,10 +180,14 @@ func TestResolveReusesMaterialWhenOnlyDurableSecretsSurvive(t *testing.T) {
 	// Nothing else to delete here — cloud-init is out of this package's scope
 	// (internal/resource owns it) — but re-resolving with all three durable
 	// Secrets already present must still be a pure read.
-	m2, err := r.Resolve(ctx, inst)
+	second, err := r.Resolve(ctx, inst)
 	if err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
+	if second.Changed {
+		t.Fatal("re-observation of durable Secrets reported a mutation")
+	}
+	m1, m2 := first.Material, second.Material
 	if *m1.TLS != *m2.TLS {
 		t.Fatalf("TLS bundle diverged: %+v vs %+v", m1.TLS, m2.TLS)
 	}
@@ -183,10 +199,11 @@ func TestResolveHonoursSpecMasterUsername(t *testing.T) {
 	inst.Spec.MasterUsername = "custom_admin"
 	r := newTestResolver(t)
 
-	m, err := r.Resolve(ctx, inst)
+	result, err := r.Resolve(ctx, inst)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	m := result.Material
 	if m.AdminUser != "custom_admin" {
 		t.Fatalf("AdminUser = %q, want custom_admin", m.AdminUser)
 	}
@@ -205,5 +222,123 @@ func TestResolveErrorsOnTenantSecretMissingAdminPassword(t *testing.T) {
 
 	if _, err := r.Resolve(ctx, inst); err == nil {
 		t.Fatal("Resolve succeeded despite missing admin_password, want error")
+	}
+}
+
+func TestResolvePartialStateCreatesMissingSecretWithoutRotatingExistingMaterial(t *testing.T) {
+	ctx := context.Background()
+	inst := testInst()
+	r := newTestResolver(t)
+
+	first, err := r.Resolve(ctx, inst)
+	if err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	internal := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: r.OperatorNamespace,
+		Name:      InternalSecretName(inst),
+	}}
+	if err := r.Client.Delete(ctx, internal); err != nil {
+		t.Fatalf("delete internal Secret: %v", err)
+	}
+
+	second, err := r.Resolve(ctx, inst)
+	if err != nil {
+		t.Fatalf("partial-state Resolve: %v", err)
+	}
+	if !second.Changed {
+		t.Fatal("partial-state Resolve reported Changed=false")
+	}
+	if second.Material.AdminPassword != first.Material.AdminPassword ||
+		second.Material.TLS.CACertPEM != first.Material.TLS.CACertPEM {
+		t.Fatal("existing tenant or TLS material rotated while repairing partial state")
+	}
+}
+
+func TestResolveAdoptsAlreadyExistsRaceWinner(t *testing.T) {
+	ctx := context.Background()
+	inst := testInst()
+	r := newTestResolver(t)
+	watchClient, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	winnerPassword := "winner-password"
+	intercepted := false
+	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			sec, isSecret := obj.(*corev1.Secret)
+			if !intercepted && isSecret && sec.Name == TenantCredentialsSecretName(inst) {
+				intercepted = true
+				winner := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: sec.Name, Namespace: sec.Namespace},
+					StringData: map[string]string{"admin_user": "dbadmin", "admin_password": winnerPassword},
+				}
+				if err := c.Create(ctx, winner); err != nil {
+					return err
+				}
+				return apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, sec.Name)
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+
+	result, err := r.Resolve(ctx, inst)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !result.Changed || result.Material.AdminPassword != winnerPassword {
+		t.Fatalf("result = %+v, want Changed with race winner material", result)
+	}
+}
+
+func TestResolveRejectsMalformedInternalAndTLSSecrets(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Resolver, *dbaasv1.DBInstance) error
+	}{
+		{
+			name: "internal credentials missing exporter password",
+			mutate: func(r *Resolver, inst *dbaasv1.DBInstance) error {
+				key := types.NamespacedName{Namespace: r.OperatorNamespace, Name: InternalSecretName(inst)}
+				var sec corev1.Secret
+				if err := r.Client.Get(context.Background(), key, &sec); err != nil {
+					return err
+				}
+				delete(sec.StringData, "exporter_password")
+				delete(sec.Data, "exporter_password")
+				return r.Client.Update(context.Background(), &sec)
+			},
+		},
+		{
+			name: "TLS missing CA key",
+			mutate: func(r *Resolver, inst *dbaasv1.DBInstance) error {
+				key := types.NamespacedName{Namespace: r.OperatorNamespace, Name: TLSSecretName(inst)}
+				var sec corev1.Secret
+				if err := r.Client.Get(context.Background(), key, &sec); err != nil {
+					return err
+				}
+				delete(sec.StringData, "ca.key")
+				delete(sec.Data, "ca.key")
+				return r.Client.Update(context.Background(), &sec)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			inst := testInst()
+			r := newTestResolver(t)
+			if _, err := r.Resolve(ctx, inst); err != nil {
+				t.Fatalf("seed Resolve: %v", err)
+			}
+			if err := tc.mutate(r, inst); err != nil {
+				t.Fatalf("mutate Secret: %v", err)
+			}
+			if _, err := r.Resolve(ctx, inst); err == nil {
+				t.Fatal("Resolve succeeded with malformed persisted material")
+			}
+		})
 	}
 }

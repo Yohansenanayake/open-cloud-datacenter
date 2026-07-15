@@ -131,9 +131,13 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 
 	// Material was already resolved (and its three durable Secrets created)
 	// by ensureCredentials earlier in the step order; this re-read is cheap.
-	material, err := r.credentialsResolver().Resolve(ctx, inst)
+	resolved, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {
 		return transient(err)
+	}
+	if resolved.Changed {
+		msg := "credential material changed unexpectedly while preparing the VM; waiting for observation"
+		return pendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
 	}
 	userdata, networkdata := credentials.BuildCloudInit(credentials.BootstrapParams{
 		ID:             inst.Name,
@@ -146,7 +150,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		S3Config:       inst.Spec.S3BackupConfig,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork,
-	}, material)
+	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)
 	if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, resource.CloudInitSecret{
