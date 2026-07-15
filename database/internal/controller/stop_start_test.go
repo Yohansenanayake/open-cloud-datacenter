@@ -69,6 +69,10 @@ func newLifecycleFixture(t *testing.T, running bool, stub *stubHarvester) (*DBIn
 	r := newProvisionReconciler(t, stub, inst, vm)
 	convergeCredentials(t, context.Background(), r, inst)
 	convergeConnectionSecret(t, context.Background(), r, inst)
+	desiredRunning := inst.Spec.Running
+	inst.Spec.Running = boolPtr(true) // resources existed before a stop request
+	convergeMonitoring(t, context.Background(), r, inst)
+	inst.Spec.Running = desiredRunning
 	r.Recorder = record.NewFakeRecorder(10)
 	return r, ctrl.Request{NamespacedName: types.NamespacedName{Name: "orders", Namespace: "tenant-a"}}
 }

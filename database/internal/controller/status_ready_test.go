@@ -24,15 +24,16 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-func TestSyncReadyConditionTrueWhenDatabaseReady(t *testing.T) {
+func TestSyncReadyConditionTrueWhenRequiredComponentsReady(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue, dbaasv1.ReasonMonitoringDeployed, "monitoring ready")
 
 	r.syncReadyCondition(inst)
 
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionReady) {
-		t.Fatal("Ready should be True when DatabaseReady is True")
+		t.Fatal("Ready should be True when database and monitoring are ready")
 	}
 }
 
@@ -66,6 +67,51 @@ func TestSyncReadyConditionMirrorsDatabaseReadyReason(t *testing.T) {
 	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonPostgresUnreachable) {
 		t.Fatalf("Ready = %+v, want False/PostgresUnreachable", cond)
+	}
+}
+
+func TestSyncReadyConditionFalseWhenMonitoringReadyNeverSet(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+
+	r.syncReadyCondition(inst)
+
+	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonProvisioning) {
+		t.Fatalf("Ready = %+v, want False/Provisioning", cond)
+	}
+}
+
+func TestSyncReadyConditionMirrorsMonitoringFailure(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+		dbaasv1.ReasonMonitoringDeployFailed, "service monitor apply failed")
+
+	r.syncReadyCondition(inst)
+
+	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != string(dbaasv1.ReasonMonitoringDeployFailed) || cond.Message != "service monitor apply failed" {
+		t.Fatalf("Ready = %+v, want monitoring failure mirrored", cond)
+	}
+}
+
+func TestSyncReadyConditionDatabaseFailureTakesPrecedence(t *testing.T) {
+	r := &DBInstanceReconciler{}
+	inst := newProvisionInst()
+	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+		dbaasv1.ReasonPostgresUnreachable, "database probe failed")
+	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+		dbaasv1.ReasonMonitoringDeployFailed, "monitoring failed")
+
+	r.syncReadyCondition(inst)
+
+	cond := inst.Status.GetCondition(dbaasv1.ConditionReady)
+	if cond == nil || cond.Reason != string(dbaasv1.ReasonPostgresUnreachable) || cond.Message != "database probe failed" {
+		t.Fatalf("Ready = %+v, want database failure precedence", cond)
 	}
 }
 

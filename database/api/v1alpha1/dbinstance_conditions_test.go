@@ -92,3 +92,64 @@ func TestDerivePhaseSummaryPriority(t *testing.T) {
 		t.Fatalf("phase = %q, want deleting to win", got)
 	}
 }
+
+func TestDerivePhaseSummaryMonitoringFailureLifecycle(t *testing.T) {
+	running := true
+	newInstance := func(generation, observed int64) *DBInstance {
+		inst := &DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Generation: generation},
+			Spec:       DBInstanceSpec{Running: &running},
+			Status:     DBInstanceStatus{ObservedGeneration: observed},
+		}
+		inst.Status.SetCondition(metav1.Condition{
+			Type: ConditionDatabaseReady, Status: metav1.ConditionTrue,
+			Reason: string(ReasonPostgresReady), ObservedGeneration: generation,
+		})
+		inst.Status.SetCondition(metav1.Condition{
+			Type: ConditionMonitoringReady, Status: metav1.ConditionFalse,
+			Reason: string(ReasonMonitoringDeployFailed), Message: "monitoring apply failed",
+			ObservedGeneration: generation,
+		})
+		inst.Status.SetCondition(metav1.Condition{
+			Type: ConditionReady, Status: metav1.ConditionFalse,
+			Reason: string(ReasonMonitoringDeployFailed), ObservedGeneration: generation,
+		})
+		return inst
+	}
+
+	established := newInstance(2, 1)
+	summary := DerivePhaseSummary(established)
+	if summary.Phase != StatusDegraded || summary.Message != "monitoring apply failed" {
+		t.Fatalf("established summary = %+v, want degraded monitoring failure", summary)
+	}
+
+	initial := newInstance(1, 0)
+	if got := DerivePhaseSummary(initial).Phase; got != StatusCreating {
+		t.Fatalf("initial phase = %q, want %q", got, StatusCreating)
+	}
+}
+
+func TestDerivePhaseSummaryIgnoresStaleStoppedMonitoringCondition(t *testing.T) {
+	running := true
+	inst := &DBInstance{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Spec:       DBInstanceSpec{Running: &running},
+		Status:     DBInstanceStatus{ObservedGeneration: 1},
+	}
+	inst.Status.SetCondition(metav1.Condition{
+		Type: ConditionDatabaseReady, Status: metav1.ConditionTrue,
+		Reason: string(ReasonPostgresReady), ObservedGeneration: 2,
+	})
+	inst.Status.SetCondition(metav1.Condition{
+		Type: ConditionMonitoringReady, Status: metav1.ConditionFalse,
+		Reason: string(ReasonInstanceStopped), ObservedGeneration: 1,
+	})
+	inst.Status.SetCondition(metav1.Condition{
+		Type: ConditionReady, Status: metav1.ConditionFalse,
+		Reason: string(ReasonInstanceStopped), ObservedGeneration: 2,
+	})
+
+	if got := DerivePhaseSummary(inst).Phase; got != StatusStarting {
+		t.Fatalf("phase = %q, want %q", got, StatusStarting)
+	}
+}

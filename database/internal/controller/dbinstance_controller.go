@@ -344,6 +344,7 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&dbaasv1.DBInstance{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.Endpoints{}).
 		Owns(&kubevirtv1.VirtualMachine{}).
 		Owns(&monitoringv1.ServiceMonitor{}).
 		Watches(&kubevirtv1.VirtualMachineInstance{},

@@ -19,31 +19,34 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
+const monitoringRequeue = 5 * time.Second
+
 // ensureMonitoring reconciles the per-instance monitoring trio — selectorless
 // metrics Service, manual Endpoints pinned to the current data-net IP, and
 // ServiceMonitor — as builder-managed, controller-owned children. Owner refs
-// make the Owns(Service/ServiceMonitor) watches live: out-of-band deletion or
+// make the Owns(Service/Endpoints/ServiceMonitor) watches live: deletion or
 // drift is repaired on the next pass, and GC backs up the finalizer teardown.
 //
-// A deploy failure is non-fatal (the database works without monitoring): it is
-// reported via MonitoringReady=False and the step still returns Satisfied so
-// provisioning completes; the next pass retries. Created/updated results also
-// return Satisfied rather than stopping the pass — applying these three is
-// cheap and idempotent, unlike the slow VM create, which is the one step
-// worth stopping a pass for.
+// Monitoring is a guaranteed product artifact. A create/update stops this pass
+// so the next pass re-observes the persisted trio; API failures retry through
+// controller-runtime backoff. Stopping an instance makes the scrape target
+// inactive but deliberately retains the monitoring children until deletion.
 func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
-	// Desired stopped: nothing to scrape; don't deploy against a dead endpoint.
+	// Desired stopped: retain any existing monitoring children, but do not deploy
+	// or retarget them against an inactive endpoint.
 	if !wantRunning(inst) {
 		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
-			dbaasv1.ReasonInstanceStopped, "instance is stopped")
+			dbaasv1.ReasonInstanceStopped, "monitoring target is inactive while the database instance is stopped")
 		return satisfied()
 	}
 
@@ -60,12 +63,17 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 		resource.MetricsEndpoints{Instance: inst, VMIP: inst.Status.Endpoint.Address},
 		resource.ServiceMonitor{Instance: inst},
 	}
+	changed := false
 	for _, b := range builders {
-		if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, b); err != nil {
-			log.FromContext(ctx).Error(err, "monitoring reconcile failed (non-fatal)")
+		op, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, b)
+		if err != nil {
+			log.FromContext(ctx).Error(err, "monitoring reconcile failed")
 			setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
 				dbaasv1.ReasonMonitoringDeployFailed, err.Error())
-			return satisfied() // should we continue ?
+			return transient(err)
+		}
+		if op != controllerutil.OperationResultNone {
+			changed = true
 		}
 	}
 
@@ -74,7 +82,13 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 	inst.Status.Resources.ServiceMonitor = resource.ServiceMonitorName(inst)
 	inst.Status.GrafanaURL = fmt.Sprintf("%s/d/dbaas-%s/postgresql-%s", r.GrafanaBaseURL, inst.Name, inst.Name)
 	inst.Status.PrometheusTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, inst.Namespace)
-	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue,
-		dbaasv1.ReasonMonitoringDeployed, "metrics Service, Endpoints, and ServiceMonitor reconciled")
+	msg := "metrics Service, Endpoints, and ServiceMonitor observed"
+	if changed {
+		msg = "metrics Service, Endpoints, and ServiceMonitor reconciled; waiting for observation"
+	}
+	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue, dbaasv1.ReasonMonitoringDeployed, msg)
+	if changed {
+		return pendingAfter(dbaasv1.ReasonMonitoringDeployed, msg, monitoringRequeue)
+	}
 	return satisfied()
 }

@@ -87,6 +87,8 @@ func TestEnsureStorageResizeKeepsActivityUntilDatabaseRecovers(t *testing.T) {
 
 	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
 		dbaasv1.ReasonPostgresReady, "PostgreSQL is ready")
+	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue,
+		dbaasv1.ReasonMonitoringDeployed, "monitoring ready")
 	r.finalizeStatus(inst)
 	if inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress) != nil {
 		t.Fatal("ResizeInProgress must be removed after shape and database readiness converge")

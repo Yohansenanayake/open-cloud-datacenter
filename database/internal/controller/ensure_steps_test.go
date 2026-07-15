@@ -287,7 +287,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	}
 
 	// Pass 3: VM and health converge, then the connection Secret is created and
-	// stops the pass before monitoring/ready.
+	// stops the pass before monitoring and generation completion.
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch: %v", err)
 	}
@@ -295,21 +295,44 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		t.Fatalf("pass 3 = (%+v, %v), want connection-secret fallback requeue", result, err)
 	}
 
-	// Pass 4: the connection Secret is observed unchanged; the remaining steps
-	// complete and the cloud-init Secret is redacted.
+	// Pass 4: the connection Secret is observed unchanged; monitoring resources
+	// are created and stop the pass before bootstrap cleanup and completion.
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 4: %v", err)
 	}
+	if result, err = r.runProvisioning(ctx, inst); err != nil || result.RequeueAfter != monitoringRequeue {
+		t.Fatalf("pass 4 = (%+v, %v), want monitoring fallback requeue", result, err)
+	}
+	after4 := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, after4); err != nil {
+		t.Fatalf("get after pass 4: %v", err)
+	}
+	if after4.Status.ObservedGeneration == after4.Generation {
+		t.Fatalf("ObservedGeneration advanced during monitoring mutation: %+v", after4.Status)
+	}
+	var unredacted corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &unredacted); err != nil {
+		t.Fatalf("cloud-init secret missing after pass 4: %v", err)
+	}
+	if unredacted.StringData["userdata"] == redactedCloudInitUserData {
+		t.Fatal("bootstrap cleanup ran in the monitoring mutation pass")
+	}
+
+	// Pass 5: monitoring is observed unchanged, then bootstrap cleanup runs and
+	// the generation-completion checkpoint advances ObservedGeneration.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 5: %v", err)
+	}
 	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
-		t.Fatalf("pass 4 = (%+v, %v), want zero Result and nil error", result, err)
+		t.Fatalf("pass 5 = (%+v, %v), want zero Result and nil error", result, err)
 	}
 	got := &dbaasv1.DBInstance{}
 	if err := r.Get(ctx, key, got); err != nil {
-		t.Fatalf("get after pass 4: %v", err)
+		t.Fatalf("get after pass 5: %v", err)
 	}
 	// The cloud-init Secret is redacted, not deleted — the ref stays recorded.
 	if got.Status.Resources.CloudInitSecretName != "pg-orders-cloudinit" {
-		t.Fatalf("cloud-init ref = %q after pass 2, want kept (pg-orders-cloudinit)", got.Status.Resources.CloudInitSecretName)
+		t.Fatalf("cloud-init ref = %q after pass 5, want kept (pg-orders-cloudinit)", got.Status.Resources.CloudInitSecretName)
 	}
 	var ciSecret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ciSecret); err != nil {

@@ -121,13 +121,23 @@ func seedCrashLoopPark(t *testing.T, r *DBInstanceReconciler) {
 	inst.Status.ObservedGeneration = inst.Generation
 	inst.Status.Phase = dbaasv1.StatusFailed
 	inst.Status.Message = "seeded crash-loop park"
-	inst.Status.Conditions = []metav1.Condition{{
-		Type:               dbaasv1.ConditionCrashLoopHalted,
-		Status:             metav1.ConditionTrue,
-		Reason:             string(dbaasv1.ReasonCrashLoopDetected),
-		Message:            "seeded",
-		LastTransitionTime: metav1.Now(),
-	}}
+	inst.Status.Conditions = []metav1.Condition{
+		{
+			Type:               dbaasv1.ConditionCrashLoopHalted,
+			Status:             metav1.ConditionTrue,
+			Reason:             string(dbaasv1.ReasonCrashLoopDetected),
+			Message:            "seeded",
+			LastTransitionTime: metav1.Now(),
+		},
+		{
+			Type:               dbaasv1.ConditionMonitoringReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             string(dbaasv1.ReasonMonitoringDeployed),
+			Message:            "monitoring resources observed",
+			ObservedGeneration: inst.Generation,
+			LastTransitionTime: metav1.Now(),
+		},
+	}
 	if err := r.Status().Update(ctx, inst); err != nil {
 		t.Fatalf("status seed: %v", err)
 	}

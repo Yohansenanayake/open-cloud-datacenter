@@ -43,13 +43,11 @@ const (
 	// probed via the VMI readiness gate elsewhere.
 	ConditionDatabaseReady   = "DatabaseReady"
 	ConditionMonitoringReady = "MonitoringReady"
-	// ConditionReady is the overall summary condition external tooling
+	// ConditionReady is the aggregate product-stack condition external tooling
 	// conventionally looks for by name (kubectl wait --for=condition=Ready,
-	// kstatus-style dashboards). It's derived from DatabaseReady today (see
-	// syncReadyCondition) — behaviorally near-identical — but kept as its own
-	// condition on purpose: a future gating concern that isn't about Postgres's
-	// own reachability can fold into it without redefining what
-	// ConditionDatabaseReady means.
+	// kstatus-style dashboards). It requires both PostgreSQL reachability and
+	// monitoring-resource convergence; ConditionDatabaseReady remains the narrow
+	// signal for clients interested specifically in PostgreSQL usability.
 	ConditionReady                = "Ready"
 	ConditionInterventionRequired = "InterventionRequired"
 	ConditionCrashLoopHalted      = "CrashLoopHalted"
@@ -255,6 +253,11 @@ func DerivePhaseSummary(inst *DBInstance) PhaseSummary {
 		return PhaseSummary{StatusDegraded, conditionMessage(s, ConditionDegraded, "Database instance is degraded")}
 	case s.IsConditionTrue(ConditionResizeInProgress):
 		return PhaseSummary{StatusModifying, conditionMessage(s, ConditionResizeInProgress, "Applying database instance resize")}
+	case s.ObservedGeneration > 0 && desiredRunning(inst) &&
+		s.IsConditionTrue(ConditionDatabaseReady) &&
+		s.IsCurrentConditionFalse(ConditionMonitoringReady, inst.Generation) &&
+		currentConditionHasReason(s, ConditionMonitoringReady, inst.Generation, ReasonMonitoringDeployFailed):
+		return PhaseSummary{StatusDegraded, conditionMessage(s, ConditionMonitoringReady, "Database is available, but monitoring is not ready")}
 	case s.ObservedGeneration > 0 && desiredRunning(inst) &&
 		s.IsCurrentConditionFalse(ConditionPowerStateReady, inst.Generation) &&
 		currentConditionHasReason(s, ConditionPowerStateReady, inst.Generation, ReasonStarting, ReasonStartWaitingForTeardown):
