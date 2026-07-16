@@ -254,8 +254,8 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		t.Fatalf("get after pass 1: %v", err)
 	}
 	// Deterministic credential refs are recorded in the creation pass.
-	if after1.Status.Resources.SecretName != "pg-orders-credentials" {
-		t.Fatalf("SecretName = %q after pass 1, want pg-orders-credentials", after1.Status.Resources.SecretName)
+	if after1.Status.Resources.AdminCredentialsSecretName != "pg-orders-credentials" {
+		t.Fatalf("AdminCredentialsSecretName = %q after pass 1, want pg-orders-credentials", after1.Status.Resources.AdminCredentialsSecretName)
 	}
 	if after1.Status.Resources.InternalSecretRef != "dbaas-system/dbi-orders-uid-internal" {
 		t.Fatalf("InternalSecretRef = %q after pass 1", after1.Status.Resources.InternalSecretRef)
@@ -380,9 +380,6 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	// (the field no longer exists on DBInstanceStatus at all).
 	if got.Status.Resources.ConnectionSecretName != "pg-orders-connect" {
 		t.Fatalf("ConnectionSecretName = %q, want pg-orders-connect", got.Status.Resources.ConnectionSecretName)
-	}
-	if got.Status.MasterUserSecret == nil || got.Status.MasterUserSecret.Name != "pg-orders-credentials" {
-		t.Fatalf("MasterUserSecret = %+v", got.Status.MasterUserSecret)
 	}
 
 	var tenantCred corev1.Secret

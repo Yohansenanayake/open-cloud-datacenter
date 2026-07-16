@@ -252,8 +252,8 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 		{"virtualmachines", refs.VMName, func() error {
 			return c.Clientset.KubevirtV1().VirtualMachines(ns).Delete(ctx, refs.VMName, metav1.DeleteOptions{})
 		}},
-		{"secrets", refs.SecretName, func() error {
-			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.SecretName, metav1.DeleteOptions{})
+		{"secrets", refs.AdminCredentialsSecretName, func() error {
+			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.AdminCredentialsSecretName, metav1.DeleteOptions{})
 		}},
 		{"secrets", refs.CloudInitSecretName, func() error {
 			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.CloudInitSecretName, metav1.DeleteOptions{})

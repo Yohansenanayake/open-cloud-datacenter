@@ -49,7 +49,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 
 	// ensureVM itself only owns VMName/DataVolumeName/CloudInitSecretName;
-	// SecretName/MasterUserSecret are ensureCredentials's job (not exercised
+	// AdminCredentialsSecretName is ensureCredentials's job (not exercised
 	// here since we call ensureVM directly).
 	refs := inst.Status.Resources
 	if refs.VMName != "pg-orders" || refs.CloudInitSecretName != "pg-orders-cloudinit" || refs.DataVolumeName != "pg-orders-data" {

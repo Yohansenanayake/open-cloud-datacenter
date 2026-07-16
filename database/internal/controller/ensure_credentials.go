@@ -55,13 +55,9 @@ func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaa
 	}
 
 	opNS := r.operatorNamespace()
-	inst.Status.Resources.SecretName = credentials.TenantCredentialsSecretName(inst)
+	inst.Status.Resources.AdminCredentialsSecretName = credentials.TenantCredentialsSecretName(inst)
 	inst.Status.Resources.InternalSecretRef = fmt.Sprintf("%s/%s", opNS, credentials.InternalSecretName(inst))
 	inst.Status.Resources.PrivateTLSSecretRef = fmt.Sprintf("%s/%s", opNS, credentials.TLSSecretName(inst))
-	inst.Status.MasterUserSecret = &dbaasv1.MasterUserSecretRef{
-		Name:   inst.Status.Resources.SecretName,
-		Status: dbaasv1.SecretStatusActive,
-	}
 	if result.Changed {
 		msg := "credential material created; waiting for observation"
 		setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,

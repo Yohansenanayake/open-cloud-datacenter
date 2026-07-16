@@ -415,12 +415,12 @@ func TestTypedTeardownIgnoresNotFound(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
 	err := client.TeardownAll(ctx, "orders", "tenant-a", dbaasv1.ResourceRefs{
-		VMName:              "pg-orders",
-		DataVolumeName:      "pg-orders-data",
-		SecretName:          "pg-orders-credentials",
-		CloudInitSecretName: "pg-orders-cloudinit",
-		MetricsServiceName:  "pg-orders-metrics",
-		ServiceMonitor:      "pg-orders-monitor",
+		VMName:                     "pg-orders",
+		DataVolumeName:             "pg-orders-data",
+		AdminCredentialsSecretName: "pg-orders-credentials",
+		CloudInitSecretName:        "pg-orders-cloudinit",
+		MetricsServiceName:         "pg-orders-metrics",
+		ServiceMonitor:             "pg-orders-monitor",
 	})
 	if err != nil {
 		t.Fatalf("TeardownAll returned error for missing resources: %v", err)

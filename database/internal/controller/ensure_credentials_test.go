@@ -43,18 +43,14 @@ func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 		t.Fatalf("first result = %+v, want timed Pending", res)
 	}
 	refs := inst.Status.Resources
-	if refs.SecretName != "pg-orders-credentials" {
-		t.Fatalf("SecretName = %q, want pg-orders-credentials", refs.SecretName)
+	if refs.AdminCredentialsSecretName != "pg-orders-credentials" {
+		t.Fatalf("AdminCredentialsSecretName = %q, want pg-orders-credentials", refs.AdminCredentialsSecretName)
 	}
 	if refs.InternalSecretRef != "dbaas-system/dbi-orders-uid-internal" {
 		t.Fatalf("InternalSecretRef = %q", refs.InternalSecretRef)
 	}
 	if refs.PrivateTLSSecretRef != "dbaas-system/dbi-orders-uid-tls" {
 		t.Fatalf("PrivateTLSSecretRef = %q", refs.PrivateTLSSecretRef)
-	}
-	if inst.Status.MasterUserSecret == nil || inst.Status.MasterUserSecret.Name != "pg-orders-credentials" ||
-		inst.Status.MasterUserSecret.Status != dbaasv1.SecretStatusActive {
-		t.Fatalf("MasterUserSecret = %+v", inst.Status.MasterUserSecret)
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCredentialsReady) {
 		t.Fatal("CredentialsReady should be True")

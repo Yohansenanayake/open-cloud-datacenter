@@ -271,11 +271,7 @@ type DBInstanceStatus struct {
 	// +optional
 	Endpoint *Endpoint `json:"endpoint,omitempty"`
 
-	// MasterUserSecret references the K8s Secret with credentials.
-	// +optional
-	MasterUserSecret *MasterUserSecretRef `json:"masterUserSecret,omitempty"`
-
-	// Resources tracks every Harvester object created for cleanup and idempotency.
+	// Resources tracks managed resource references used by clients and cleanup.
 	// +optional
 	Resources ResourceRefs `json:"resources,omitempty"`
 
@@ -363,18 +359,7 @@ type Endpoint struct {
 	JDBCURL string `json:"jdbcUrl,omitempty"`
 }
 
-// MasterUserSecretRef references the K8s Secret holding the master credentials.
-type MasterUserSecretRef struct {
-	Name string `json:"name"`
-	// Status is "active" or "impaired".
-	Status string `json:"status"`
-}
-
-// ResourceRefs tracks every Harvester resource the controller created.
-// Each field is populated as the corresponding phase completes. On controller
-// restart, the reconciler reads these to skip completed phases. All resources
-// live in the DBInstance's own namespace — read it via inst.Namespace, not
-// from this struct.
+// ResourceRefs tracks managed resources associated with the DBInstance.
 type ResourceRefs struct {
 	// NADName is the Multus NetworkAttachmentDefinition the VM's data NIC
 	// attaches to. The controller does not create the NAD; this just records
@@ -385,12 +370,14 @@ type ResourceRefs struct {
 	DataVolumeName string `json:"dataVolumeName,omitempty"`
 	// +optional
 	VMName string `json:"vmName,omitempty"`
+	// AdminCredentialsSecretName is the tenant-facing Secret containing the
+	// administrator username and password.
 	// +optional
-	SecretName string `json:"secretName,omitempty"`
+	AdminCredentialsSecretName string `json:"adminCredentialsSecretName,omitempty"`
 	// CloudInitSecretName is the ephemeral Secret that holds cloud-init
-	// userdata and networkdata. It is deleted by the controller as soon as
-	// the VM reaches Available so the installation script and embedded
-	// passwords are not left on-cluster indefinitely.
+	// userdata and networkdata. Once PostgreSQL is ready, the controller scrubs
+	// sensitive userdata but retains the object because the running VMI keeps the
+	// Secret volume mounted.
 	// +optional
 	CloudInitSecretName string `json:"cloudInitSecretName,omitempty"`
 	// +optional
@@ -461,10 +448,6 @@ const (
 	StatusDegraded               = "degraded"                // Report-only — the controller never restarts on degradation.
 	StatusIncompatibleParameters = "incompatible-parameters" // A requested change was rejected; the existing database, if any, is unaffected.
 	StatusCrashLoopHalted        = "crash-loop-halted"
-
-	// MasterUserSecretRef.Status values.
-	SecretStatusActive   = "active"
-	SecretStatusImpaired = "impaired"
 
 	// Label keys applied to all Harvester resources owned by a DBInstance.
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"
