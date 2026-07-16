@@ -98,6 +98,7 @@ const (
 	ReasonWaitingForEndpoint          ConditionReason = "WaitingForEndpoint"
 	ReasonMonitoringDeployFailed      ConditionReason = "MonitoringDeployFailed"
 	ReasonMonitoringDeployed          ConditionReason = "MonitoringDeployed"
+	ReasonBootstrapCleanupReconciled  ConditionReason = "BootstrapCleanupReconciled"
 	ReasonProvisioning                ConditionReason = "Provisioning"
 	ReasonDBInstanceReady             ConditionReason = "DBInstanceReady"
 	ReasonSpecAccepted                ConditionReason = "SpecAccepted"
@@ -148,6 +149,7 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonWaitingForEndpoint):          ReasonWaitingForEndpoint,
 	string(ReasonMonitoringDeployFailed):      ReasonMonitoringDeployFailed,
 	string(ReasonMonitoringDeployed):          ReasonMonitoringDeployed,
+	string(ReasonBootstrapCleanupReconciled):  ReasonBootstrapCleanupReconciled,
 	string(ReasonProvisioning):                ReasonProvisioning,
 	string(ReasonDBInstanceReady):             ReasonDBInstanceReady,
 	string(ReasonSpecAccepted):                ReasonSpecAccepted,

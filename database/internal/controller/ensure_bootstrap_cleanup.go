@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
@@ -54,10 +56,9 @@ const redactedCloudInitUserData = "#cloud-config\n{}\n"
 // The Secret object itself is never deleted, so there's nothing left for
 // kubelet to fail to mount, ever.
 //
-// Runs every pass once DatabaseReady, not once — matching the same
-// cheap-same-pass exception ensureMonitoring documents: resource.Apply
-// already no-ops when content is unchanged, so there's no need for one-shot
-// bookkeeping.
+// A create/update stops the pass so the next reconcile re-observes the
+// persisted redaction. Once the Secret is unchanged, the step is Satisfied and
+// generation reconciliation may continue.
 func (r *DBInstanceReconciler) ensureBootstrapCleanup(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	ciName := inst.Status.Resources.CloudInitSecretName
 	if ciName == "" {
@@ -69,12 +70,17 @@ func (r *DBInstanceReconciler) ensureBootstrapCleanup(ctx context.Context, inst 
 	}
 
 	networkdata := credentials.BuildNetworkData(credentials.BootstrapParams{StaticNetwork: inst.Spec.StaticNetwork})
-	if _, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, resource.CloudInitSecret{
+	op, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, resource.CloudInitSecret{
 		Instance:    inst,
 		UserData:    redactedCloudInitUserData,
 		NetworkData: networkdata,
-	}); err != nil {
+	})
+	if err != nil {
 		return transient(err)
+	}
+	if op != controllerutil.OperationResultNone {
+		return pending(dbaasv1.ReasonBootstrapCleanupReconciled,
+			"cloud-init bootstrap data redacted; waiting for observation")
 	}
 	return satisfied()
 }

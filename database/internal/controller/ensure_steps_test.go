@@ -318,21 +318,24 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 		t.Fatal("bootstrap cleanup ran in the monitoring mutation pass")
 	}
 
-	// Pass 5: monitoring is observed unchanged, then bootstrap cleanup runs and
-	// the generation-completion checkpoint advances ObservedGeneration.
+	// Pass 5: monitoring is observed unchanged, then bootstrap cleanup redacts
+	// the cloud-init Secret and stops before generation completion.
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 5: %v", err)
 	}
 	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
-		t.Fatalf("pass 5 = (%+v, %v), want zero Result and nil error", result, err)
+		t.Fatalf("pass 5 = (%+v, %v), want event-driven bootstrap-cleanup Pending", result, err)
 	}
-	got := &dbaasv1.DBInstance{}
-	if err := r.Get(ctx, key, got); err != nil {
+	after5 := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, after5); err != nil {
 		t.Fatalf("get after pass 5: %v", err)
 	}
+	if after5.Status.ObservedGeneration == after5.Generation {
+		t.Fatalf("ObservedGeneration advanced during bootstrap cleanup: %+v", after5.Status)
+	}
 	// The cloud-init Secret is redacted, not deleted — the ref stays recorded.
-	if got.Status.Resources.CloudInitSecretName != "pg-orders-cloudinit" {
-		t.Fatalf("cloud-init ref = %q after pass 5, want kept (pg-orders-cloudinit)", got.Status.Resources.CloudInitSecretName)
+	if after5.Status.Resources.CloudInitSecretName != "pg-orders-cloudinit" {
+		t.Fatalf("cloud-init ref = %q after pass 5, want kept (pg-orders-cloudinit)", after5.Status.Resources.CloudInitSecretName)
 	}
 	var ciSecret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ciSecret); err != nil {
@@ -340,6 +343,22 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	}
 	if string(ciSecret.Data["userdata"]) != redactedCloudInitUserData {
 		t.Fatalf("cloud-init userdata = %q, want redacted", ciSecret.Data["userdata"])
+	}
+	if after5.Status.Phase != dbaasv1.StatusAvailable {
+		t.Fatalf("phase after bootstrap mutation = %q, want available", after5.Status.Phase)
+	}
+
+	// Pass 6: the redacted Secret is observed unchanged, so the generation
+	// completion checkpoint advances ObservedGeneration.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 6: %v", err)
+	}
+	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 6 = (%+v, %v), want zero Result and nil error", result, err)
+	}
+	got := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, got); err != nil {
+		t.Fatalf("get after pass 6: %v", err)
 	}
 	if got.Status.Phase != dbaasv1.StatusAvailable {
 		t.Fatalf("phase = %q, want available", got.Status.Phase)
