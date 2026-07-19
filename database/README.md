@@ -17,12 +17,13 @@ Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
   identifier rules at apply time (`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`), so
   invalid names are rejected up front instead of failing later inside
   cloud-init.
-- **Reconciler**: phase-based state machine (`NetworkProvisioned →
-  StorageProvisioned → VMCreated → WaitingForCloudInit → DatabaseReady →
-  MonitoringDeployed → Available`); idempotent and crash-safe via
-  `status.resources`. Readiness is confirmed by dialing PostgreSQL's
-  TCP listener directly from the controller process (see *Network
-  model*) — no helper Pod.
+- **Reconciler**: condition-based, bounded ensure-step reconciliation, with
+  progress exposed through conditions including `Accepted`, `VMReady`,
+  `DatabaseReady`, and `Ready`. It is idempotent and crash-safe through observed
+  cluster/provider state, deterministic resource names, and durable
+  `status.resources` references. PostgreSQL readiness is checked with
+  `pg_isready` against its TCP listener inside the guest via a KubeVirt exec
+  readiness probe — no helper Pod.
 - **REST gateway**: a thin HTTP layer over the CRD exposing the same six
   operations as `kubectl`; mutations are authenticated by forwarding the
   caller's bearer token to the K8s API server (same authn/RBAC/audit path
