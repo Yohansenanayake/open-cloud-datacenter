@@ -20,20 +20,25 @@ import (
 	"context"
 
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// patchStatusIfChanged persists inst.Status with a MergeFrom patch, skipping the
-// write when the status is unchanged.
+// patchStatusIfChanged persists inst.Status with an optimistic-lock MergeFrom
+// patch, skipping the write when the status is unchanged.
 //
-// Mechanism: only this controller writes DBInstance status, and controller-runtime
-// serializes reconciles per object, so there is a single writer — no optimistic
-// lock or re-Get is needed. Because we never re-Get during a pass, inst.Generation
-// is stable, so steps (and markGenerationReconciled) can stamp observedGeneration from it
-// directly. The DeepEqual skip prevents an unchanged status from triggering a
-// self-reconcile loop.
+// The desired status is captured before retrying. Each attempt re-fetches the
+// latest object and uses its resourceVersion as a precondition, so a concurrent
+// write produces a conflict and retries from a fresh object. The DeepEqual skip
+// prevents an unchanged status from triggering a self-reconcile loop.
+//
+// DBInstance status is currently owned in full by this controller, so each
+// attempt applies the complete desired status produced by the ensure pass. If
+// DBaaS expands to multiple controllers that share status ownership, replace
+// this whole-status assignment with semantic transactions replayed against the
+// latest object so one controller preserves fields owned by another.
 //
 // `original` must be the DeepCopy captured at the top of Reconcile (before the
 // pass mutated inst.Status).
@@ -41,5 +46,25 @@ func (r *DBInstanceReconciler) patchStatusIfChanged(ctx context.Context, origina
 	if equality.Semantic.DeepEqual(original.Status, inst.Status) {
 		return nil
 	}
-	return r.Status().Patch(ctx, inst, client.MergeFrom(original))
+
+	desiredStatus := inst.Status.DeepCopy()
+	key := client.ObjectKeyFromObject(inst)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &dbaasv1.DBInstance{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		if equality.Semantic.DeepEqual(latest.Status, *desiredStatus) {
+			inst.Status = *latest.Status.DeepCopy()
+			return nil
+		}
+
+		base := latest.DeepCopy()
+		latest.Status = *desiredStatus.DeepCopy()
+		if err := r.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		inst.Status = *latest.Status.DeepCopy()
+		return nil
+	})
 }

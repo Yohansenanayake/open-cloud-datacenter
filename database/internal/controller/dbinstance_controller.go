@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -213,9 +214,8 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ns := inst.Namespace
-	// Single snapshot reused across every patchStatusIfChanged call below —
-	// safe because this controller is the only status writer and reconciles
-	// are serialized per object (see patchStatusIfChanged's doc comment).
+	// Single snapshot reused across every patchStatusIfChanged call below; the
+	// helper re-fetches and retries conflicts for each attempted status write.
 	original := inst.DeepCopy()
 
 	if inst.Spec.DeletionProtection {
@@ -250,8 +250,26 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
-	controllerutil.RemoveFinalizer(inst, dbaasv1.FinalizerName)
-	return ctrl.Result{}, r.Update(ctx, inst)
+	return ctrl.Result{}, r.removeDBInstanceFinalizer(ctx, client.ObjectKeyFromObject(inst))
+}
+
+// removeDBInstanceFinalizer re-fetches on every retry so the full-object update
+// never combines a fresh resourceVersion with stale spec or metadata.
+func (r *DBInstanceReconciler) removeDBInstanceFinalizer(ctx context.Context, key client.ObjectKey) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &dbaasv1.DBInstance{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if !controllerutil.ContainsFinalizer(latest, dbaasv1.FinalizerName) {
+			return nil
+		}
+		controllerutil.RemoveFinalizer(latest, dbaasv1.FinalizerName)
+		return r.Update(ctx, latest)
+	})
 }
 
 // deleteOperatorSecrets removes the two controller-private, cross-namespace

@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
@@ -170,5 +171,54 @@ func TestReconcileDeleteProtectionReturnsStatusPatchError(t *testing.T) {
 
 	if _, err := r.reconcileDelete(ctx, inst); !errors.Is(err, boom) {
 		t.Fatalf("reconcileDelete error = %v, want status patch error", err)
+	}
+}
+
+func TestRemoveDBInstanceFinalizerRetriesConflictAndPreservesConcurrentMetadata(t *testing.T) {
+	ctx := context.Background()
+	inst := newProvisionInst()
+	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	watchClient, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fixture's fake client does not implement client.WithWatch")
+	}
+	updateCalls := 0
+	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updateCalls++
+			if updateCalls == 1 {
+				concurrent := &dbaasv1.DBInstance{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), concurrent); err != nil {
+					return err
+				}
+				concurrent.Annotations = map[string]string{"concurrent": "preserved"}
+				if err := c.Update(ctx, concurrent); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					dbaasv1.GroupVersion.WithResource("dbinstances").GroupResource(),
+					obj.GetName(),
+					errors.New("injected conflict"),
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+
+	if err := r.removeDBInstanceFinalizer(ctx, client.ObjectKeyFromObject(inst)); err != nil {
+		t.Fatalf("removeDBInstanceFinalizer after conflict: %v", err)
+	}
+	if updateCalls != 2 {
+		t.Fatalf("update calls = %d, want 2", updateCalls)
+	}
+	got := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(inst), got); err != nil {
+		t.Fatalf("get after finalizer removal: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(got, dbaasv1.FinalizerName) {
+		t.Fatal("DBInstance finalizer was not removed")
+	}
+	if got.Annotations["concurrent"] != "preserved" {
+		t.Fatalf("concurrent annotation = %q, want preserved", got.Annotations["concurrent"])
 	}
 }
