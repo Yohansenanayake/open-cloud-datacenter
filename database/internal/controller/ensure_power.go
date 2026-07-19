@@ -98,8 +98,12 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 				return transient(err)
 			}
 			// Planned start: reset the UID baseline so the new VMI is not
-			// counted as an unplanned restart by the liveness monitor.
+			// counted as an unplanned restart by the liveness monitor, and
+			// clear the crash-loop chain so restart history from before this
+			// deliberate start doesn't carry over into a fresh halt threshold.
 			inst.Status.LastKnownVMIUID = ""
+			inst.Status.RecentUnplannedRestarts = 0
+			inst.Status.LastUnplannedRestartTime = nil
 			msg := "requested VM start"
 			setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse, dbaasv1.ReasonStarting, msg)
 			return pending(dbaasv1.ReasonStarting, msg)
