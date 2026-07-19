@@ -51,11 +51,39 @@ func TestProductionConditionReasonsUseConstants(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %s: %v", file, err)
 			}
+			reasonCases := make(map[*ast.CaseClause]struct{})
+			ast.Inspect(parsed, func(node ast.Node) bool {
+				switchStmt, ok := node.(*ast.SwitchStmt)
+				if !ok || !isReasonSelector(switchStmt.Tag) {
+					return true
+				}
+				for _, stmt := range switchStmt.Body.List {
+					if clause, ok := stmt.(*ast.CaseClause); ok {
+						reasonCases[clause] = struct{}{}
+					}
+				}
+				return true
+			})
 			ast.Inspect(parsed, func(node ast.Node) bool {
 				switch n := node.(type) {
 				case *ast.KeyValueExpr:
 					if ident, ok := n.Key.(*ast.Ident); ok && ident.Name == "Reason" {
 						rejectStringLiteral(t, fset, file, n.Value)
+					}
+				case *ast.AssignStmt:
+					for i := 0; i < len(n.Lhs) && i < len(n.Rhs); i++ {
+						if isReasonSelector(n.Lhs[i]) {
+							rejectStringLiteral(t, fset, file, n.Rhs[i])
+						}
+						if isReasonSelector(n.Rhs[i]) {
+							rejectStringLiteral(t, fset, file, n.Lhs[i])
+						}
+					}
+				case *ast.CaseClause:
+					if _, ok := reasonCases[n]; ok {
+						for _, expr := range n.List {
+							rejectStringLiteral(t, fset, file, expr)
+						}
 					}
 				case *ast.CallExpr:
 					ident, ok := n.Fun.(*ast.Ident)
