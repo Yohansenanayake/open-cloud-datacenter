@@ -106,6 +106,20 @@ func TestEnsureMonitoringAppliesTrioWithOwnerRefs(t *testing.T) {
 	}
 }
 
+func TestEnsureMonitoringOmitsGrafanaURLWhenBaseUnset(t *testing.T) {
+	inst := newMonitoringInst()
+	inst.Status.GrafanaURL = "https://old.example/d/old"
+	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r.GrafanaBaseURL = ""
+
+	if res := r.ensureMonitoring(context.Background(), inst); res.Outcome != OutcomePending {
+		t.Fatalf("result = %+v, want Pending after monitoring apply", res)
+	}
+	if inst.Status.GrafanaURL != "" {
+		t.Fatalf("GrafanaURL = %q, want empty when base URL is unset", inst.Status.GrafanaURL)
+	}
+}
+
 // The Owns() payoff: out-of-band deletion of any monitoring child is repaired
 // on the next pass, and the mutation stops that pass.
 func TestEnsureMonitoringRepairsOutOfBandDeletion(t *testing.T) {

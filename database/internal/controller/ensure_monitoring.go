@@ -80,7 +80,10 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 	svcName := resource.MetricsServiceName(inst)
 	inst.Status.Resources.MetricsServiceName = svcName
 	inst.Status.Resources.ServiceMonitor = resource.ServiceMonitorName(inst)
-	inst.Status.GrafanaURL = fmt.Sprintf("%s/d/dbaas-%s/postgresql-%s", r.GrafanaBaseURL, inst.Name, inst.Name)
+	inst.Status.GrafanaURL = ""
+	if r.GrafanaBaseURL != "" {
+		inst.Status.GrafanaURL = fmt.Sprintf("%s/d/dbaas-%s/postgresql-%s", r.GrafanaBaseURL, inst.Name, inst.Name)
+	}
 	inst.Status.PrometheusTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, inst.Namespace)
 	msg := "metrics Service, Endpoints, and ServiceMonitor observed"
 	if changed {
