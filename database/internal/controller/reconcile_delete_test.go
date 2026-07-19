@@ -24,6 +24,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
@@ -147,5 +149,26 @@ func TestReconcileDeleteProtectionPublishesBlockedSummary(t *testing.T) {
 	}
 	if got.Status.Message != blocked.Message {
 		t.Fatalf("summary message = %q, want blocked message %q", got.Status.Message, blocked.Message)
+	}
+}
+
+func TestReconcileDeleteProtectionReturnsStatusPatchError(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	inst.Spec.DeletionProtection = true
+	boom := errors.New("status unavailable")
+	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	watchClient, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fixture's fake client does not implement client.WithWatch")
+	}
+	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return boom
+		},
+	})
+
+	if _, err := r.reconcileDelete(ctx, inst); !errors.Is(err, boom) {
+		t.Fatalf("reconcileDelete error = %v, want status patch error", err)
 	}
 }
