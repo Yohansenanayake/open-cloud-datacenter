@@ -106,6 +106,19 @@ func TestApplyBuildersIdempotentWithOwnerRefs(t *testing.T) {
 	}
 }
 
+func TestConnectionSecretFormatsIPv6JDBCURL(t *testing.T) {
+	secret := &corev1.Secret{}
+	builder := ConnectionSecret{
+		Instance: testOwner(), Address: "2001:db8::1", Port: 5432, DBName: "orders",
+	}
+	if err := builder.Update(secret); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got, want := string(secret.Data["jdbcUrl"]), "jdbc:postgresql://[2001:db8::1]:5432/orders?ssl=true&sslmode=verify-ca"; got != want {
+		t.Fatalf("jdbcUrl = %q, want %q", got, want)
+	}
+}
+
 // The Service builder must not clobber the server-assigned clusterIP on update.
 func TestMetricsServiceDoesNotClobberClusterIP(t *testing.T) {
 	ctx := context.Background()

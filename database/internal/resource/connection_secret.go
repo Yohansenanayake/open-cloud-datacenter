@@ -18,6 +18,7 @@ package resource
 
 import (
 	"fmt"
+	"net"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,11 +62,12 @@ func (b ConnectionSecret) Update(obj client.Object) error {
 	// API input and is omitted from GET responses, so using it in CreateOrUpdate
 	// would make every observation look changed and keep the bounded step Pending.
 	sec.StringData = nil
+	hostPort := net.JoinHostPort(b.Address, fmt.Sprintf("%d", b.Port))
 	sec.Data = map[string][]byte{
 		"host":    []byte(b.Address),
 		"port":    []byte(fmt.Sprintf("%d", b.Port)),
 		"dbname":  []byte(b.DBName),
-		"jdbcUrl": []byte(fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-ca", b.Address, b.Port, b.DBName)),
+		"jdbcUrl": []byte(fmt.Sprintf("jdbc:postgresql://%s/%s?ssl=true&sslmode=verify-ca", hostPort, b.DBName)),
 		"sslmode": []byte("verify-ca"),
 		"ca.crt":  []byte(b.CACertPEM),
 	}
