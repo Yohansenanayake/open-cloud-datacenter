@@ -47,6 +47,8 @@ func (r *DBInstanceReconciler) syncReadyCondition(inst *dbaasv1.DBInstance) {
 		return
 	}
 
+	// Use the latest operational observation, not GetCurrentCondition: a spec
+	// edit can be rejected while the existing database remains healthy.
 	dbReady := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
 	if dbReady == nil || dbReady.Status != metav1.ConditionTrue {
 		reason, msg := dbaasv1.ReasonProvisioning, "database not yet ready"
