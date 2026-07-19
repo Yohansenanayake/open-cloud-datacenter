@@ -7,6 +7,8 @@ replace (
 	github.com/google/gnostic-models => github.com/google/gnostic-models v0.6.9
 	github.com/openshift/api => github.com/openshift/api v0.0.0-20191219222812-2987a591a72c
 	github.com/openshift/client-go => github.com/openshift/client-go v0.0.0-20200521150516-05eb9880269c
+	// KubeVirt v1.6.0 requires the v0.68 monitoring API shape; newer versions
+	// change TLSConfig.InsecureSkipVerify from bool to *bool and do not compile.
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring => github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.68.0
 	github.com/rancher/lasso => github.com/rancher/lasso v0.0.0-20241202185148-04649f379358
 	github.com/rancher/rancher/pkg/apis => github.com/rancher/rancher/pkg/apis v0.0.0-20250828140533-07a90f09a491
@@ -26,7 +28,7 @@ replace (
 require (
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
-	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.82.0
+	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.82.0 // effective v0.68.0 via the KubeVirt compatibility replace above
 	k8s.io/apimachinery v0.34.0
 	k8s.io/client-go v12.0.0+incompatible
 	kubevirt.io/api v1.6.0
