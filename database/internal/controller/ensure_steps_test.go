@@ -188,14 +188,14 @@ func TestRunEnsureStepsUnknownOutcomeIsTransient(t *testing.T) {
 	}
 }
 
-// --- runProvisioning outcome→Result mapping through real scenarios ---
+// --- reconcileInstance outcome→Result mapping through real scenarios ---
 
-func TestRunProvisioningTerminalParks(t *testing.T) {
+func TestReconcileInstanceTerminalParks(t *testing.T) {
 	inst := newProvisionInst()
 	inst.Spec.DBInstanceClass = "db.bogus"
 	r := newProvisionReconciler(t, &stubHarvester{}, inst)
 
-	result, err := r.runProvisioning(context.Background(), inst)
+	result, err := r.reconcileInstance(context.Background(), inst)
 
 	if err != nil {
 		t.Fatalf("terminal must park without error, got %v", err)
@@ -216,7 +216,7 @@ func TestRunProvisioningTerminalParks(t *testing.T) {
 	}
 }
 
-func TestRunProvisioningTransientReturnsError(t *testing.T) {
+func TestReconcileInstanceTransientReturnsError(t *testing.T) {
 	inst := newProvisionInst()
 	boom := errors.New("vmi lookup boom")
 	stub := &stubHarvester{readinessErr: boom}
@@ -224,13 +224,13 @@ func TestRunProvisioningTransientReturnsError(t *testing.T) {
 	r := newProvisionReconciler(t, stub, inst, testVM("pg-orders", "tenant-a"))
 	convergeCredentials(t, context.Background(), r, inst)
 
-	_, err := r.runProvisioning(context.Background(), inst)
+	_, err := r.reconcileInstance(context.Background(), inst)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the injected transient error", err)
 	}
 }
 
-func TestRunProvisioningFullWalk(t *testing.T) {
+func TestReconcileInstanceFullWalk(t *testing.T) {
 	ctx := context.Background()
 	inst := newProvisionInst()
 	stub := &stubHarvester{readiness: harvester.VMIReadiness{
@@ -242,7 +242,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	key := client.ObjectKeyFromObject(inst)
 
 	// Pass 1: durable credential Secrets are created and stop the pass.
-	result, err := r.runProvisioning(ctx, inst)
+	result, err := r.reconcileInstance(ctx, inst)
 	if err != nil || result.RequeueAfter != credentialRequeue {
 		t.Fatalf("pass 1 = (%+v, %v), want credential fallback requeue", result, err)
 	}
@@ -274,7 +274,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 2: %v", err)
 	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 2 = (%+v, %v), want event-driven VM-create Pending", result, err)
 	}
 	if stub.CreateVMCalls != 1 {
@@ -291,7 +291,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch: %v", err)
 	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result.RequeueAfter != credentialRequeue {
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result.RequeueAfter != credentialRequeue {
 		t.Fatalf("pass 3 = (%+v, %v), want connection-secret fallback requeue", result, err)
 	}
 
@@ -300,7 +300,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 4: %v", err)
 	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result.RequeueAfter != monitoringRequeue {
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result.RequeueAfter != monitoringRequeue {
 		t.Fatalf("pass 4 = (%+v, %v), want monitoring fallback requeue", result, err)
 	}
 	after4 := &dbaasv1.DBInstance{}
@@ -323,7 +323,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 5: %v", err)
 	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 5 = (%+v, %v), want event-driven bootstrap-cleanup Pending", result, err)
 	}
 	after5 := &dbaasv1.DBInstance{}
@@ -353,7 +353,7 @@ func TestRunProvisioningFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 6: %v", err)
 	}
-	if result, err = r.runProvisioning(ctx, inst); err != nil || result != (ctrl.Result{}) {
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 6 = (%+v, %v), want zero Result and nil error", result, err)
 	}
 	got := &dbaasv1.DBInstance{}

@@ -34,7 +34,7 @@ type ensureStep struct {
 	run  func(ctx context.Context, inst *dbaasv1.DBInstance) StepResult
 }
 
-// runProvisioning is Reconcile's entry point for every non-deletion pass. It
+// reconcileInstance is Reconcile's entry point for every non-deletion pass. It
 // walks the ensure steps, persists status once (MergeFrom + DeepEqual-skip
 // via patchStatusIfChanged), then maps the outcome to a controller-runtime
 // result:
@@ -44,9 +44,9 @@ type ensureStep struct {
 //	Pending   → step's Result (zero = watch-driven, or RequeueAfter fallback)
 //	Terminal  → park: (ctrl.Result{}, nil); recovers on a spec edit / watch event
 //	Transient → return err for controller-runtime backoff
-func (r *DBInstanceReconciler) runProvisioning(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+func (r *DBInstanceReconciler) reconcileInstance(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	original := inst.DeepCopy()
-	res := r.runEnsureSteps(ctx, inst, r.provisioningSteps())
+	res := r.runEnsureSteps(ctx, inst, r.instanceEnsureSteps())
 	r.finalizeStatus(inst)
 
 	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
@@ -63,7 +63,7 @@ func (r *DBInstanceReconciler) runProvisioning(ctx context.Context, inst *dbaasv
 	}
 }
 
-// provisioningSteps is the ordered ensure-step chain the runner walks for
+// instanceEnsureSteps is the ordered ensure-step chain the runner walks for
 // every DBInstance, in every state — provisioning, steady-state Available,
 // and crash-loop-parked alike. There is no separate dispatch for any of
 // those; ensureDatabaseHealth's own crash-loop guard and steady-state
@@ -73,7 +73,7 @@ func (r *DBInstanceReconciler) runProvisioning(ctx context.Context, inst *dbaasv
 // stays non-Satisfied while shape drift exists, so the power step never fights
 // it; once the shape converges, power observes "desired running, declared
 // Halted" and restarts. No cross-step coupling or persisted operation state.
-func (r *DBInstanceReconciler) provisioningSteps() []ensureStep {
+func (r *DBInstanceReconciler) instanceEnsureSteps() []ensureStep {
 	return []ensureStep{
 		{"finalizer", r.ensureFinalizer},
 		{"preflight", r.ensurePreflight},
@@ -95,7 +95,7 @@ func (r *DBInstanceReconciler) provisioningSteps() []ensureStep {
 // chain of steps is itself satisfied precisely when every step in it is. An
 // unknown outcome is treated as Transient defensively. Steps are a parameter so
 // runner mechanics are testable with injected steps; production callers pass
-// r.provisioningSteps().
+// r.instanceEnsureSteps().
 func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1.DBInstance, steps []ensureStep) StepResult {
 	for _, step := range steps {
 		res := step.run(ctx, inst)

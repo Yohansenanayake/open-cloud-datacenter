@@ -128,7 +128,7 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// ensureDatabaseHealth; bootstrap cleanup in ensureBootstrapCleanup.
 	// Steady state is event-driven off the VMI watch: an all-Satisfied pass
 	// writes nothing (DeepEqual skip) and requeues nothing.
-	return r.runProvisioning(ctx, &inst)
+	return r.reconcileInstance(ctx, &inst)
 }
 
 // immutableDrift returns a comma-separated list of immutable spec fields

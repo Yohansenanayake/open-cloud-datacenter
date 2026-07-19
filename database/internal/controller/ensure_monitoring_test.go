@@ -273,7 +273,7 @@ func TestEnsureMonitoringRetargetsEndpointsWithBoundedOutcome(t *testing.T) {
 	}
 }
 
-func TestRunProvisioningMonitoringFailureRetriesWithoutCompletingGeneration(t *testing.T) {
+func TestReconcileInstanceMonitoringFailureRetriesWithoutCompletingGeneration(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubHarvester{readiness: harvester.VMIReadiness{
 		Running: true, Ready: true, AgentConnected: true,
@@ -304,8 +304,8 @@ func TestRunProvisioningMonitoringFailureRetriesWithoutCompletingGeneration(t *t
 		},
 	})
 
-	if _, err := r.runProvisioning(ctx, inst); !errors.Is(err, boom) {
-		t.Fatalf("runProvisioning error = %v, want monitoring API error", err)
+	if _, err := r.reconcileInstance(ctx, inst); !errors.Is(err, boom) {
+		t.Fatalf("reconcileInstance error = %v, want monitoring API error", err)
 	}
 	got := getInst(t, r.Client)
 	if got.Status.ObservedGeneration != 1 {
