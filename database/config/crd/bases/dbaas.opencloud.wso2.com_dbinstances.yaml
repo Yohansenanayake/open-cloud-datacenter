@@ -465,18 +465,6 @@ spec:
                   unplanned VMI restart (UID change). Input to crash-loop detection.
                 format: date-time
                 type: string
-              masterUserSecret:
-                description: MasterUserSecret references the K8s Secret with credentials.
-                properties:
-                  name:
-                    type: string
-                  status:
-                    description: Status is "active" or "impaired".
-                    type: string
-                required:
-                - name
-                - status
-                type: object
               message:
                 description: Message is a human-readable description of the current
                   state.
@@ -507,15 +495,20 @@ spec:
                   RunStrategyAlways KubeVirt would otherwise restart the VM forever).
                 type: integer
               resources:
-                description: Resources tracks every Harvester object created for cleanup
-                  and idempotency.
+                description: Resources tracks managed resource references used by
+                  clients and cleanup.
                 properties:
+                  adminCredentialsSecretName:
+                    description: |-
+                      AdminCredentialsSecretName is the tenant-facing Secret containing the
+                      administrator username and password.
+                    type: string
                   cloudInitSecretName:
                     description: |-
                       CloudInitSecretName is the ephemeral Secret that holds cloud-init
-                      userdata and networkdata. It is deleted by the controller as soon as
-                      the VM reaches Available so the installation script and embedded
-                      passwords are not left on-cluster indefinitely.
+                      userdata and networkdata. Once PostgreSQL is ready, the controller scrubs
+                      sensitive userdata but retains the object because the running VMI keeps the
+                      Secret volume mounted.
                     type: string
                   connectionSecretName:
                     description: |-
@@ -550,8 +543,6 @@ spec:
                       PrivateTLSSecretRef is "namespace/name" of the controller-private
                       Secret holding the CA and server TLS material. Same cross-namespace
                       cleanup model as InternalSecretRef.
-                    type: string
-                  secretName:
                     type: string
                   serviceMonitor:
                     type: string
