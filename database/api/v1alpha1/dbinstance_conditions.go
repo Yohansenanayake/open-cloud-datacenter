@@ -55,10 +55,6 @@ const (
 	// to serve, but readiness or guest-agent attribution says it is unhealthy.
 	ConditionDegraded        = "Degraded"
 	ConditionDeletionBlocked = "DeletionBlocked"
-	// ConditionFailed is retained only to recognize and remove status written by
-	// older controller versions. New code must not set it.
-	// Deprecated: use Accepted or InterventionRequired.
-	ConditionFailed = "Failed"
 )
 
 // Condition reason constants used in Conditions[].Reason and related events.

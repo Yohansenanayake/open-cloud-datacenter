@@ -205,9 +205,6 @@ func TestEnsureStorageResizeShrinkIsTerminal(t *testing.T) {
 	if res.Outcome != OutcomeTerminal || res.Reason != "UnsupportedShrink" {
 		t.Fatalf("res = %+v, want Terminal/UnsupportedShrink", res)
 	}
-	if inst.Status.IsConditionTrue(dbaasv1.ConditionFailed) {
-		t.Fatal("rejected shrink must not set legacy Failed")
-	}
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not halt the VM for a change that can never be applied")
 	}
