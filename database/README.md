@@ -3,9 +3,22 @@
 **A Kubernetes operator for managed PostgreSQL on Harvester HCI / KubeVirt.**
 
 One `DBInstance` custom resource maps to one VM with persistent storage,
-SSL-only PostgreSQL, and tenant-facing credentials. Tested on **Harvester
-1.7.1** (RKE2 v1.34.3) — `kubectl apply` to a working `psql` connection in
+SSL-only PostgreSQL, and tenant-facing credentials. `kubectl apply` to a working `psql` connection in
 about 3 minutes.
+
+## Prerequisites
+
+- A [**Harvester HCI**](https://github.com/harvester/harvester/tree/v1.7) cluster (tested on 1.7.1 / RKE2 v1.34.3)
+- A Multus **NetworkAttachmentDefinition** for the VM's data network already
+  created on the cluster — the controller only attaches to `spec.networkRef`,
+  it never creates networks.
+- [**Rancher Monitoring**](https://docs.harvesterhci.io/v1.7/monitoring/harvester-monitoring)
+  enabled on the cluster (it bundles the Prometheus Operator and the
+  `ServiceMonitor` CRD) — per-instance monitoring resources are created
+  unconditionally.
+- `kubectl`, and a `KUBECONFIG` pointed at the Harvester cluster.
+- To build from source: **Go 1.25+**, `make`, and `docker buildx` for
+  cross-building the manager image.
 
 ## Quickstart
 
