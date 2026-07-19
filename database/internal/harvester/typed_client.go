@@ -255,6 +255,9 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 		{"secrets", refs.AdminCredentialsSecretName, func() error {
 			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.AdminCredentialsSecretName, metav1.DeleteOptions{})
 		}},
+		{"secrets", refs.ConnectionSecretName, func() error {
+			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.ConnectionSecretName, metav1.DeleteOptions{})
+		}},
 		{"secrets", refs.CloudInitSecretName, func() error {
 			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.CloudInitSecretName, metav1.DeleteOptions{})
 		}},

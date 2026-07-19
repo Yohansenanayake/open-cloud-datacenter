@@ -411,19 +411,28 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	}
 }
 
-func TestTypedTeardownIgnoresNotFound(t *testing.T) {
+func TestTypedTeardownDeletesConnectionSecretAndIgnoresNotFound(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
+	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-connect", Namespace: "tenant-a"},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create connection Secret: %v", err)
+	}
 	err := client.TeardownAll(ctx, "orders", "tenant-a", dbaasv1.ResourceRefs{
 		VMName:                     "pg-orders",
 		DataVolumeName:             "pg-orders-data",
 		AdminCredentialsSecretName: "pg-orders-credentials",
+		ConnectionSecretName:       "pg-orders-connect",
 		CloudInitSecretName:        "pg-orders-cloudinit",
 		MetricsServiceName:         "pg-orders-metrics",
 		ServiceMonitor:             "pg-orders-monitor",
 	})
 	if err != nil {
 		t.Fatalf("TeardownAll returned error for missing resources: %v", err)
+	}
+	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, "pg-orders-connect", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("connection Secret still exists after TeardownAll: %v", err)
 	}
 }
 
