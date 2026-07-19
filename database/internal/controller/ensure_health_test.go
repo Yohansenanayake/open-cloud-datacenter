@@ -126,6 +126,25 @@ func TestEnsureDatabaseHealthSatisfiedWhenReady(t *testing.T) {
 	}
 }
 
+func TestCrashLoopRecoveryWaitsForDataNetIP(t *testing.T) {
+	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+		Running: true, Ready: true, AgentConnected: true,
+	}}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+		dbaasv1.ReasonCrashLoopDetected, "seeded")
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonVMBooting || res.Result.RequeueAfter != healthRequeue {
+		t.Fatalf("res = %+v, want short Pending/VMBooting", res)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
+		t.Fatal("CrashLoopHalted must remain set until the data-net IP is observed")
+	}
+}
+
 // A non-NotFound readiness error is infrastructure failure, not a boot gate.
 func TestEnsureDatabaseHealthGenericErrorIsTransient(t *testing.T) {
 	boom := errors.New("apiserver timeout")

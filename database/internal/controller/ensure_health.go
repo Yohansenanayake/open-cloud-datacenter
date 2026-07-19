@@ -91,7 +91,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	// healthy instead of being counted as another crash-loop restart and halted
 	// immediately.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
-		if readiness.Running && readiness.Ready && readiness.AgentConnected {
+		if readiness.Running && readiness.Ready && readiness.AgentConnected && readiness.IP != "" {
 			r.Recorder.Eventf(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonRecovered),
 				"VM healthy again after crash-loop halt; resuming reconciliation")
 			removeCondition(inst, dbaasv1.ConditionCrashLoopHalted)
@@ -105,6 +105,9 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// this same pass instead of wasting a reconcile on a "Recovering"
 			// state no observer could ever reliably catch. The Recorder event
 			// above is the durable record that a recovery happened.
+		} else if readiness.Running && readiness.Ready && readiness.AgentConnected {
+			msg := "recovery VM healthy; waiting for data-net IP"
+			return pendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
 		} else {
 			msg := "crash-loop halted; VM kept down — start the VM out-of-band once repaired to recover"
 			return pendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue)
