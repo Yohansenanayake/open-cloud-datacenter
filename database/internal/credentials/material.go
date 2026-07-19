@@ -29,6 +29,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"time"
@@ -100,11 +101,17 @@ func generateTLS(commonName string) (*TLSBundle, error) {
 // VM's data-net IP is known and push the result back into the VM.
 func RenewServerCert(caCertPEM, caKeyPEM, commonName string, ips []net.IP) (serverCertPEM, serverKeyPEM string, err error) {
 	caKeyBlock, _ := pem.Decode([]byte(caKeyPEM))
+	if caKeyBlock == nil {
+		return "", "", errors.New("invalid CA key PEM")
+	}
 	caKey, err := x509.ParsePKCS1PrivateKey(caKeyBlock.Bytes)
 	if err != nil {
 		return
 	}
 	caCertBlock, _ := pem.Decode([]byte(caCertPEM))
+	if caCertBlock == nil {
+		return "", "", errors.New("invalid CA certificate PEM")
+	}
 	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
 	if err != nil {
 		return
