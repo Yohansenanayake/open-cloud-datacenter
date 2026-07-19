@@ -133,7 +133,7 @@ func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName s
 }
 
 func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error) {
-	vmName = fmt.Sprintf("pg-%s", p.ID)
+	vmName = VMName(p.ID)
 
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
 	if err != nil {
@@ -364,6 +364,11 @@ func resolveImageStorageClassName(image *harvesterhciov1beta1.VirtualMachineImag
 	}
 	return "", fmt.Errorf("VM image %s/%s does not have a StorageClass yet (not initialized)",
 		image.Namespace, image.Name)
+}
+
+// VMName is the deterministic name of a DBInstance's VirtualMachine.
+func VMName(id string) string {
+	return fmt.Sprintf("pg-%s", id)
 }
 
 // DataVolumeName is the deterministic name of a DBInstance's data-disk PVC.

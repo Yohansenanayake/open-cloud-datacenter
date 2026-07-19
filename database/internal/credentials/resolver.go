@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
 // defaultMasterUser mirrors the controller's own default (dbinstance_types.go
@@ -86,7 +87,7 @@ func (r *Resolver) Resolve(ctx context.Context, inst *dbaasv1.DBInstance) (Resol
 	if err != nil {
 		return ResolveResult{}, err
 	}
-	vmName := fmt.Sprintf("pg-%s", inst.Name) // matches ensureVM's deterministic VM name
+	vmName := harvester.VMName(inst.Name)
 	tls, tlsChanged, err := r.getOrCreateTLS(ctx, inst, vmName)
 	if err != nil {
 		return ResolveResult{}, err
