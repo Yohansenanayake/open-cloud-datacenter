@@ -171,7 +171,7 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 	}
 	appliedPort := a.Port
 	if appliedPort == 0 {
-		appliedPort = 5432
+		appliedPort = defaultPort
 	}
 	appliedStorageType := a.StorageType
 	if appliedStorageType == "" {
