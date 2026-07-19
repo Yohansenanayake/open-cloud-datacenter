@@ -77,9 +77,11 @@ func TestApplyBuildersIdempotentWithOwnerRefs(t *testing.T) {
 	c := ctrlfake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 
 	builders := map[string]Builder{
-		"service":        MetricsService{Instance: owner},
-		"endpoints":      MetricsEndpoints{Instance: owner, VMIP: "192.168.40.50"},
-		"servicemonitor": ServiceMonitor{Instance: owner},
+		"service":          MetricsService{Instance: owner},
+		"endpoints":        MetricsEndpoints{Instance: owner, VMIP: "192.168.40.50"},
+		"servicemonitor":   ServiceMonitor{Instance: owner},
+		"connectionsecret": ConnectionSecret{Instance: owner, Address: "192.168.40.50", Port: 5432, DBName: "orders"},
+		"cloudinitsecret":  CloudInitSecret{Instance: owner, UserData: "#cloud-config\n{}\n", NetworkData: "version: 2\n"},
 	}
 	for name, b := range builders {
 		op, err := Apply(ctx, c, testScheme(t), owner, b)
