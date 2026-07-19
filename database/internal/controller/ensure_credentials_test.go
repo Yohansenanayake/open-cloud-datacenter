@@ -65,8 +65,8 @@ func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 	}
 
 	// No endpoint yet: the connection Secret must not be created or referenced.
-	if refs.ConnectionSecretName != "" {
-		t.Fatalf("ConnectionSecretName = %q, want empty (no endpoint yet)", refs.ConnectionSecretName)
+	if got := inst.Status.Resources.ConnectionSecretName; got != "" {
+		t.Fatalf("ConnectionSecretName = %q, want empty (no endpoint yet)", got)
 	}
 	var conn corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: dbresource.ConnectionSecretName(inst)}, &conn); err == nil {
