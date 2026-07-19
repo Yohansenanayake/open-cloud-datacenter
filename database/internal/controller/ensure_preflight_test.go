@@ -108,14 +108,34 @@ func TestEnsurePreflightImmutableDriftIsTerminal(t *testing.T) {
 func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
-	inst.Status.Phase = dbaasv1.StatusFailed
+	networkRef := inst.Spec.NetworkRef
+	inst.Spec.NetworkRef = ""
 
 	res := r.ensurePreflight(context.Background(), inst)
+	if res.Outcome != OutcomeTerminal || res.Reason != dbaasv1.ReasonNetworkRefMissing {
+		t.Fatalf("initial result = %+v, want Terminal/NetworkRefMissing", res)
+	}
+	failed := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if failed == nil || failed.Status != metav1.ConditionFalse || failed.ObservedGeneration != inst.Generation {
+		t.Fatalf("initial PreflightReady = %+v, want current-generation False", failed)
+	}
+
+	inst.Spec.NetworkRef = networkRef
+	inst.Generation++
+	res = r.ensurePreflight(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
 	}
+	recovered := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if recovered == nil || recovered.Status != metav1.ConditionTrue ||
+		recovered.Reason != string(dbaasv1.ReasonPreflightPassed) || recovered.ObservedGeneration != inst.Generation {
+		t.Fatalf("recovered PreflightReady = %+v, want current-generation True/PreflightPassed", recovered)
+	}
 	r.finalizeStatus(inst)
+	if !inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionAccepted, inst.Generation) {
+		t.Fatal("Accepted should be True after correcting the spec")
+	}
 	if inst.Status.Phase != dbaasv1.StatusCreating {
 		t.Fatalf("Phase = %q, want %q after recovery", inst.Status.Phase, dbaasv1.StatusCreating)
 	}
