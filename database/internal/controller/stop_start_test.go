@@ -44,6 +44,7 @@ func boolPtr(b bool) *bool { return &b }
 // shaped running VM in the fake cluster, wired through the full Reconcile path.
 func newLifecycleFixture(t *testing.T, running bool, stub *stubHarvester) (*DBInstanceReconciler, ctrl.Request) {
 	t.Helper()
+	ctx := context.Background()
 	inst := &dbaasv1.DBInstance{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "orders",
@@ -67,12 +68,15 @@ func newLifecycleFixture(t *testing.T, running bool, stub *stubHarvester) (*DBIn
 	}
 	vm := testVM("pg-orders", "tenant-a") // shaped, runStrategy Always
 	r := newProvisionReconciler(t, stub, inst, vm)
-	convergeCredentials(t, context.Background(), r, inst)
-	convergeConnectionSecret(t, context.Background(), r, inst)
+	convergeCredentials(t, ctx, r, inst)
+	convergeConnectionSecret(t, ctx, r, inst)
 	desiredRunning := inst.Spec.Running
 	inst.Spec.Running = boolPtr(true) // resources existed before a stop request
-	convergeMonitoring(t, context.Background(), r, inst)
+	convergeMonitoring(t, ctx, r, inst)
 	inst.Spec.Running = desiredRunning
+	if err := r.Status().Update(ctx, inst); err != nil {
+		t.Fatalf("persist converged fixture status: %v", err)
+	}
 	r.Recorder = record.NewFakeRecorder(10)
 	return r, ctrl.Request{NamespacedName: types.NamespacedName{Name: "orders", Namespace: "tenant-a"}}
 }
