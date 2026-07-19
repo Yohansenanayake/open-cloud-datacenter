@@ -121,6 +121,9 @@ func TestHealthCaughtUpVMIGoneAttributedRestarting(t *testing.T) {
 	if got := degradedReason(inst); got != string(dbaasv1.ReasonVMRestarting) {
 		t.Fatalf("Degraded reason = %q, want %q", got, dbaasv1.ReasonVMRestarting)
 	}
+	if stub.StopVMCalls != 0 || stub.StartVMCalls != 0 {
+		t.Fatalf("VM must not be restarted when the VMI is gone (stop=%d start=%d)", stub.StopVMCalls, stub.StartVMCalls)
+	}
 }
 
 // Recovery: probe Ready again clears Degraded and republishes the endpoint.

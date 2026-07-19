@@ -106,7 +106,7 @@ func TestBuildCloudInitBackupConfig(t *testing.T) {
 	p.S3Config = &dbaasv1.S3BackupConfig{Endpoint: "s3.example.com", Bucket: "backups", Region: "us-east-1", SecretRef: "s3-creds"}
 	userdata, _ := BuildCloudInit(p, testMaterial())
 
-	for _, want := range []string{"S3_ENDPOINT=s3.example.com", "S3_BUCKET=backups", "S3_REGION=us-east-1", "S3_SECRET_REF=s3-creds"} {
+	for _, want := range []string{"S3_ENDPOINT='s3.example.com'", "S3_BUCKET='backups'", "S3_REGION='us-east-1'", "S3_SECRET_REF='s3-creds'"} {
 		if !strings.Contains(userdata, want) {
 			t.Errorf("userdata missing %q", want)
 		}
@@ -115,6 +115,29 @@ func TestBuildCloudInitBackupConfig(t *testing.T) {
 	disabled, _ := BuildCloudInit(testBootstrapParams(), testMaterial())
 	if !strings.Contains(disabled, "# backups disabled") {
 		t.Error("userdata should note backups disabled when BackupEnabled is false")
+	}
+}
+
+func TestBuildCloudInitBackupConfigNeutralizesShellMetacharacters(t *testing.T) {
+	p := testBootstrapParams()
+	p.BackupEnabled = true
+	p.S3Config = &dbaasv1.S3BackupConfig{
+		Endpoint:  "s3.example.com$(touch /tmp/pwned)",
+		Bucket:    "backups`touch /tmp/pwned2`",
+		Region:    "us-east-1; touch /tmp/pwned3",
+		SecretRef: "s3-creds' && touch /tmp/pwned4 && echo '",
+	}
+	userdata, _ := BuildCloudInit(p, testMaterial())
+
+	for _, want := range []string{
+		`S3_ENDPOINT='s3.example.com$(touch /tmp/pwned)'`,
+		"S3_BUCKET='backups`touch /tmp/pwned2`'",
+		`S3_REGION='us-east-1; touch /tmp/pwned3'`,
+		`S3_SECRET_REF='s3-creds'\'' && touch /tmp/pwned4 && echo '\'''`,
+	} {
+		if !strings.Contains(userdata, want) {
+			t.Errorf("userdata missing safely-quoted %q\ngot: %s", want, userdata)
+		}
 	}
 }
 

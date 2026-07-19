@@ -65,8 +65,12 @@ func generateTLS(commonName string) (*TLSBundle, error) {
 		return nil, err
 	}
 
+	caSerial, err := randomSerialNumber()
+	if err != nil {
+		return nil, err
+	}
 	caTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
+		SerialNumber:          caSerial,
 		Subject:               pkix.Name{CommonName: "dbaas-ca-" + commonName},
 		NotBefore:             time.Now().Add(-time.Minute), // clock-skew buffer
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
@@ -127,8 +131,12 @@ func issueServerCert(caCert *x509.Certificate, caKey *rsa.PrivateKey, commonName
 		return
 	}
 
+	serverSerial, err := randomSerialNumber()
+	if err != nil {
+		return
+	}
 	serverTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
+		SerialNumber: serverSerial,
 		Subject:      pkix.Name{CommonName: commonName},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
@@ -145,6 +153,15 @@ func issueServerCert(caCert *x509.Certificate, caKey *rsa.PrivateKey, commonName
 	certPEM = pemEncode("CERTIFICATE", serverCertDER)
 	keyPEM = pemEncodeKey(serverKey)
 	return
+}
+
+// randomSerialNumber returns a cryptographically random positive serial
+// number for an X.509 certificate. RFC 5280 requires a CA to assign each
+// certificate it issues a serial unique among that CA's issuances; a fixed
+// serial would collide across generateTLS's initial issueServerCert call
+// and any later RenewServerCert re-issuance from the same CA.
+func randomSerialNumber() (*big.Int, error) {
+	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 }
 
 func pemEncode(blockType string, data []byte) string {

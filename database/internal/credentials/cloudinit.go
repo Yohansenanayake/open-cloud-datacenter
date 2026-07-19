@@ -97,15 +97,27 @@ ethernets:
 	)
 }
 
+// shellSingleQuote makes s safe to substitute into a bash KEY=value
+// assignment in bootstrap.env, which bootstrap.sh consumes via `source`
+// (a script, not a plain key=value parser) — an unquoted value containing
+// shell metacharacters ($, `, ;, |, &, ...) would otherwise execute as root
+// on first boot. Embedded CR/LF are flattened first: a raw newline would
+// otherwise close the enclosing cloud-init YAML block scalar early and let
+// the remainder of the value be parsed as arbitrary YAML/shell content.
+func shellSingleQuote(s string) string {
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func buildUserData(p BootstrapParams, m *Material) string {
 	backupConfig := "# backups disabled"
 	if p.BackupEnabled && p.S3Config != nil {
 		backupConfig = fmt.Sprintf(
 			"S3_ENDPOINT=%s\n      S3_BUCKET=%s\n      S3_REGION=%s\n      S3_SECRET_REF=%s",
-			p.S3Config.Endpoint,
-			p.S3Config.Bucket,
-			p.S3Config.Region,
-			p.S3Config.SecretRef,
+			shellSingleQuote(p.S3Config.Endpoint),
+			shellSingleQuote(p.S3Config.Bucket),
+			shellSingleQuote(p.S3Config.Region),
+			shellSingleQuote(p.S3Config.SecretRef),
 		)
 	}
 
