@@ -123,7 +123,10 @@ func (r *Resolver) getOrCreateTenant(ctx context.Context, inst *dbaasv1.DBInstan
 	if adminUser == "" {
 		adminUser = defaultMasterUser
 	}
-	adminPassword = randomString(32)
+	adminPassword, err = randomString(32)
+	if err != nil {
+		return "", "", false, fmt.Errorf("generate admin password: %w", err)
+	}
 
 	newSec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -166,8 +169,14 @@ func (r *Resolver) getOrCreateInternal(ctx context.Context, inst *dbaasv1.DBInst
 		return "", "", false, getErr
 	}
 
-	replPw = randomString(32)
-	exporterPw = randomString(24)
+	replPw, err = randomString(32)
+	if err != nil {
+		return "", "", false, fmt.Errorf("generate replication password: %w", err)
+	}
+	exporterPw, err = randomString(24)
+	if err != nil {
+		return "", "", false, fmt.Errorf("generate exporter password: %w", err)
+	}
 
 	newSec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

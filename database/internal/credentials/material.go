@@ -148,9 +148,13 @@ func pemEncodeKey(key *rsa.PrivateKey) string {
 	return pemEncode("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key))
 }
 
+var randomRead = rand.Read
+
 // randomString returns a cryptographically random URL-safe string of length n.
-func randomString(n int) string {
+func randomString(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return base64.URLEncoding.EncodeToString(b)[:n]
+	if _, err := randomRead(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b)[:n], nil
 }

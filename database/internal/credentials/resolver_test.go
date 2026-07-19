@@ -18,6 +18,7 @@ package credentials
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -57,6 +58,18 @@ func newTestResolver(t *testing.T) *Resolver {
 	scheme := testScheme(t)
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).Build()
 	return &Resolver{Client: c, Scheme: scheme, OperatorNamespace: "dbaas-system"}
+}
+
+func TestTenantPasswordGenerationFailureIsReturned(t *testing.T) {
+	boom := errors.New("entropy unavailable")
+	originalRead := randomRead
+	randomRead = func([]byte) (int, error) { return 0, boom }
+	t.Cleanup(func() { randomRead = originalRead })
+
+	r := newTestResolver(t)
+	if _, _, _, err := r.getOrCreateTenant(context.Background(), testInst()); !errors.Is(err, boom) {
+		t.Fatalf("getOrCreateTenant error = %v, want entropy error", err)
+	}
 }
 
 func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
