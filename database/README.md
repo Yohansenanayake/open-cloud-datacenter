@@ -3,8 +3,8 @@
 A Kubernetes operator that provisions managed PostgreSQL databases as
 KubeVirt VMs on a Harvester HCI cluster. One `DBInstance` custom resource
 maps to one VM with persistent storage, SSL-only PostgreSQL, an admin
-credentials Secret plus a password-free connection Secret, and managed
-per-instance Prometheus monitoring.
+credentials Secret plus a password-free connection Secret, and provisioning
+of per-instance Prometheus monitoring resources.
 
 Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
 `kubectl apply` to `psql` round-trip in ~3 minutes.
@@ -29,11 +29,13 @@ Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
   forwarding the caller's bearer token to the K8s API server (the same
   authn/RBAC/audit path as `kubectl`).
 - **Network model**: each VM gets one **data-net** NIC bridged onto the Multus
-  `NetworkAttachmentDefinition` supplied via `spec.networkRef`. Its address is
-  published as `status.endpoint.address`; DHCP is the default, with
-  `spec.staticNetwork` available for VLANs without DHCP. Package installation,
-  tenant traffic, and Prometheus scraping all use this network, so it must
-  provide the required first-boot egress.
+  `NetworkAttachmentDefinition` supplied via `spec.networkRef`. The referenced
+  network must already exist before reconciliation; the controller does not
+  create the network. Its address is published as `status.endpoint.address`;
+  DHCP is the default, with `spec.staticNetwork` available for VLANs without
+  DHCP. Package installation, tenant traffic, and provisioned monitoring
+  resources all use this network, so it must provide the required first-boot
+  egress.
 - **Access control**: the scaffolded `dbinstance-admin/editor/viewer`
   ClusterRoles carry `rbac.authorization.k8s.io/aggregate-to-*` labels,
   so they fold into the built-in `admin`/`edit`/`view` roles. A user
