@@ -99,6 +99,62 @@ var _ = Describe("DBInstance immutable-field CEL rules", func() {
 		Expect(err.Error()).To(ContainSubstring("staticNetwork is immutable after creation"))
 	})
 
+	bareInstance := func() *dbaasv1alpha1.DBInstance {
+		inst := &dbaasv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: dbaasv1alpha1.DBInstanceSpec{
+				DBInstanceClass:  "db.t3.small",
+				AllocatedStorage: 20,
+				NetworkRef:       "default/vm-network",
+			},
+		}
+		Expect(k8sClient.Create(ctx, inst)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, inst)
+		})
+		return inst
+	}
+
+	// The CEL rules use plain "self == oldSelf": Kubernetes only evaluates a
+	// transition rule once the field already has a value on the old object,
+	// so filling in a still-unset optional immutable field is a permitted
+	// one-time transition — only a set→different-value edit is rejected
+	// (covered by the sibling "rejects changing ..." cases above).
+	It("allows setting engineVersion once, after creation, when initially unset", func() {
+		inst := bareInstance()
+		inst.Spec.EngineVersion = "16"
+		Expect(k8sClient.Update(ctx, inst)).To(Succeed())
+
+		var got dbaasv1alpha1.DBInstance
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got)).To(Succeed())
+		Expect(got.Spec.EngineVersion).To(Equal("16"))
+	})
+
+	It("allows setting vmPassword once, after creation, when initially unset", func() {
+		inst := bareInstance()
+		inst.Spec.VMPassword = "first-set"
+		Expect(k8sClient.Update(ctx, inst)).To(Succeed())
+
+		var got dbaasv1alpha1.DBInstance
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got)).To(Succeed())
+		Expect(got.Spec.VMPassword).To(Equal("first-set"))
+	})
+
+	It("allows setting staticNetwork once, after creation, when initially unset", func() {
+		inst := bareInstance()
+		inst.Spec.StaticNetwork = &dbaasv1alpha1.NetworkConfig{
+			Address:     "192.168.40.50/24",
+			Gateway:     "192.168.40.1",
+			Nameservers: []string{"1.1.1.1"},
+		}
+		Expect(k8sClient.Update(ctx, inst)).To(Succeed())
+
+		var got dbaasv1alpha1.DBInstance
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got)).To(Succeed())
+		Expect(got.Spec.StaticNetwork).NotTo(BeNil())
+		Expect(got.Spec.StaticNetwork.Address).To(Equal("192.168.40.50/24"))
+	})
+
 	It("allows a mutable field to change while the immutable fields stay the same", func() {
 		inst := createInstance()
 		inst.Spec.AllocatedStorage = 30
