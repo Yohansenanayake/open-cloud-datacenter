@@ -52,7 +52,7 @@ func BuildCloudInit(p BootstrapParams, m *Material) (userdata, networkdata strin
 }
 
 // BuildNetworkData returns the cloud-init network-config v2 YAML for the
-// VM's two NICs. KubeVirt's cloudInitNoCloud datasource reads it from
+// VM's single NIC. KubeVirt's cloudInitNoCloud datasource reads it from
 // the Secret key `networkdata` and applies it at the `init-local`
 // stage — before systemd-networkd starts — so each NIC has its IP,
 // gateway and DNS before any module tries to talk to the network.

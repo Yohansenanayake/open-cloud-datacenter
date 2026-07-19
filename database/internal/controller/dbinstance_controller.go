@@ -21,7 +21,6 @@ import (
 	goerrors "errors"
 	"fmt"
 	"strings"
-	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -239,7 +238,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 			dbaasv1.ReasonTeardownFailed, fmt.Sprintf("Teardown failed, will retry: %v", err))
 		r.finalizeStatus(inst)
 		_ = r.patchStatusIfChanged(ctx, original, inst)
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
+		return ctrl.Result{}, err
 	}
 
 	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
@@ -247,7 +246,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 			dbaasv1.ReasonOperatorSecretCleanupFailed, fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err))
 		r.finalizeStatus(inst)
 		_ = r.patchStatusIfChanged(ctx, original, inst)
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, r.removeDBInstanceFinalizer(ctx, client.ObjectKeyFromObject(inst))
