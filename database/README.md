@@ -3,8 +3,8 @@
 A Kubernetes operator that provisions managed PostgreSQL databases as
 KubeVirt VMs on a Harvester HCI cluster. One `DBInstance` custom resource
 maps to one VM with persistent storage, SSL-only PostgreSQL, an admin
-credentials Secret plus a password-free connection Secret, and optional
-Prometheus monitoring.
+credentials Secret plus a password-free connection Secret, and managed
+per-instance Prometheus monitoring.
 
 Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
 `kubectl apply` to `psql` round-trip in ~3 minutes.
@@ -24,21 +24,16 @@ Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
   `status.resources` references. PostgreSQL readiness is checked with
   `pg_isready` against its TCP listener inside the guest via a KubeVirt exec
   readiness probe — no helper Pod.
-- **REST gateway**: a thin HTTP layer over the CRD exposing the same six
-  operations as `kubectl`; mutations are authenticated by forwarding the
-  caller's bearer token to the K8s API server (same authn/RBAC/audit path
-  as `kubectl`).
-- **Network model**: each VM gets **two** NICs:
-  - **data-net** — bridged onto a Multus `NetworkAttachmentDefinition`
-    supplied via `spec.networkRef`. This is the tenant-facing address,
-    published as `status.endpoint.address`. It uses the VLAN's
-    DHCP/IPAM by default, or `spec.staticNetwork` for VLANs without one.
-  - **mgmt-net** — on the cluster's default pod network (KubeVirt
-    `masquerade`, PostgreSQL port exposed). The controller dials the
-    launcher pod's IP here to verify readiness, and the VM gets cluster
-    egress through it at first boot (so `apt install` doesn't depend on
-    the data VLAN's upstream). Only `data-net` is ever published as the
-    endpoint; the pod IP stays internal to the control plane.
+- **REST gateway**: a thin HTTP layer over the CRD exposing list, create, get,
+  modify, delete, start, and stop operations. Mutations are authenticated by
+  forwarding the caller's bearer token to the K8s API server (the same
+  authn/RBAC/audit path as `kubectl`).
+- **Network model**: each VM gets one **data-net** NIC bridged onto the Multus
+  `NetworkAttachmentDefinition` supplied via `spec.networkRef`. Its address is
+  published as `status.endpoint.address`; DHCP is the default, with
+  `spec.staticNetwork` available for VLANs without DHCP. Package installation,
+  tenant traffic, and Prometheus scraping all use this network, so it must
+  provide the required first-boot egress.
 - **Access control**: the scaffolded `dbinstance-admin/editor/viewer`
   ClusterRoles carry `rbac.authorization.k8s.io/aggregate-to-*` labels,
   so they fold into the built-in `admin`/`edit`/`view` roles. A user
@@ -46,7 +41,8 @@ Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
   can manage `DBInstance`s in their namespace with no per-tenant wiring.
   Authorization is pure Kubernetes RBAC — there is no separate DBaaS
   login.
-- **Per-instance TLS**: ephemeral CA + server cert generated for each VM.
+- **Per-instance TLS**: a CA and server certificate are generated once for each
+  `DBInstance`.
   The CA's private key and the server key live in a controller-private
   Secret in the operator namespace (default `dbaas-system`); the public
   `ca.crt` is pinned via the tenant-facing connection Secret
@@ -61,8 +57,8 @@ Tested on **Harvester 1.7.1** (RKE2 v1.34.3) — full end-to-end from
 
 ## What's NOT in this version
 
-The CRD schema is broader than the implementation. The following spec
-fields are reserved for forward compatibility but **the reconciler does
+The CRD schema is broader than the implementation. The following fields and
+capabilities are reserved for forward compatibility but **the reconciler does
 not act on them today**:
 
 | Field | Status |
@@ -73,11 +69,10 @@ not act on them today**:
 | `multiAZ` | No Patroni / HA standby is created. |
 | `dbParameterGroupRef` | No `DBParameterGroup` CRD exists in this module. |
 | `tags` | Not propagated to child resource labels / annotations / dashboards. |
-| `status.conditions`, `status.readReplicas` | Defined for forward compatibility; not written by the reconciler. |
-| Per-instance `postgres_exporter` | Service + ServiceMonitor are created, but no exporter is installed inside the VM yet, so the scrape target won't return metrics. |
+| `status.readReplicas` | Not populated because read replicas and `multiAZ` are not implemented. |
 
-Each is called out in the field's godoc (`kubectl explain dbi.spec.<field>`).
-They will be implemented incrementally; the
+The spec limitations are called out in each field's godoc
+(`kubectl explain dbi.spec.<field>`). They will be implemented incrementally; the
 schema shape is deliberately stable so users can write manifests today
 that work later.
 
@@ -89,13 +84,13 @@ make docker-buildx IMG=<registry>/<name>:<tag>
 KUBECONFIG=<your-harvester-kubeconfig> make install
 KUBECONFIG=<your-harvester-kubeconfig> make deploy IMG=<registry>/<name>:<tag>
 
-# Then apply a DBInstance — full YAML and walkthrough in USAGE.md
+# Then apply a DBInstance; start from config/samples/dbaas_v1alpha1_dbinstance.yaml
 kubectl get dbi -A -w
 ```
 
 Expected time from `apply` to `phase=available`: about **3 minutes** on
-stock Ubuntu cloud images, ~60 s if you pre-bake PostgreSQL into a
-custom image (see `DEPLOYMENT.md`).
+the tested stock Ubuntu cloud image; actual time depends on image provisioning
+and first-boot package-download speed.
 
 ## Build / test / develop
 
