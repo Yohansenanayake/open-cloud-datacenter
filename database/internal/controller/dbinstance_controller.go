@@ -223,7 +223,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 			dbaasv1.ReasonDeletionProtected, "Cannot delete: DeletionProtection is enabled")
 		r.finalizeStatus(inst)
 		_ = r.patchStatusIfChanged(ctx, original, inst)
-		return ctrl.Result{}, fmt.Errorf("deletion protection enabled")
+		return ctrl.Result{}, nil
 	}
 
 	setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,

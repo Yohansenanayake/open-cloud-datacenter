@@ -130,8 +130,8 @@ func TestReconcileDeleteProtectionPublishesBlockedSummary(t *testing.T) {
 	inst.Spec.DeletionProtection = true
 	r := newProvisionReconciler(t, &stubHarvester{}, inst)
 
-	if _, err := r.reconcileDelete(ctx, inst); err == nil {
-		t.Fatal("reconcileDelete should report deletion protection")
+	if _, err := r.reconcileDelete(ctx, inst); err != nil {
+		t.Fatalf("reconcileDelete returned error for stable protected state: %v", err)
 	}
 
 	got := &dbaasv1.DBInstance{}
