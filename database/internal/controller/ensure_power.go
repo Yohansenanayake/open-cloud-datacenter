@@ -83,6 +83,21 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		readiness = harvester.VMIReadiness{}
 	}
 
+	// Normally the persisted CrashLoopHalted condition returns above. This annotation
+	// recovers that status if the VM halt succeeded but its status write did not;
+	// its VMI UID also prevents health from mistaking teardown for recovery.
+	if haltedVMIUID := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; haltedVMIUID != "" {
+		msg := "VM halted after repeated unplanned restarts; manual intervention required"
+		inst.Status.LastKnownVMIUID = haltedVMIUID
+		setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+			dbaasv1.ReasonCrashLoopDetected, msg)
+		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse,
+			dbaasv1.ReasonCrashLoopHalted, "power management suspended during crash-loop halt")
+		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+			dbaasv1.ReasonCrashLoopDetected, msg)
+		return satisfied()
+	}
+
 	if desiredRunning {
 		switch {
 		// Declared layer wrong, but the previous VMI is still tearing down: the

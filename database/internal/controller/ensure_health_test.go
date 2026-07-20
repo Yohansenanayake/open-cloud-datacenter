@@ -134,10 +134,11 @@ func TestEnsureDatabaseHealthSatisfiedWhenReady(t *testing.T) {
 
 func TestCrashLoopRecoveryWaitsForDataNetIP(t *testing.T) {
 	stub := &stubHarvester{readiness: harvester.VMIReadiness{
-		Running: true, Ready: true, AgentConnected: true,
+		Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-recovered",
 	}}
 	r := &DBInstanceReconciler{Harvester: stub}
 	inst := newHealthInst()
+	inst.Status.LastKnownVMIUID = "vmi-halted"
 	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
 		dbaasv1.ReasonCrashLoopDetected, "seeded")
 
@@ -148,6 +149,53 @@ func TestCrashLoopRecoveryWaitsForDataNetIP(t *testing.T) {
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		t.Fatal("CrashLoopHalted must remain set until the data-net IP is observed")
+	}
+}
+
+func TestCrashLoopDoesNotRecoverFromHaltedVMIStillTearingDown(t *testing.T) {
+	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+		Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.4", VMIUID: "vmi-halted",
+	}}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+	inst.Status.LastKnownVMIUID = "vmi-halted"
+	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+		dbaasv1.ReasonCrashLoopDetected, "seeded")
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomePending || res.Result.RequeueAfter != crashLoopParkRequeue {
+		t.Fatalf("res = %+v, want parked Pending", res)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
+		t.Fatal("CrashLoopHalted was cleared by the VMI being halted")
+	}
+	if stub.ClearCrashLoopHaltCalls != 0 {
+		t.Fatalf("ClearCrashLoopHalt calls = %d, want 0", stub.ClearCrashLoopHaltCalls)
+	}
+}
+
+func TestCrashLoopRecoveryKeepsConditionWhenMarkerClearFails(t *testing.T) {
+	clearErr := errors.New("VM update failed")
+	stub := &stubHarvester{
+		readiness: harvester.VMIReadiness{
+			Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-recovered",
+		},
+		clearCrashLoopHaltErr: clearErr,
+	}
+	r := &DBInstanceReconciler{Harvester: stub}
+	inst := newHealthInst()
+	inst.Status.LastKnownVMIUID = "vmi-halted"
+	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+		dbaasv1.ReasonCrashLoopDetected, "seeded")
+
+	res := r.ensureDatabaseHealth(context.Background(), inst)
+
+	if res.Outcome != OutcomeTransient || !errors.Is(res.Err, clearErr) {
+		t.Fatalf("res = %+v, want Transient carrying clear error", res)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
+		t.Fatal("CrashLoopHalted must remain True when marker clearing fails")
 	}
 }
 

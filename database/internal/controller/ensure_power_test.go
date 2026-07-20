@@ -24,7 +24,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/record"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
@@ -221,6 +223,79 @@ func TestEnsurePowerStateHonoursCrashLoopHalt(t *testing.T) {
 	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "CrashLoopHalted" {
 		t.Fatalf("PowerStateReady = %+v, want False/CrashLoopHalted", cond)
+	}
+}
+
+func TestEnsurePowerStateRestoresCrashLoopHaltFromVMMarker(t *testing.T) {
+	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
+	var vm kubevirtv1.VirtualMachine
+	key := client.ObjectKey{Namespace: inst.Namespace, Name: "pg-orders"}
+	if err := r.Get(context.Background(), key, &vm); err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID] = "vmi-halted"
+	if err := r.Update(context.Background(), &vm); err != nil {
+		t.Fatalf("mark VM crash-loop halted: %v", err)
+	}
+
+	res := r.ensurePowerState(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied", res)
+	}
+	if stub.StartVMCalls != 0 {
+		t.Fatalf("StartVMCalls = %d, want 0", stub.StartVMCalls)
+	}
+	if inst.Status.LastKnownVMIUID != "vmi-halted" {
+		t.Fatalf("LastKnownVMIUID = %q, want vmi-halted", inst.Status.LastKnownVMIUID)
+	}
+	halted := inst.Status.GetCondition(dbaasv1.ConditionCrashLoopHalted)
+	if halted == nil || halted.Status != metav1.ConditionTrue || halted.Reason != string(dbaasv1.ReasonCrashLoopDetected) {
+		t.Fatalf("CrashLoopHalted = %+v, want True/CrashLoopDetected", halted)
+	}
+	power := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
+	if power == nil || power.Status != metav1.ConditionFalse || power.Reason != string(dbaasv1.ReasonCrashLoopHalted) {
+		t.Fatalf("PowerStateReady = %+v, want False/CrashLoopHalted", power)
+	}
+	database := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
+	if database == nil || database.Status != metav1.ConditionFalse || database.Reason != string(dbaasv1.ReasonCrashLoopDetected) {
+		t.Fatalf("DatabaseReady = %+v, want False/CrashLoopDetected", database)
+	}
+}
+
+func TestEnsurePowerStateRestoresMarkerForRunningRecoveryVM(t *testing.T) {
+	readiness := harvester.VMIReadiness{
+		Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-recovered",
+	}
+	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyAlways, readiness)
+	var vm kubevirtv1.VirtualMachine
+	key := client.ObjectKey{Namespace: inst.Namespace, Name: "pg-orders"}
+	if err := r.Get(context.Background(), key, &vm); err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID] = "vmi-halted"
+	if err := r.Update(context.Background(), &vm); err != nil {
+		t.Fatalf("mark VM crash-loop halted: %v", err)
+	}
+
+	if res := r.ensurePowerState(context.Background(), inst); res.Outcome != OutcomeSatisfied {
+		t.Fatalf("power result = %+v, want Satisfied", res)
+	}
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
+		t.Fatal("CrashLoopHalted was not restored from the VM marker")
+	}
+	r.Recorder = record.NewFakeRecorder(10)
+	if res := r.ensureDatabaseHealth(context.Background(), inst); res.Outcome != OutcomeSatisfied {
+		t.Fatalf("health result = %+v, want Satisfied recovery", res)
+	}
+	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
+		t.Fatal("CrashLoopHalted still set after the different VMI recovered")
+	}
+	if stub.ClearCrashLoopHaltCalls != 1 {
+		t.Fatalf("ClearCrashLoopHalt calls = %d, want 1", stub.ClearCrashLoopHaltCalls)
+	}
+	if stub.StartVMCalls != 0 {
+		t.Fatalf("StartVMCalls = %d, want 0 during out-of-band recovery", stub.StartVMCalls)
 	}
 }
 

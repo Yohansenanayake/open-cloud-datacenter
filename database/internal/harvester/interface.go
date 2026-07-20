@@ -38,6 +38,8 @@ type ClientInterface interface {
 	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error)
 	GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error)
 	StopVM(ctx context.Context, ns, vmName string) error
+	StopVMForCrashLoop(ctx context.Context, ns, vmName, haltedVMIUID string) error
+	ClearCrashLoopHalt(ctx context.Context, ns, vmName string) error
 	StartVM(ctx context.Context, ns, vmName string) error
 	ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error
 

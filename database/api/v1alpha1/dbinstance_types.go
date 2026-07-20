@@ -460,6 +460,12 @@ const (
 	// recorded ref in status.resources.
 	LabelDBInstanceUID = "dbaas.opencloud.wso2.com/dbinstance-uid"
 
+	// AnnotationCrashLoopHaltedVMIUID is stored on a VM when the controller
+	// halts it after repeated unplanned restarts. The value is the UID of the
+	// VMI being halted, allowing reconciliation to distinguish that VMI tearing
+	// down from a later out-of-band recovery VMI.
+	AnnotationCrashLoopHaltedVMIUID = "dbaas.opencloud.wso2.com/crash-loop-halted-vmi-uid"
+
 	// FinalizerName triggers controller-side teardown of Harvester resources.
 	FinalizerName = "dbaas.opencloud.wso2.com/cleanup"
 )

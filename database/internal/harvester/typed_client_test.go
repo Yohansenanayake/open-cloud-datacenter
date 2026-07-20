@@ -367,8 +367,11 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	ctx := context.Background()
 	runStrategy := kubevirtv1.RunStrategyRerunOnFailure
 	client := newTestTypedClient(&kubevirtv1.VirtualMachine{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"},
-		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders", Namespace: "tenant-a"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pg-orders", Namespace: "tenant-a",
+			Annotations: map[string]string{"existing": "preserved"},
+		},
 		Spec: kubevirtv1.VirtualMachineSpec{
 			RunStrategy: &runStrategy,
 			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
@@ -392,6 +395,45 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	}
 	if vm.Spec.Running != nil {
 		t.Fatalf("Running after StopVM = %v, want nil", vm.Spec.Running)
+	}
+	if _, ok := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; ok {
+		t.Fatal("plain StopVM must not add the crash-loop marker")
+	}
+
+	// Crash-loop stop records the halted VMI UID in the same VM update.
+	if err := client.StopVMForCrashLoop(ctx, "tenant-a", "pg-orders", "vmi-halted"); err != nil {
+		t.Fatalf("StopVMForCrashLoop returned error: %v", err)
+	}
+	vm, _ = client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
+	if vm.Spec.RunStrategy == nil || *vm.Spec.RunStrategy != kubevirtv1.RunStrategyHalted {
+		t.Fatalf("RunStrategy after StopVMForCrashLoop = %v, want Halted", vm.Spec.RunStrategy)
+	}
+	if got := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; got != "vmi-halted" {
+		t.Fatalf("crash-loop halted VMI UID = %q, want vmi-halted", got)
+	}
+	if vm.Annotations["existing"] != "preserved" {
+		t.Fatal("StopVMForCrashLoop removed an unrelated annotation")
+	}
+
+	// Clearing the marker preserves power state and unrelated annotations.
+	if err := client.ClearCrashLoopHalt(ctx, "tenant-a", "pg-orders"); err != nil {
+		t.Fatalf("ClearCrashLoopHalt returned error: %v", err)
+	}
+	vm, _ = client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
+	if _, ok := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; ok {
+		t.Fatal("ClearCrashLoopHalt did not remove the marker")
+	}
+	if vm.Annotations["existing"] != "preserved" {
+		t.Fatal("ClearCrashLoopHalt removed an unrelated annotation")
+	}
+	if vm.Spec.RunStrategy == nil || *vm.Spec.RunStrategy != kubevirtv1.RunStrategyHalted {
+		t.Fatalf("RunStrategy after ClearCrashLoopHalt = %v, want unchanged Halted", vm.Spec.RunStrategy)
+	}
+	if err := client.ClearCrashLoopHalt(ctx, "tenant-a", "pg-orders"); err != nil {
+		t.Fatalf("second ClearCrashLoopHalt should be a no-op: %v", err)
+	}
+	if err := client.StopVMForCrashLoop(ctx, "tenant-a", "pg-orders", ""); err == nil {
+		t.Fatal("StopVMForCrashLoop accepted an empty halted VMI UID")
 	}
 
 	// StartVM: calls the KubeVirt start subresource API (does not mutate spec)

@@ -29,19 +29,24 @@ import (
 // methods derive the same deterministic names as the typed client ("pg-<id>",
 // "pg-<id>-credentials", ...) so step tests can assert recorded refs.
 type stubHarvester struct {
-	readiness    harvester.VMIReadiness
-	readinessErr error
-	stopVMErr    error
-	startVMErr   error
-	createVMErr  error
-	teardownErr  error
+	readiness             harvester.VMIReadiness
+	readinessErr          error
+	stopVMErr             error
+	stopVMForCrashLoopErr error
+	clearCrashLoopHaltErr error
+	startVMErr            error
+	createVMErr           error
+	teardownErr           error
 
-	StopVMCalls   int
-	StartVMCalls  int
-	CreateVMCalls int
-	ResizeVMCalls int
-	ResizeDVCalls int
-	TeardownCalls int
+	StopVMCalls             int
+	StopVMForCrashLoopCalls int
+	ClearCrashLoopHaltCalls int
+	StartVMCalls            int
+	CreateVMCalls           int
+	ResizeVMCalls           int
+	ResizeDVCalls           int
+	TeardownCalls           int
+	LastHaltedVMIUID        string
 
 	// LastVMCreateParams captures the most recent CreatePostgresVM input so
 	// tests can assert what the controller asked for (e.g. the owner ref).
@@ -65,6 +70,15 @@ func (s *stubHarvester) CreatePostgresVM(_ context.Context, p harvester.VMCreate
 func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error {
 	s.StopVMCalls++
 	return s.stopVMErr
+}
+func (s *stubHarvester) StopVMForCrashLoop(_ context.Context, _, _, haltedVMIUID string) error {
+	s.StopVMForCrashLoopCalls++
+	s.LastHaltedVMIUID = haltedVMIUID
+	return s.stopVMForCrashLoopErr
+}
+func (s *stubHarvester) ClearCrashLoopHalt(_ context.Context, _, _ string) error {
+	s.ClearCrashLoopHaltCalls++
+	return s.clearCrashLoopHaltErr
 }
 func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error {
 	s.StartVMCalls++

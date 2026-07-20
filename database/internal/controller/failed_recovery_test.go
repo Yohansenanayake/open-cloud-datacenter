@@ -70,8 +70,14 @@ func TestCrashLoopHaltsAtThreshold(t *testing.T) {
 		}
 	}
 
-	if stub.StopVMCalls != 1 {
-		t.Fatalf("StopVM called %d times, want 1 (halt exactly once, at detection)", stub.StopVMCalls)
+	if stub.StopVMForCrashLoopCalls != 1 {
+		t.Fatalf("StopVMForCrashLoop called %d times, want 1 (halt exactly once, at detection)", stub.StopVMForCrashLoopCalls)
+	}
+	if stub.StopVMCalls != 0 {
+		t.Fatalf("plain StopVM called %d times, want 0", stub.StopVMCalls)
+	}
+	if stub.LastHaltedVMIUID != "vmi-uid-crash-3" {
+		t.Fatalf("halted VMI UID = %q, want vmi-uid-crash-3", stub.LastHaltedVMIUID)
 	}
 	if stub.StartVMCalls != 0 {
 		t.Fatalf("StartVM called %d times, want 0", stub.StartVMCalls)
@@ -220,5 +226,8 @@ func TestCrashLoopRecoversWhenHealthyOutOfBand(t *testing.T) {
 	}
 	if stub.StopVMCalls != 0 || stub.StartVMCalls != 0 {
 		t.Fatalf("controller VM calls during out-of-band recovery (stop=%d start=%d), want none", stub.StopVMCalls, stub.StartVMCalls)
+	}
+	if stub.ClearCrashLoopHaltCalls != 1 {
+		t.Fatalf("ClearCrashLoopHalt calls = %d, want 1", stub.ClearCrashLoopHaltCalls)
 	}
 }

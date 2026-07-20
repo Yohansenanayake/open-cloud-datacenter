@@ -191,14 +191,54 @@ func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (V
 // To align behavior with kubevirt v1.1.1, we set runStrategy to Halted when stopping a VM.
 // see harvester/pkg/api/vm/handler.go 142 for harvester version 1.7.1
 func (c *TypedClient) StopVM(ctx context.Context, ns, vmName string) error {
+	return c.updateVM(ctx, ns, vmName, func(vm *kubevirtv1.VirtualMachine) bool {
+		runStrategy := kubevirtv1.RunStrategyHalted
+		vm.Spec.RunStrategy = &runStrategy
+		vm.Spec.Running = nil
+		return true
+	})
+}
+
+// StopVMForCrashLoop atomically halts the VM and records which VMI triggered
+// the safety halt. The marker survives a controller crash before DBInstance
+// status is persisted.
+func (c *TypedClient) StopVMForCrashLoop(ctx context.Context, ns, vmName, haltedVMIUID string) error {
+	if haltedVMIUID == "" {
+		return fmt.Errorf("halted VMI UID must not be empty")
+	}
+	return c.updateVM(ctx, ns, vmName, func(vm *kubevirtv1.VirtualMachine) bool {
+		runStrategy := kubevirtv1.RunStrategyHalted
+		vm.Spec.RunStrategy = &runStrategy
+		vm.Spec.Running = nil
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID] = haltedVMIUID
+		return true
+	})
+}
+
+// ClearCrashLoopHalt removes only the durable crash-loop marker. Recovery has
+// already been initiated out-of-band, so this does not change VM power state.
+func (c *TypedClient) ClearCrashLoopHalt(ctx context.Context, ns, vmName string) error {
+	return c.updateVM(ctx, ns, vmName, func(vm *kubevirtv1.VirtualMachine) bool {
+		if _, ok := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; !ok {
+			return false
+		}
+		delete(vm.Annotations, dbaasv1.AnnotationCrashLoopHaltedVMIUID)
+		return true
+	})
+}
+
+func (c *TypedClient) updateVM(ctx context.Context, ns, vmName string, mutate func(*kubevirtv1.VirtualMachine) bool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		runStrategy := kubevirtv1.RunStrategyHalted
-		vm.Spec.RunStrategy = &runStrategy
-		vm.Spec.Running = nil
+		if !mutate(vm) {
+			return nil
+		}
 		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 		return err
 	})

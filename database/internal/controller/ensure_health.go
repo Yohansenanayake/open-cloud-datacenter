@@ -91,7 +91,14 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	// healthy instead of being counted as another crash-loop restart and halted
 	// immediately.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
-		if readiness.Running && readiness.Ready && readiness.AgentConnected && readiness.IP != "" {
+		// StopVM teardown is asynchronous, so the VMI that triggered the halt can
+		// remain fully healthy briefly. Only a different VMI UID proves that an
+		// operator started a new recovery VM out-of-band.
+		recoveryVMI := readiness.VMIUID != "" && readiness.VMIUID != inst.Status.LastKnownVMIUID
+		if recoveryVMI && readiness.Running && readiness.Ready && readiness.AgentConnected && readiness.IP != "" {
+			if err := r.Harvester.ClearCrashLoopHalt(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
+				return transient(err)
+			}
 			r.Recorder.Eventf(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonRecovered),
 				"VM healthy again after crash-loop halt; resuming reconciliation")
 			removeCondition(inst, dbaasv1.ConditionCrashLoopHalted)
@@ -105,7 +112,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// this same pass instead of wasting a reconcile on a "Recovering"
 			// state no observer could ever reliably catch. The Recorder event
 			// above is the durable record that a recovery happened.
-		} else if readiness.Running && readiness.Ready && readiness.AgentConnected {
+		} else if recoveryVMI && readiness.Running && readiness.Ready && readiness.AgentConnected {
 			msg := "recovery VM healthy; waiting for data-net IP"
 			return pendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
 		} else {
@@ -209,8 +216,8 @@ func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.
 
 	// Threshold reached: halt now, then park under CrashLoopHalted. If the halt
 	// fails nothing is recorded — the whole detection re-runs next pass.
-	if err := r.Harvester.StopVM(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
-		log.FromContext(ctx).Error(err, "StopVM failed during crash-loop halt (will retry)")
+	if err := r.Harvester.StopVMForCrashLoop(ctx, inst.Namespace, inst.Status.Resources.VMName, readiness.VMIUID); err != nil {
+		log.FromContext(ctx).Error(err, "StopVMForCrashLoop failed during crash-loop halt (will retry)")
 		return transient(err), true
 	}
 	msg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
