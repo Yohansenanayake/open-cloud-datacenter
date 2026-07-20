@@ -18,6 +18,7 @@ package credentials
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -77,7 +78,7 @@ ethernets:
 	ns := p.StaticNetwork
 	search := ""
 	if len(ns.SearchDomains) > 0 {
-		search = fmt.Sprintf("\n      search: [%s]", strings.Join(ns.SearchDomains, ", "))
+		search = fmt.Sprintf("\n      search: [%s]", yamlFlowJoin(ns.SearchDomains))
 	}
 	return fmt.Sprintf(`version: 2
 ethernets:
@@ -92,9 +93,31 @@ ethernets:
 `,
 		ns.Address,
 		ns.Gateway,
-		strings.Join(ns.Nameservers, ", "),
+		yamlFlowJoin(ns.Nameservers),
 		search,
 	)
+}
+
+// yamlFlowScalar renders s as a double-quoted YAML scalar, safe to place
+// as a flow-sequence item ([a, b, c]) or as a mapping value (key: %s) no
+// matter what delimiters, colons, or newlines it contains. Several fields
+// reaching this file (Nameservers/SearchDomains items, VMPassword) have no
+// CRD pattern constraint, so this is what stops a crafted value from
+// altering the cloud-init document's structure. JSON string encoding is
+// reused here because every JSON string is already a valid YAML
+// double-quoted scalar.
+func yamlFlowScalar(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// yamlFlowJoin quotes each item and joins them for a YAML flow sequence.
+func yamlFlowJoin(items []string) string {
+	quoted := make([]string, len(items))
+	for i, it := range items {
+		quoted[i] = yamlFlowScalar(it)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // shellSingleQuote makes s safe to substitute into a bash KEY=value
@@ -127,7 +150,7 @@ func buildUserData(p BootstrapParams, m *Material) string {
 chpasswd:
   expire: false
 ssh_pwauth: true
-`, p.VMPassword)
+`, yamlFlowScalar(p.VMPassword))
 	}
 
 	caCertB64 := base64.StdEncoding.EncodeToString([]byte(m.TLS.CACertPEM))

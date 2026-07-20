@@ -238,10 +238,12 @@ type NetworkConfig struct {
 	// least one — cloud-init will fail to resolve apt mirrors without DNS.
 	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Pattern=`^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$`
 	Nameservers []string `json:"nameservers"`
 
 	// SearchDomains are DNS search-domain suffixes. Optional.
 	// +optional
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 	SearchDomains []string `json:"searchDomains,omitempty"`
 }
 

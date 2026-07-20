@@ -90,7 +90,7 @@ func TestBuildCloudInitVMPasswordBlock(t *testing.T) {
 		p.VMPassword = "console-pw"
 		return p
 	}(), testMaterial())
-	if !strings.Contains(withPw, "password: console-pw") || !strings.Contains(withPw, "ssh_pwauth: true") {
+	if !strings.Contains(withPw, `password: "console-pw"`) || !strings.Contains(withPw, "ssh_pwauth: true") {
 		t.Error("userdata missing VM password block when VMPassword is set")
 	}
 
@@ -162,8 +162,8 @@ func TestBuildCloudInitNetworkDataStatic(t *testing.T) {
 		"dhcp4: false",
 		"addresses: [192.168.40.50/24]",
 		"via: 192.168.40.1",
-		"addresses: [8.8.8.8, 8.8.4.4]",
-		"search: [example.com]",
+		`addresses: ["8.8.8.8", "8.8.4.4"]`,
+		`search: ["example.com"]`,
 	} {
 		if !strings.Contains(networkdata, want) {
 			t.Errorf("networkdata missing %q, got: %s", want, networkdata)

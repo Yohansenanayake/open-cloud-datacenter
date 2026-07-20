@@ -46,9 +46,9 @@ func mapVMIToInstance(_ context.Context, obj client.Object) []reconcile.Request 
 }
 
 // vmiHealthChangedPredicate limits VMI-driven reconciles to changes that affect
-// liveness/readiness: an unplanned restart (UID change), a phase change, or a flip
-// of the Ready / AgentConnected conditions. Without it, every VMI status heartbeat
-// would enqueue a (no-op) reconcile.
+// liveness/readiness: an unplanned restart (UID change), a phase change, a flip
+// of the Ready / AgentConnected conditions, or an interface address change.
+// Without it, every VMI status heartbeat would enqueue a (no-op) reconcile.
 var vmiHealthChangedPredicate = predicate.Funcs{
 	CreateFunc: func(event.CreateEvent) bool { return true },
 	DeleteFunc: func(event.DeleteEvent) bool { return true },
@@ -61,9 +61,40 @@ var vmiHealthChangedPredicate = predicate.Funcs{
 		if oldVMI.UID != newVMI.UID || oldVMI.Status.Phase != newVMI.Status.Phase {
 			return true
 		}
+		// An IP change (DHCP renewal, live migration to a new node) with no
+		// other status change would otherwise go unnoticed, leaving
+		// status.Endpoint and the connection secret/ServiceMonitor stale.
+		if !vmiInterfaceIPsEqual(oldVMI, newVMI) {
+			return true
+		}
 		return vmiConditionTrue(oldVMI, kubevirtv1.VirtualMachineInstanceReady) != vmiConditionTrue(newVMI, kubevirtv1.VirtualMachineInstanceReady) ||
 			vmiConditionTrue(oldVMI, kubevirtv1.VirtualMachineInstanceAgentConnected) != vmiConditionTrue(newVMI, kubevirtv1.VirtualMachineInstanceAgentConnected)
 	},
+}
+
+// vmiInterfaceIPsEqual reports whether every network interface reports the
+// same IP address in both VMIs (by interface name, order-independent).
+func vmiInterfaceIPsEqual(oldVMI, newVMI *kubevirtv1.VirtualMachineInstance) bool {
+	oldIPs := vmiInterfaceIPs(oldVMI)
+	newIPs := vmiInterfaceIPs(newVMI)
+	if len(oldIPs) != len(newIPs) {
+		return false
+	}
+	for name, ip := range oldIPs {
+		if newIPs[name] != ip {
+			return false
+		}
+	}
+	return true
+}
+
+// vmiInterfaceIPs maps each network interface name to its reported IP.
+func vmiInterfaceIPs(vmi *kubevirtv1.VirtualMachineInstance) map[string]string {
+	ips := make(map[string]string, len(vmi.Status.Interfaces))
+	for _, iface := range vmi.Status.Interfaces {
+		ips[iface.Name] = iface.IP
+	}
+	return ips
 }
 
 // vmiConditionTrue reports whether the named VMI condition is currently True.
