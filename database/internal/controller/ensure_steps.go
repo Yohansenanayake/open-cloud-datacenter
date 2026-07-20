@@ -105,20 +105,11 @@ func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1
 		case OutcomeSatisfied:
 			continue
 		case OutcomePending, OutcomeTerminal, OutcomeTransient:
-			logger.V(1).Info("Ensure step stopped",
-				"step", step.name,
-				"outcome", res.Outcome,
-				"reason", res.Reason,
-				"message", res.Message,
-				"requeueAfter", res.Result.RequeueAfter,
-				"error", res.Err)
+			logger.V(1).Info("Ensure step stopped","step", step.name,"outcome", res.Outcome,"reason", res.Reason,"message", res.Message,"requeueAfter", res.Result.RequeueAfter,"error", res.Err)
 			return res
 		default:
 			res = transient(fmt.Errorf("step %q returned unknown outcome %q", step.name, res.Outcome))
-			logger.V(1).Info("Ensure step stopped",
-				"step", step.name,
-				"outcome", res.Outcome,
-				"error", res.Err)
+			logger.V(1).Info("Ensure step stopped","step", step.name,"outcome", res.Outcome,"error", res.Err)
 			return res
 		}
 	}
