@@ -28,7 +28,9 @@ import (
 // ensureConnectionSecret publishes the endpoint-dependent tenant connection
 // contract after database health has established a reachable address. It is a
 // guaranteed bounded step: a create/update stops this pass and API failures
-// retry through controller-runtime backoff.
+// retry through controller-runtime backoff. The durable user-facing state is
+// status.resources.connectionSecretName and the Secret itself; the one-pass
+// create/update transition deliberately does not add another readiness condition.
 func (r *DBInstanceReconciler) ensureConnectionSecret(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	if inst.Status.Endpoint == nil || inst.Status.Endpoint.Address == "" {
 		msg := "waiting for database endpoint before connection secret setup"

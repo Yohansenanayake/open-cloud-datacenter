@@ -56,9 +56,10 @@ type StepResult struct {
 	// Err is set only for OutcomeTransient; the runner returns it for backoff.
 	Err error
 
-	// Reason and Message describe the outcome for status conditions / events. Reason
-	// carries the "creating" vs "waiting" nuance that a single OutcomePending no
-	// longer encodes in the enum.
+	// Reason and Message describe the outcome in structured runner logs. Each
+	// ensure step remains responsible for its own user-facing condition because
+	// condition types differ by step. Reason carries the "creating" vs "waiting"
+	// nuance that a single OutcomePending does not encode.
 	Reason  dbaasv1.ConditionReason
 	Message string
 }

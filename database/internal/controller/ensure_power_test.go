@@ -69,11 +69,15 @@ func TestEnsurePowerStateStartsHaltedVM(t *testing.T) {
 
 	res := r.ensurePowerState(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "Starting" {
-		t.Fatalf("res = %+v, want Pending/Starting", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if stub.StartVMCalls != 1 {
 		t.Fatalf("StartVMCalls = %d, want 1", stub.StartVMCalls)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonStarting) {
+		t.Fatalf("PowerStateReady = %+v, want False/Starting", cond)
 	}
 	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusStarting {
@@ -91,14 +95,18 @@ func TestEnsurePowerStateStartWaitsForTeardown(t *testing.T) {
 
 	res := r.ensurePowerState(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "StartWaitingForTeardown" {
-		t.Fatalf("res = %+v, want Pending/StartWaitingForTeardown", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if res.Result.RequeueAfter != powerRequeue {
 		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, powerRequeue)
 	}
 	if stub.StartVMCalls != 0 {
 		t.Fatalf("StartVMCalls = %d, want 0 while VMI still running", stub.StartVMCalls)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonStartWaitingForTeardown) {
+		t.Fatalf("PowerStateReady = %+v, want False/StartWaitingForTeardown", cond)
 	}
 }
 
@@ -109,14 +117,18 @@ func TestEnsurePowerStateWaitsForBoot(t *testing.T) {
 
 	res := r.ensurePowerState(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "Starting" {
-		t.Fatalf("res = %+v, want Pending/Starting (boot wait)", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending (boot wait)", res)
 	}
 	if res.Result.RequeueAfter == 0 {
 		t.Fatal("boot wait must carry a timer fallback")
 	}
 	if stub.StartVMCalls != 0 {
 		t.Fatalf("StartVMCalls = %d, want 0 (declared layer already correct)", stub.StartVMCalls)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonStarting) {
+		t.Fatalf("PowerStateReady = %+v, want False/Starting", cond)
 	}
 }
 
@@ -127,11 +139,15 @@ func TestEnsurePowerStateStopsRunningVM(t *testing.T) {
 
 	res := r.ensurePowerState(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "Stopping" {
-		t.Fatalf("res = %+v, want Pending/Stopping", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if stub.StopVMCalls != 1 {
 		t.Fatalf("StopVMCalls = %d, want 1", stub.StopVMCalls)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonStopping) {
+		t.Fatalf("PowerStateReady = %+v, want False/Stopping", cond)
 	}
 	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusStopping {
@@ -150,11 +166,15 @@ func TestEnsurePowerStateStopWaitsForTeardownWithoutRepeatStop(t *testing.T) {
 
 	res := r.ensurePowerState(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "Stopping" {
-		t.Fatalf("res = %+v, want Pending/Stopping (teardown wait)", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending (teardown wait)", res)
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatalf("StopVMCalls = %d, want 0 (declared layer already Halted)", stub.StopVMCalls)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonStopping) {
+		t.Fatalf("PowerStateReady = %+v, want False/Stopping", cond)
 	}
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must stay False while waiting for VMI teardown")

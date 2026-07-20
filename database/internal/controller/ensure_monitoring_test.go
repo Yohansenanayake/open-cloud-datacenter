@@ -199,8 +199,12 @@ func TestEnsureMonitoringWaitsForEndpoint(t *testing.T) {
 
 	res := r.ensureMonitoring(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "WaitingForEndpoint" {
-		t.Fatalf("res = %+v, want Pending/WaitingForEndpoint", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionMonitoringReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonWaitingForEndpoint) {
+		t.Fatalf("MonitoringReady = %+v, want False/WaitingForEndpoint", cond)
 	}
 }
 

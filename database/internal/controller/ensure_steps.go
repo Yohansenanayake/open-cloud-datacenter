@@ -22,6 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
@@ -97,15 +98,28 @@ func (r *DBInstanceReconciler) instanceEnsureSteps() []ensureStep {
 // runner mechanics are testable with injected steps; production callers pass
 // r.instanceEnsureSteps().
 func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1.DBInstance, steps []ensureStep) StepResult {
+	logger := log.FromContext(ctx)
 	for _, step := range steps {
 		res := step.run(ctx, inst)
 		switch res.Outcome {
 		case OutcomeSatisfied:
 			continue
 		case OutcomePending, OutcomeTerminal, OutcomeTransient:
+			logger.V(1).Info("Ensure step stopped",
+				"step", step.name,
+				"outcome", res.Outcome,
+				"reason", res.Reason,
+				"message", res.Message,
+				"requeueAfter", res.Result.RequeueAfter,
+				"error", res.Err)
 			return res
 		default:
-			return transient(fmt.Errorf("step %q returned unknown outcome %q", step.name, res.Outcome))
+			res = transient(fmt.Errorf("step %q returned unknown outcome %q", step.name, res.Outcome))
+			logger.V(1).Info("Ensure step stopped",
+				"step", step.name,
+				"outcome", res.Outcome,
+				"error", res.Err)
+			return res
 		}
 	}
 	return satisfied()

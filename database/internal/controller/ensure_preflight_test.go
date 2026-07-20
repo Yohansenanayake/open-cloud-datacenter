@@ -32,8 +32,8 @@ func TestEnsurePreflightUnknownClassIsTerminal(t *testing.T) {
 
 	res := r.ensurePreflight(context.Background(), inst)
 
-	if res.Outcome != OutcomeTerminal || res.Reason != "InvalidClass" {
-		t.Fatalf("res = %+v, want Terminal/InvalidClass", res)
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
 	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "InvalidClass" {
@@ -55,8 +55,12 @@ func TestEnsurePreflightMissingNetworkRefIsTerminal(t *testing.T) {
 
 	res := r.ensurePreflight(context.Background(), inst)
 
-	if res.Outcome != OutcomeTerminal || res.Reason != "NetworkRefMissing" {
-		t.Fatalf("res = %+v, want Terminal/NetworkRefMissing", res)
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonNetworkRefMissing) {
+		t.Fatalf("PreflightReady = %+v, want False/NetworkRefMissing", cond)
 	}
 }
 
@@ -95,8 +99,12 @@ func TestEnsurePreflightImmutableDriftIsTerminal(t *testing.T) {
 
 	res := r.ensurePreflight(context.Background(), inst)
 
-	if res.Outcome != OutcomeTerminal || res.Reason != "ImmutableFieldChanged" {
-		t.Fatalf("res = %+v, want Terminal/ImmutableFieldChanged", res)
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonImmutableFieldChanged) {
+		t.Fatalf("PreflightReady = %+v, want False/ImmutableFieldChanged", cond)
 	}
 	r.finalizeStatus(inst)
 	if !inst.Status.IsCurrentConditionFalse(dbaasv1.ConditionAccepted, inst.Generation) {
@@ -112,12 +120,13 @@ func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
 	inst.Spec.NetworkRef = ""
 
 	res := r.ensurePreflight(context.Background(), inst)
-	if res.Outcome != OutcomeTerminal || res.Reason != dbaasv1.ReasonNetworkRefMissing {
-		t.Fatalf("initial result = %+v, want Terminal/NetworkRefMissing", res)
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("initial result = %+v, want Terminal", res)
 	}
 	failed := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
-	if failed == nil || failed.Status != metav1.ConditionFalse || failed.ObservedGeneration != inst.Generation {
-		t.Fatalf("initial PreflightReady = %+v, want current-generation False", failed)
+	if failed == nil || failed.Status != metav1.ConditionFalse ||
+		failed.Reason != string(dbaasv1.ReasonNetworkRefMissing) || failed.ObservedGeneration != inst.Generation {
+		t.Fatalf("initial PreflightReady = %+v, want current-generation False/NetworkRefMissing", failed)
 	}
 
 	inst.Spec.NetworkRef = networkRef

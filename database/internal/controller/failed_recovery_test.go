@@ -62,8 +62,8 @@ func TestCrashLoopHaltsAtThreshold(t *testing.T) {
 		}
 
 		// Threshold cycle: halt + park.
-		if res.Outcome != OutcomePending || res.Reason != "CrashLoopHalted" {
-			t.Fatalf("threshold cycle: res = %+v, want Pending/CrashLoopHalted", res)
+		if res.Outcome != OutcomePending {
+			t.Fatalf("threshold cycle: res = %+v, want Pending", res)
 		}
 		if res.Result.RequeueAfter != crashLoopParkRequeue {
 			t.Fatalf("RequeueAfter = %v, want %v (cold park probe)", res.Result.RequeueAfter, crashLoopParkRequeue)
@@ -76,8 +76,10 @@ func TestCrashLoopHaltsAtThreshold(t *testing.T) {
 	if stub.StartVMCalls != 0 {
 		t.Fatalf("StartVM called %d times, want 0", stub.StartVMCalls)
 	}
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
-		t.Fatal("CrashLoopHalted not set at threshold")
+	crashLoopHalted := inst.Status.GetCondition(dbaasv1.ConditionCrashLoopHalted)
+	if crashLoopHalted == nil || crashLoopHalted.Status != metav1.ConditionTrue ||
+		crashLoopHalted.Reason != string(dbaasv1.ReasonCrashLoopDetected) {
+		t.Fatalf("CrashLoopHalted = %+v, want True/CrashLoopDetected", crashLoopHalted)
 	}
 	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusCrashLoopHalted {

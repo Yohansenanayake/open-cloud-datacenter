@@ -104,8 +104,8 @@ func TestEnsureStorageResizeClassDriftStopsVM(t *testing.T) {
 
 	res := r.ensureResize(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "ResizeStopping" {
-		t.Fatalf("res = %+v, want Pending/ResizeStopping", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if stub.StopVMCalls != 1 {
 		t.Fatalf("StopVMCalls = %d, want 1", stub.StopVMCalls)
@@ -120,6 +120,10 @@ func TestEnsureStorageResizeClassDriftStopsVM(t *testing.T) {
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must go False once the VM is halted for resize")
 	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonResizeStopping) {
+		t.Fatalf("ResizeInProgress = %+v, want True/ResizeStopping", cond)
+	}
 }
 
 // Halt requested but the VMI is still tearing down: wait, no repeat StopVM.
@@ -128,14 +132,18 @@ func TestEnsureStorageResizeWaitsForTeardown(t *testing.T) {
 
 	res := r.ensureResize(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "ResizeWaitingForTeardown" {
-		t.Fatalf("res = %+v, want Pending/ResizeWaitingForTeardown", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if stub.StopVMCalls != 0 || stub.ResizeVMCalls != 0 {
 		t.Fatalf("no provider calls during teardown wait, got stop:%d resize:%d", stub.StopVMCalls, stub.ResizeVMCalls)
 	}
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must stay False while waiting for teardown")
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonResizeWaitingForTeardown) {
+		t.Fatalf("ResizeInProgress = %+v, want True/ResizeWaitingForTeardown", cond)
 	}
 }
 
@@ -145,8 +153,8 @@ func TestEnsureStorageResizeAppliesClassWhenDown(t *testing.T) {
 
 	res := r.ensureResize(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "ResizeApplied" {
-		t.Fatalf("res = %+v, want Pending/ResizeApplied", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if stub.ResizeVMCalls != 1 {
 		t.Fatalf("ResizeVMCalls = %d, want 1", stub.ResizeVMCalls)
@@ -157,6 +165,10 @@ func TestEnsureStorageResizeAppliesClassWhenDown(t *testing.T) {
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must stay False while the VM is down for resize")
 	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonResizeApplied) {
+		t.Fatalf("ResizeInProgress = %+v, want True/ResizeApplied", cond)
+	}
 }
 
 // Storage-only grow: only the DataVolume resize is applied.
@@ -165,8 +177,8 @@ func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 
 	res := r.ensureResize(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "ResizeApplied" {
-		t.Fatalf("res = %+v, want Pending/ResizeApplied", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if stub.ResizeDVCalls != 1 {
 		t.Fatalf("ResizeDVCalls = %d, want 1", stub.ResizeDVCalls)
@@ -178,6 +190,10 @@ func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 	if inst.Status.Phase != dbaasv1.StatusModifying {
 		t.Fatalf("phase = %q, want %q for storage growth", inst.Status.Phase, dbaasv1.StatusModifying)
 	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonResizeApplied) {
+		t.Fatalf("ResizeInProgress = %+v, want True/ResizeApplied", cond)
+	}
 }
 
 func TestEnsureStorageResizeAppliesClassAndStorageTogether(t *testing.T) {
@@ -185,14 +201,15 @@ func TestEnsureStorageResizeAppliesClassAndStorageTogether(t *testing.T) {
 
 	res := r.ensureResize(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "ResizeApplied" {
-		t.Fatalf("res = %+v, want Pending/ResizeApplied", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if stub.ResizeVMCalls != 1 || stub.ResizeDVCalls != 1 {
 		t.Fatalf("resize calls = VM:%d storage:%d, want 1 each", stub.ResizeVMCalls, stub.ResizeDVCalls)
 	}
-	if !inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) {
-		t.Fatal("ResizeInProgress must be True for a combined class and storage resize")
+	cond := inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonResizeApplied) {
+		t.Fatalf("ResizeInProgress = %+v, want True/ResizeApplied", cond)
 	}
 }
 
@@ -202,8 +219,8 @@ func TestEnsureStorageResizeShrinkIsTerminal(t *testing.T) {
 
 	res := r.ensureResize(context.Background(), inst)
 
-	if res.Outcome != OutcomeTerminal || res.Reason != "UnsupportedShrink" {
-		t.Fatalf("res = %+v, want Terminal/UnsupportedShrink", res)
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not halt the VM for a change that can never be applied")

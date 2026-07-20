@@ -46,15 +46,15 @@ func TestEnsureDatabaseHealthPendingWhileVMINotRunning(t *testing.T) {
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "VMBooting" {
-		t.Fatalf("res = %+v, want Pending/VMBooting", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if res.Result.RequeueAfter != healthRequeue {
 		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
 	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
-	if cond == nil || cond.Status != metav1.ConditionFalse {
-		t.Fatalf("DatabaseReady = %+v, want False", cond)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonVMBooting) {
+		t.Fatalf("DatabaseReady = %+v, want False/VMBooting", cond)
 	}
 	if !strings.Contains(cond.Message, "VM booting") {
 		t.Fatalf("condition message = %q, want gate-1 message", cond.Message)
@@ -71,8 +71,12 @@ func TestEnsureDatabaseHealthPendingWhileVMIAbsent(t *testing.T) {
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "VMBooting" {
-		t.Fatalf("res = %+v, want Pending/VMBooting on VMI NotFound", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending on VMI NotFound", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonVMBooting) {
+		t.Fatalf("DatabaseReady = %+v, want False/VMBooting", cond)
 	}
 }
 
@@ -88,14 +92,16 @@ func TestEnsureDatabaseHealthPendingWhileProbeNotPassing(t *testing.T) {
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "PostgresInitializing" {
-		t.Fatalf("res = %+v, want Pending/PostgresInitializing", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if res.Result.RequeueAfter != healthRequeue {
 		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
 	}
-	if cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady); cond == nil || !strings.Contains(cond.Message, "PostgreSQL initializing") {
-		t.Fatalf("DatabaseReady = %+v, want gate-2 condition message", cond)
+	if cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady); cond == nil ||
+		cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonPostgresInitializing) ||
+		!strings.Contains(cond.Message, "PostgreSQL initializing") {
+		t.Fatalf("DatabaseReady = %+v, want False/PostgresInitializing with gate-2 message", cond)
 	}
 }
 
@@ -137,8 +143,8 @@ func TestCrashLoopRecoveryWaitsForDataNetIP(t *testing.T) {
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonVMBooting || res.Result.RequeueAfter != healthRequeue {
-		t.Fatalf("res = %+v, want short Pending/VMBooting", res)
+	if res.Outcome != OutcomePending || res.Result.RequeueAfter != healthRequeue {
+		t.Fatalf("res = %+v, want short Pending", res)
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		t.Fatal("CrashLoopHalted must remain set until the data-net IP is observed")

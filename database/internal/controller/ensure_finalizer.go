@@ -27,7 +27,9 @@ import (
 // ensureFinalizer guarantees the cleanup finalizer is present before any child
 // resources are created. Being first in the chain, it's what actually adds the
 // finalizer on a brand-new DBInstance's first pass — Reconcile has no separate
-// pre-dispatch for this, matching every other concern in the chain.
+// pre-dispatch for this, matching every other concern in the chain. Finalizer
+// presence is already authoritative in metadata, so this short-lived transition
+// deliberately does not add a duplicate status condition.
 func (r *DBInstanceReconciler) ensureFinalizer(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	if controllerutil.ContainsFinalizer(inst, dbaasv1.FinalizerName) {
 		return satisfied()

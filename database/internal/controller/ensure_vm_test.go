@@ -38,8 +38,8 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 
 	res := r.ensureVM(ctx, inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "VMCreated" {
-		t.Fatalf("res = %+v, want Pending/VMCreated", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
 	}
 	if res.Result.RequeueAfter != 0 {
 		t.Fatalf("VM create must be event-driven Pending, got RequeueAfter %v", res.Result.RequeueAfter)
@@ -172,11 +172,15 @@ func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {
 
 	res := r.ensureVM(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Reason != "VMCreated" {
-		t.Fatalf("res = %+v, want Pending/VMCreated (re-create)", res)
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending (re-create)", res)
 	}
 	if stub.CreateVMCalls != 1 {
 		t.Fatalf("CreateVMCalls = %d, want 1 (self-heal re-create)", stub.CreateVMCalls)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionVMReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonVMCreated) {
+		t.Fatalf("VMReady = %+v, want False/VMCreated", cond)
 	}
 }
 
