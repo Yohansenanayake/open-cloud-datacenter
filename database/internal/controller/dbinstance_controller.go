@@ -230,23 +230,23 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 	setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,
 		dbaasv1.ReasonDeletionProgressing, "Tearing down resources")
 	r.finalizeStatus(inst)
-	_ = r.patchStatusIfChanged(ctx, original, inst)
+	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	logger.Info("Tearing down child resources", "namespace", ns)
 	if err := r.Harvester.TeardownAll(ctx, inst.Name, ns, inst.Status.Resources); err != nil {
 		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
 			dbaasv1.ReasonTeardownFailed, fmt.Sprintf("Teardown failed, will retry: %v", err))
 		r.finalizeStatus(inst)
-		_ = r.patchStatusIfChanged(ctx, original, inst)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, goerrors.Join(err, r.patchStatusIfChanged(ctx, original, inst))
 	}
 
 	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
 		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
 			dbaasv1.ReasonOperatorSecretCleanupFailed, fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err))
 		r.finalizeStatus(inst)
-		_ = r.patchStatusIfChanged(ctx, original, inst)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, goerrors.Join(err, r.patchStatusIfChanged(ctx, original, inst))
 	}
 
 	return ctrl.Result{}, r.removeDBInstanceFinalizer(ctx, client.ObjectKeyFromObject(inst))

@@ -174,6 +174,90 @@ func TestReconcileDeleteProtectionReturnsStatusPatchError(t *testing.T) {
 	}
 }
 
+func TestReconcileDeleteReturnsInitialStatusPatchErrorBeforeTeardown(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	statusErr := errors.New("status unavailable")
+	stub := &stubHarvester{}
+	r := newProvisionReconciler(t, stub, inst)
+	watchClient, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fixture's fake client does not implement client.WithWatch")
+	}
+	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return statusErr
+		},
+	})
+
+	if _, err := r.reconcileDelete(ctx, inst); !errors.Is(err, statusErr) {
+		t.Fatalf("reconcileDelete error = %v, want status error", err)
+	}
+	if stub.TeardownCalls != 0 {
+		t.Fatalf("TeardownAll calls = %d, want 0", stub.TeardownCalls)
+	}
+}
+
+func TestReconcileDeleteJoinsTeardownAndStatusPatchErrors(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	teardownErr := errors.New("teardown failed")
+	statusErr := errors.New("status unavailable")
+	stub := &stubHarvester{teardownErr: teardownErr}
+	r := newProvisionReconciler(t, stub, inst)
+	watchClient, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fixture's fake client does not implement client.WithWatch")
+	}
+	patchCalls := 0
+	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			patchCalls++
+			if patchCalls == 2 {
+				return statusErr
+			}
+			return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	_, err := r.reconcileDelete(ctx, inst)
+	if !errors.Is(err, teardownErr) || !errors.Is(err, statusErr) {
+		t.Fatalf("reconcileDelete error = %v, want teardown and status errors", err)
+	}
+}
+
+func TestReconcileDeleteJoinsSecretCleanupAndStatusPatchErrors(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	secret := operatorSecret(credentials.InternalSecretName(inst), true)
+	inst.Status.Resources.InternalSecretRef = secret.Namespace + "/" + secret.Name
+	cleanupErr := errors.New("secret cleanup failed")
+	statusErr := errors.New("status unavailable")
+	r := newProvisionReconciler(t, &stubHarvester{}, inst, secret)
+	watchClient, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fixture's fake client does not implement client.WithWatch")
+	}
+	patchCalls := 0
+	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			return cleanupErr
+		},
+		SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			patchCalls++
+			if patchCalls == 2 {
+				return statusErr
+			}
+			return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	_, err := r.reconcileDelete(ctx, inst)
+	if !errors.Is(err, cleanupErr) || !errors.Is(err, statusErr) {
+		t.Fatalf("reconcileDelete error = %v, want cleanup and status errors", err)
+	}
+}
+
 func TestRemoveDBInstanceFinalizerRetriesConflictAndPreservesConcurrentMetadata(t *testing.T) {
 	ctx := context.Background()
 	inst := newProvisionInst()

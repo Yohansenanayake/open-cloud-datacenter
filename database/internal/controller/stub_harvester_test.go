@@ -34,12 +34,14 @@ type stubHarvester struct {
 	stopVMErr    error
 	startVMErr   error
 	createVMErr  error
+	teardownErr  error
 
 	StopVMCalls   int
 	StartVMCalls  int
 	CreateVMCalls int
 	ResizeVMCalls int
 	ResizeDVCalls int
+	TeardownCalls int
 
 	// LastVMCreateParams captures the most recent CreatePostgresVM input so
 	// tests can assert what the controller asked for (e.g. the owner ref).
@@ -73,5 +75,6 @@ func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error
 	return nil
 }
 func (s *stubHarvester) TeardownAll(_ context.Context, _, _ string, _ dbaasv1.ResourceRefs) error {
-	return nil
+	s.TeardownCalls++
+	return s.teardownErr
 }

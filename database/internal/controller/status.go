@@ -55,7 +55,7 @@ func (r *DBInstanceReconciler) patchStatusIfChanged(ctx context.Context, origina
 			return err
 		}
 		if equality.Semantic.DeepEqual(latest.Status, *desiredStatus) {
-			inst.Status = *latest.Status.DeepCopy()
+			inst.Status = *latest.Status.DeepCopy() //redudant ? can we remove this ?
 			return nil
 		}
 
