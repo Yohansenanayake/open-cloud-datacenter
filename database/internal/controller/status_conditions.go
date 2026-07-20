@@ -74,10 +74,10 @@ func (r *DBInstanceReconciler) syncInterventionRequiredCondition(inst *dbaasv1.D
 		dbaasv1.ReasonNoInterventionRequired, "no operator intervention required")
 }
 
-// syncResizeInProgressCondition completes the user-visible resize lifecycle.
-// Shape convergence happens before ensurePowerState and ensureDatabaseHealth,
-// so ensureResize cannot clear this condition without making the resize appear
-// complete while the VM or PostgreSQL is still recovering.
+// syncResizeInProgressCondition clears ResizeInProgress only after the current
+// shape has converged and the instance has settled: Ready when running, or
+// PowerStateReady when stopped. This keeps a resize in progress while the VM
+// or PostgreSQL is still recovering from the shape change.
 func (r *DBInstanceReconciler) syncResizeInProgressCondition(inst *dbaasv1.DBInstance) {
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) ||
 		!inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionStorageReady, inst.Generation) {

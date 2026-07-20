@@ -22,21 +22,12 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// syncReadyCondition recomputes Ready every pass, independent of where the
-// ensure-step chain stopped this time — a pure derivation from currently-known
-// status, safe and cheap to run unconditionally. It aggregates the required
-// operational product stack: PostgreSQL reachability and monitoring-resource
-// convergence. It deliberately does NOT check Accepted or
-// StorageReady/PreflightReady directly — a rejected request
-// (invalid class, immutable-field edit, unsupported shrink) never touches the
-// VM, so DatabaseReady/Ready correctly stay whatever they already were.
-// Accepted and phase surface the rejection independently.
-//
-// Ready is the summary condition external tooling conventionally looks for
-// (kubectl wait --for=condition=Ready, kstatus-style dashboards).
-// DatabaseReady remains the narrower signal for clients that need to know
-// whether PostgreSQL itself is usable even when another required product
-// component is degraded.
+// syncReadyCondition derives Ready every pass from DatabaseReady and
+// MonitoringReady, regardless of where the ensure chain stopped. It ignores
+// spec-validation conditions because a rejected edit can leave the existing
+// database healthy; Accepted and phase report that rejection separately.
+// Ready summarizes the product for tooling, while DatabaseReady reports only
+// PostgreSQL availability.
 func (r *DBInstanceReconciler) syncReadyCondition(inst *dbaasv1.DBInstance) {
 	if !inst.DeletionTimestamp.IsZero() {
 		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, dbaasv1.ReasonDeleting, "instance is deleting")
