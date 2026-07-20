@@ -50,6 +50,7 @@ type stubHarvester struct {
 	TeardownCalls           int
 	LastHaltedVMIUID        string
 	LastVMImageRef          string
+	LastResizeDVName        string
 
 	// LastVMCreateParams captures the most recent CreatePostgresVM input so
 	// tests can assert what the controller asked for (e.g. the owner ref).
@@ -59,8 +60,9 @@ type stubHarvester struct {
 func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
 	return s.readiness, s.readinessErr
 }
-func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ int) error {
+func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, dvName string, _ int) error {
 	s.ResizeDVCalls++
+	s.LastResizeDVName = dvName
 	return nil
 }
 func (s *stubHarvester) ResolveVMImage(_ context.Context, ref string) (harvester.ResolvedVMImage, error) {

@@ -62,6 +62,7 @@ func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaa
 		msg := "credential material created; waiting for observation"
 		setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
 			dbaasv1.ReasonCredentialsCreated, msg)
+		// pendingAfter() is used here since cross-namespace owner references is not allowed
 		return pendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
 	}
 

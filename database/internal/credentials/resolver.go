@@ -166,7 +166,7 @@ func (r *Resolver) getOrCreateInternal(ctx context.Context, inst *dbaasv1.DBInst
 		replPw, exporterPw, err = internalMaterialFrom(&sec, key)
 		return replPw, exporterPw, false, err
 	} else if !apierrors.IsNotFound(getErr) {
-		return "", "", false, getErr
+		return "", "", false, getErr //Transient Error
 	}
 
 	replPw, err = randomString(32)

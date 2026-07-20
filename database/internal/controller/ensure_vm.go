@@ -41,6 +41,15 @@ func vmNameFor(inst *dbaasv1.DBInstance) string {
 	return fmt.Sprintf("pg-%s", inst.Name)
 }
 
+// dataVolumeNameFor preserves a recorded legacy name and otherwise derives the
+// controller's deterministic data-disk PVC name.
+func dataVolumeNameFor(inst *dbaasv1.DBInstance) string {
+	if inst.Status.Resources.DataVolumeName != "" {
+		return inst.Status.Resources.DataVolumeName
+	}
+	return harvester.DataVolumeName(inst.Name)
+}
+
 // ownerRefFor builds the controller owner reference the provider stamps on the
 // same-namespace children it creates (VM, credentials/cloud-init Secrets). This
 // is what makes the Owns() watches fire for them and lets GC back up the
@@ -76,6 +85,7 @@ func (r *DBInstanceReconciler) ensureVM(ctx context.Context, inst *dbaasv1.DBIns
 		// Observed == desired: the VM object exists. Re-record the ref for
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName
+		inst.Status.Resources.DataVolumeName = dataVolumeNameFor(inst)
 		setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionTrue,
 			dbaasv1.ReasonVMPresent, "virtualmachine exists")
 		return satisfied()
@@ -121,13 +131,8 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		storageType = defaultStorageType
 	}
 
-	// Record the deterministic data-disk name. The PVC itself is created by
-	// Harvester from the VM's volumeClaimTemplates annotation, so there is no
-	// DataVolume object to observe — the recorded ref is the persisted fact
-	// (allowed: it cannot be reconstructed by observation).
-	if inst.Status.Resources.DataVolumeName == "" {
-		inst.Status.Resources.DataVolumeName = harvester.DataVolumeName(inst.Name)
-	}
+	dataVolumeName := dataVolumeNameFor(inst)
+	inst.Status.Resources.DataVolumeName = dataVolumeName
 
 	// Material was already resolved (and its three durable Secrets created)
 	// by ensureCredentials earlier in the step order; this re-read is cheap.
@@ -168,7 +173,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		CPUCores:               classSpec.CPUCores,
 		MemoryMB:               classSpec.MemoryMB,
 		OSImage:                osImage,
-		DataVolumeRef:          inst.Status.Resources.DataVolumeName,
+		DataVolumeRef:          dataVolumeName,
 		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
 		DataVolumeStorageClass: storageType,
 		NADName:                inst.Spec.NetworkRef,

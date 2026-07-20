@@ -156,6 +156,9 @@ func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {
 	if inst.Status.Resources.VMName != "pg-orders" {
 		t.Fatalf("VMName not re-recorded from observation: %q", inst.Status.Resources.VMName)
 	}
+	if inst.Status.Resources.DataVolumeName != "pg-orders-data" {
+		t.Fatalf("DataVolumeName not reconstructed: %q", inst.Status.Resources.DataVolumeName)
+	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionVMReady) {
 		t.Fatal("VMReady should be True when VM exists")
 	}

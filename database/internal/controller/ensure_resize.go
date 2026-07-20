@@ -63,8 +63,9 @@ func observeShapeDrift(vm *kubevirtv1.VirtualMachine, inst *dbaasv1.DBInstance, 
 
 	if pvcs, err := harvester.VolumeClaimTemplates(vm); err == nil {
 		desired := resource.MustParse(fmt.Sprintf("%dGi", inst.Spec.AllocatedStorage))
+		dataVolumeName := dataVolumeNameFor(inst)
 		for _, pvc := range pvcs {
-			if pvc == nil || pvc.Name != inst.Status.Resources.DataVolumeName {
+			if pvc == nil || pvc.Name != dataVolumeName {
 				continue
 			}
 			observed := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
@@ -180,7 +181,7 @@ func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.D
 		}
 	}
 	if drift.storage {
-		if err := r.Harvester.ResizeDataVolume(ctx, inst.Namespace, vmNameFor(inst), inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage); err != nil {
+		if err := r.Harvester.ResizeDataVolume(ctx, inst.Namespace, vmNameFor(inst), dataVolumeNameFor(inst), inst.Spec.AllocatedStorage); err != nil {
 			return transient(err)
 		}
 	}

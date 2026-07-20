@@ -196,6 +196,20 @@ func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 	}
 }
 
+func TestEnsureStorageResizeReconstructsMissingDataVolumeName(t *testing.T) {
+	r, inst, stub := newResizeFixture(t, "db.t3.small", 50, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
+	inst.Status.Resources.DataVolumeName = ""
+
+	res := r.ensureResize(context.Background(), inst)
+
+	if res.Outcome != OutcomePending || stub.ResizeDVCalls != 1 {
+		t.Fatalf("res = %+v, ResizeDVCalls = %d; want Pending and one resize", res, stub.ResizeDVCalls)
+	}
+	if stub.LastResizeDVName != "pg-orders-data" {
+		t.Fatalf("resized DataVolume = %q, want reconstructed pg-orders-data", stub.LastResizeDVName)
+	}
+}
+
 func TestEnsureStorageResizeAppliesClassAndStorageTogether(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.medium", 50, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
 
