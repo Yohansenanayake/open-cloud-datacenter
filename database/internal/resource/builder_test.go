@@ -182,11 +182,10 @@ func TestMetricsEndpointsOmitsEmptyAddress(t *testing.T) {
 	if err := (MetricsEndpoints{Instance: testOwner()}).Update(endpoints); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if len(endpoints.Subsets) != 1 || len(endpoints.Subsets[0].Addresses) != 0 {
-		t.Fatalf("subsets = %+v, want one subset with no addresses", endpoints.Subsets)
-	}
-	ports := endpoints.Subsets[0].Ports
-	if len(ports) != 1 || ports[0].Name != "metrics" || ports[0].Port != metricsPort || ports[0].Protocol != corev1.ProtocolTCP {
-		t.Fatalf("ports = %+v, want configured metrics port", ports)
+	// A ports-only subset (no Addresses/NotReadyAddresses) is rejected by
+	// the API server's Endpoints validation, so Subsets must stay empty
+	// until the VM IP is known.
+	if len(endpoints.Subsets) != 0 {
+		t.Fatalf("subsets = %+v, want none while VMIP is unknown", endpoints.Subsets)
 	}
 }

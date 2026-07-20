@@ -50,16 +50,19 @@ func (b MetricsEndpoints) Update(obj client.Object) error {
 		dbaasv1.LabelInstance: b.Instance.Name,
 		dbaasv1.LabelMetrics:  "true",
 	}
-	subset := corev1.EndpointSubset{
+	if b.VMIP == "" {
+		// A subset needs at least one address; the API server rejects a
+		// ports-only subset. Leave Subsets empty until the IP is known.
+		ep.Subsets = nil
+		return nil
+	}
+	ep.Subsets = []corev1.EndpointSubset{{
+		Addresses: []corev1.EndpointAddress{{IP: b.VMIP}},
 		Ports: []corev1.EndpointPort{{
 			Name:     "metrics",
 			Port:     metricsPort,
 			Protocol: corev1.ProtocolTCP,
 		}},
-	}
-	if b.VMIP != "" {
-		subset.Addresses = []corev1.EndpointAddress{{IP: b.VMIP}}
-	}
-	ep.Subsets = []corev1.EndpointSubset{subset}
+	}}
 	return nil
 }
