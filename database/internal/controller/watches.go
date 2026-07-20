@@ -81,7 +81,8 @@ func vmiInterfaceIPsEqual(oldVMI, newVMI *kubevirtv1.VirtualMachineInstance) boo
 		return false
 	}
 	for name, ip := range oldIPs {
-		if newIPs[name] != ip {
+		newIP, ok := newIPs[name]
+		if !ok || newIP != ip {
 			return false
 		}
 	}
