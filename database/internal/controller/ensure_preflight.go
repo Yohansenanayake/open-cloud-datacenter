@@ -18,46 +18,75 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
+const preflightRequeue = 10 * time.Second
+
 // ensurePreflight validates the spec references the runner cannot create on the
-// user's behalf: the instance class must exist in InstanceClasses and
-// spec.networkRef must be set (the controller never creates networks; the VM
-// inline-declares the NAD). Both failures are Terminal — retrying the same spec
-// cannot succeed — and park the instance until a spec edit re-runs the runner.
+// user's behalf: the instance class must exist in InstanceClasses,
+// spec.networkRef must be set, and the effective OS image must resolve. Invalid
+// references are Terminal; an image that is still importing is Pending.
 //
 // NAD existence is not yet verified (no NAD type in the manager scheme); RBAC for
 // get/list is already in place, so the check can be added once the scheme is.
-func (r *DBInstanceReconciler) ensurePreflight(_ context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *DBInstanceReconciler) ensurePreflight(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	if _, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]; !ok {
 		msg := fmt.Sprintf("unknown dbInstanceClass %q", inst.Spec.DBInstanceClass)
 		setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, msg)
 		return terminal(dbaasv1.ReasonInvalidClass, msg)
 	}
 
+	// Need to really check whether the NAD exists,
 	if inst.Spec.NetworkRef == "" {
 		msg := "spec.networkRef is required (namespace/nad of an existing Multus NetworkAttachmentDefinition)"
 		setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonNetworkRefMissing, msg)
 		return terminal(dbaasv1.ReasonNetworkRefMissing, msg)
 	}
 
-	// Immutable drift: a spec edit to a field the controller cannot re-apply
-	// (networkRef, dbName, osImage, ...) is refused loudly rather than silently
-	// advancing observedGeneration. Guards every runner entry — provisioning,
-	// stop/start toggles, and modifies alike, from this one place.
+	// Reject immutable edits first so an osImage change is reported as immutable
+	// drift rather than an image lookup failure.
 	if drift := immutableDrift(inst); drift != "" {
 		msg := fmt.Sprintf("cannot modify immutable field(s) %s after create; revert the change or recreate the DBInstance", drift)
 		setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonImmutableFieldChanged, msg)
 		return terminal(dbaasv1.ReasonImmutableFieldChanged, msg)
 	}
 
+	osImage := inst.Spec.OSImage
+	if osImage == "" {
+		osImage = defaultOSImage
+	}
+	if _, err := r.Harvester.ResolveVMImage(ctx, osImage); err != nil {
+		msg := err.Error()
+		switch {
+		case errors.Is(err, harvester.ErrVMImageReferenceInvalid), errors.Is(err, harvester.ErrVMImageAmbiguous):
+			setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse,
+				dbaasv1.ReasonOSImageInvalid, msg)
+			return terminal(dbaasv1.ReasonOSImageInvalid, msg)
+		case errors.Is(err, harvester.ErrVMImageNotFound):
+			setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse,
+				dbaasv1.ReasonOSImageNotFound, msg)
+			return terminal(dbaasv1.ReasonOSImageNotFound, msg)
+		case errors.Is(err, harvester.ErrVMImageNotReady):
+			setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionUnknown,
+				dbaasv1.ReasonOSImageNotReady, msg)
+			return pendingAfter(dbaasv1.ReasonOSImageNotReady, msg, preflightRequeue)
+		default:
+			setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionUnknown,
+				dbaasv1.ReasonValidationPending, "could not validate OS image")
+			return transient(err)
+		}
+	}
+
 	inst.Status.Resources.NADName = inst.Spec.NetworkRef
 	setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionTrue,
-		dbaasv1.ReasonPreflightPassed, "instance class and network reference are valid")
+		dbaasv1.ReasonPreflightPassed, "instance class, network reference, and OS image are valid")
 	return satisfied()
 }

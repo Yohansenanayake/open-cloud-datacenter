@@ -3,6 +3,7 @@ package harvester
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -53,6 +54,53 @@ func TestTypedCreatePostgresVMFailsOnImageResolutionFailure(t *testing.T) {
 	}
 	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("VM should not exist after image-resolution failure, got: %v", err)
+	}
+}
+
+func TestResolveVMImage(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	client := newTestTypedClient(image)
+
+	resolved, err := client.ResolveVMImage(ctx, image.Spec.DisplayName)
+	if err != nil {
+		t.Fatalf("ResolveVMImage returned error: %v", err)
+	}
+	if resolved.Namespace != "default" || resolved.Name != image.Name ||
+		resolved.StorageClassName != image.Status.StorageClassName {
+		t.Fatalf("resolved image = %+v", resolved)
+	}
+}
+
+func TestResolveVMImageClassifiesSemanticFailures(t *testing.T) {
+	ctx := context.Background()
+	notReady := testTypedVMImage()
+	notReady.Status.Conditions = nil
+	first := testTypedVMImage()
+	first.Name = "ubuntu-a"
+	first.Spec.DisplayName = "duplicate"
+	second := first.DeepCopy()
+	second.Name = "ubuntu-b"
+
+	tests := []struct {
+		name   string
+		client *TypedClient
+		ref    string
+		want   error
+	}{
+		{"empty reference", newTestTypedClient(), "", ErrVMImageReferenceInvalid},
+		{"not found", newTestTypedClient(), "missing", ErrVMImageNotFound},
+		{"not ready", newTestTypedClient(notReady), notReady.Name, ErrVMImageNotReady},
+		{"ambiguous display name", newTestTypedClient(first, second), "duplicate", ErrVMImageAmbiguous},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.client.ResolveVMImage(ctx, tt.ref)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("ResolveVMImage error = %v, want errors.Is(%v)", err, tt.want)
+			}
+		})
 	}
 }
 

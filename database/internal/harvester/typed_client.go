@@ -135,12 +135,13 @@ func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName s
 func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error) {
 	vmName = VMName(p.ID)
 
-	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
+	image, err := c.ResolveVMImage(ctx, p.OSImage)
 	if err != nil {
 		return vmName, err
 	}
 
-	vm, err := c.buildPostgresVM(p, vmName, p.CloudInitSecretName, fmt.Sprintf("%s/%s", imgNs, imgName), imgSC, true)
+	vm, err := c.buildPostgresVM(p, vmName, p.CloudInitSecretName,
+		fmt.Sprintf("%s/%s", image.Namespace, image.Name), image.StorageClassName, true)
 	if err != nil {
 		return vmName, err
 	}
@@ -331,10 +332,11 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 	return nil
 }
 
-// Helpers
-func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name, sc string, err error) {
+// ResolveVMImage resolves a name or display name and verifies that the image is
+// imported and has the storage class required to clone it.
+func (c *TypedClient) ResolveVMImage(ctx context.Context, ref string) (ResolvedVMImage, error) {
 	if ref == "" {
-		return ns, name, sc, fmt.Errorf("empty image reference")
+		return ResolvedVMImage{}, fmt.Errorf("%w: reference is empty", ErrVMImageReferenceInvalid)
 	}
 
 	ns, spec := "default", ref
@@ -342,7 +344,7 @@ func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name,
 		ns, spec = ref[:i], ref[i+1:]
 	}
 	if spec == "" {
-		return ns, name, sc, fmt.Errorf("empty image name in reference %q", ref)
+		return ResolvedVMImage{}, fmt.Errorf("%w: empty image name in reference %q", ErrVMImageReferenceInvalid, ref)
 	}
 
 	img, e := c.Clientset.HarvesterhciV1beta1().VirtualMachineImages(ns).Get(ctx, spec, metav1.GetOptions{})
@@ -350,13 +352,13 @@ func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name,
 		return readyVMImageFields(ns, spec, img)
 	}
 	if !apierrors.IsNotFound(e) {
-		return ns, name, sc, e
+		return ResolvedVMImage{}, e
 	}
 
 	// fallback: search by displayName
 	list, e := c.Clientset.HarvesterhciV1beta1().VirtualMachineImages(ns).List(ctx, metav1.ListOptions{})
 	if e != nil {
-		return ns, name, sc, e
+		return ResolvedVMImage{}, e
 	}
 
 	var matched []harvesterhciov1beta1.VirtualMachineImage
@@ -368,24 +370,23 @@ func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name,
 
 	switch len(matched) {
 	case 0:
-		return ns, name, sc, fmt.Errorf("no VirtualMachineImage in namespace %q matching name or displayName %q", ns, spec)
+		return ResolvedVMImage{}, fmt.Errorf("%w: no VirtualMachineImage in namespace %q matching name or displayName %q", ErrVMImageNotFound, ns, spec)
 	case 1:
-		name = matched[0].Name
-		return readyVMImageFields(ns, name, &matched[0])
+		return readyVMImageFields(ns, matched[0].Name, &matched[0])
 	default:
-		return ns, name, sc, fmt.Errorf("ambiguous: %d VirtualMachineImages in namespace %q share displayName %q", len(matched), ns, spec)
+		return ResolvedVMImage{}, fmt.Errorf("%w: %d VirtualMachineImages in namespace %q share displayName %q", ErrVMImageAmbiguous, len(matched), ns, spec)
 	}
 }
 
-func readyVMImageFields(ns, name string, img *harvesterhciov1beta1.VirtualMachineImage) (string, string, string, error) {
+func readyVMImageFields(ns, name string, img *harvesterhciov1beta1.VirtualMachineImage) (ResolvedVMImage, error) {
 	if !isVMImageImported(img) {
-		return ns, name, "", fmt.Errorf("VirtualMachineImage %s/%s is not imported yet (status.conditions missing ImageImported=True)", ns, name)
+		return ResolvedVMImage{}, fmt.Errorf("%w: VirtualMachineImage %s/%s is not imported yet (status.conditions missing ImageImported=True)", ErrVMImageNotReady, ns, name)
 	}
 	sc, err := resolveImageStorageClassName(img)
 	if err != nil {
-		return ns, name, sc, err
+		return ResolvedVMImage{}, err
 	}
-	return ns, name, sc, nil
+	return ResolvedVMImage{Namespace: ns, Name: name, StorageClassName: sc}, nil
 }
 
 func isVMImageImported(image *harvesterhciov1beta1.VirtualMachineImage) bool {
@@ -402,8 +403,8 @@ func resolveImageStorageClassName(image *harvesterhciov1beta1.VirtualMachineImag
 	if image.Status.StorageClassName != "" {
 		return image.Status.StorageClassName, nil
 	}
-	return "", fmt.Errorf("VM image %s/%s does not have a StorageClass yet (not initialized)",
-		image.Namespace, image.Name)
+	return "", fmt.Errorf("%w: VM image %s/%s does not have a StorageClass yet (not initialized)",
+		ErrVMImageNotReady, image.Namespace, image.Name)
 }
 
 // VMName is the deterministic name of a DBInstance's VirtualMachine.

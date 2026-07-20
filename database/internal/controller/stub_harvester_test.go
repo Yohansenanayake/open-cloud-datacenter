@@ -36,6 +36,7 @@ type stubHarvester struct {
 	clearCrashLoopHaltErr error
 	startVMErr            error
 	createVMErr           error
+	resolveVMImageErr     error
 	teardownErr           error
 
 	StopVMCalls             int
@@ -43,10 +44,12 @@ type stubHarvester struct {
 	ClearCrashLoopHaltCalls int
 	StartVMCalls            int
 	CreateVMCalls           int
+	ResolveVMImageCalls     int
 	ResizeVMCalls           int
 	ResizeDVCalls           int
 	TeardownCalls           int
 	LastHaltedVMIUID        string
+	LastVMImageRef          string
 
 	// LastVMCreateParams captures the most recent CreatePostgresVM input so
 	// tests can assert what the controller asked for (e.g. the owner ref).
@@ -59,6 +62,14 @@ func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvest
 func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ int) error {
 	s.ResizeDVCalls++
 	return nil
+}
+func (s *stubHarvester) ResolveVMImage(_ context.Context, ref string) (harvester.ResolvedVMImage, error) {
+	s.ResolveVMImageCalls++
+	s.LastVMImageRef = ref
+	if s.resolveVMImageErr != nil {
+		return harvester.ResolvedVMImage{}, s.resolveVMImageErr
+	}
+	return harvester.ResolvedVMImage{Namespace: "default", Name: ref, StorageClassName: "longhorn-image"}, nil
 }
 func (s *stubHarvester) CreatePostgresVM(_ context.Context, p harvester.VMCreateParams) (string, error) {
 	s.CreateVMCalls++

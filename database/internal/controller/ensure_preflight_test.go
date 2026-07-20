@@ -18,11 +18,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
 func TestEnsurePreflightUnknownClassIsTerminal(t *testing.T) {
@@ -65,7 +67,8 @@ func TestEnsurePreflightMissingNetworkRefIsTerminal(t *testing.T) {
 }
 
 func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
-	r := &DBInstanceReconciler{}
+	stub := &stubHarvester{}
+	r := &DBInstanceReconciler{Harvester: stub}
 	inst := newProvisionInst()
 
 	res := r.ensurePreflight(context.Background(), inst)
@@ -75,6 +78,9 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	}
 	if inst.Status.Resources.NADName != "tenant-a/data-net" {
 		t.Fatalf("NADName = %q, want tenant-a/data-net", inst.Status.Resources.NADName)
+	}
+	if stub.LastVMImageRef != defaultOSImage {
+		t.Fatalf("resolved image = %q, want default %q", stub.LastVMImageRef, defaultOSImage)
 	}
 	r.finalizeStatus(inst)
 	if inst.Status.Phase != dbaasv1.StatusCreating {
@@ -114,7 +120,7 @@ func TestEnsurePreflightImmutableDriftIsTerminal(t *testing.T) {
 
 // A user fixing the spec after a terminal park must clear the failure.
 func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
-	r := &DBInstanceReconciler{}
+	r := &DBInstanceReconciler{Harvester: &stubHarvester{}}
 	inst := newProvisionInst()
 	networkRef := inst.Spec.NetworkRef
 	inst.Spec.NetworkRef = ""
@@ -147,5 +153,56 @@ func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
 	}
 	if inst.Status.Phase != dbaasv1.StatusCreating {
 		t.Fatalf("Phase = %q, want %q after recovery", inst.Status.Phase, dbaasv1.StatusCreating)
+	}
+}
+
+func TestEnsurePreflightImageFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		outcome StepOutcome
+		status  metav1.ConditionStatus
+		reason  dbaasv1.ConditionReason
+		requeue bool
+	}{
+		{"invalid", harvester.ErrVMImageReferenceInvalid, OutcomeTerminal, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, false},
+		{"ambiguous", harvester.ErrVMImageAmbiguous, OutcomeTerminal, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, false},
+		{"not found", harvester.ErrVMImageNotFound, OutcomeTerminal, metav1.ConditionFalse, dbaasv1.ReasonOSImageNotFound, false},
+		{"not ready", harvester.ErrVMImageNotReady, OutcomePending, metav1.ConditionUnknown, dbaasv1.ReasonOSImageNotReady, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &DBInstanceReconciler{Harvester: &stubHarvester{resolveVMImageErr: tt.err}}
+			inst := newProvisionInst()
+			res := r.ensurePreflight(context.Background(), inst)
+
+			if res.Outcome != tt.outcome {
+				t.Fatalf("Outcome = %q, want %q", res.Outcome, tt.outcome)
+			}
+			if (res.Result.RequeueAfter == preflightRequeue) != tt.requeue {
+				t.Fatalf("RequeueAfter = %v, want timer=%v", res.Result.RequeueAfter, tt.requeue)
+			}
+			cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+			if cond == nil || cond.Status != tt.status || cond.Reason != string(tt.reason) {
+				t.Fatalf("PreflightReady = %+v, want %s/%s", cond, tt.status, tt.reason)
+			}
+		})
+	}
+}
+
+func TestEnsurePreflightImageAPIFailureIsTransient(t *testing.T) {
+	boom := errors.New("harvester API unavailable")
+	r := &DBInstanceReconciler{Harvester: &stubHarvester{resolveVMImageErr: boom}}
+	inst := newProvisionInst()
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTransient || !errors.Is(res.Err, boom) {
+		t.Fatalf("res = %+v, want Transient wrapping API failure", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionUnknown || cond.Reason != string(dbaasv1.ReasonValidationPending) {
+		t.Fatalf("PreflightReady = %+v, want Unknown/ValidationPending", cond)
 	}
 }

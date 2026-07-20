@@ -62,6 +62,9 @@ const (
 	ReasonFinalizerAdded              ConditionReason = "FinalizerAdded"
 	ReasonInvalidClass                ConditionReason = "InvalidClass"
 	ReasonNetworkRefMissing           ConditionReason = "NetworkRefMissing"
+	ReasonOSImageInvalid              ConditionReason = "OSImageInvalid"
+	ReasonOSImageNotFound             ConditionReason = "OSImageNotFound"
+	ReasonOSImageNotReady             ConditionReason = "OSImageNotReady"
 	ReasonImmutableFieldChanged       ConditionReason = "ImmutableFieldChanged"
 	ReasonPreflightPassed             ConditionReason = "PreflightPassed"
 	ReasonCredentialsResolveFailed    ConditionReason = "CredentialsResolveFailed"
@@ -113,6 +116,9 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonFinalizerAdded):              ReasonFinalizerAdded,
 	string(ReasonInvalidClass):                ReasonInvalidClass,
 	string(ReasonNetworkRefMissing):           ReasonNetworkRefMissing,
+	string(ReasonOSImageInvalid):              ReasonOSImageInvalid,
+	string(ReasonOSImageNotFound):             ReasonOSImageNotFound,
+	string(ReasonOSImageNotReady):             ReasonOSImageNotReady,
 	string(ReasonImmutableFieldChanged):       ReasonImmutableFieldChanged,
 	string(ReasonPreflightPassed):             ReasonPreflightPassed,
 	string(ReasonCredentialsResolveFailed):    ReasonCredentialsResolveFailed,

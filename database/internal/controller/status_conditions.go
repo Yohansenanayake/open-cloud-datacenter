@@ -79,6 +79,7 @@ func (r *DBInstanceReconciler) syncInterventionRequiredCondition(inst *dbaasv1.D
 // PowerStateReady when stopped. This keeps a resize in progress while the VM
 // or PostgreSQL is still recovering from the shape change.
 func (r *DBInstanceReconciler) syncResizeInProgressCondition(inst *dbaasv1.DBInstance) {
+	// A resize cannot complete until the requested shape has converged for this generation.
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) ||
 		!inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionStorageReady, inst.Generation) {
 		return
@@ -91,6 +92,7 @@ func (r *DBInstanceReconciler) syncResizeInProgressCondition(inst *dbaasv1.DBIns
 		return
 	}
 
+	// A User Stopped instance also can be resized
 	if inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionPowerStateReady, inst.Generation) {
 		removeCondition(inst, dbaasv1.ConditionResizeInProgress)
 	}

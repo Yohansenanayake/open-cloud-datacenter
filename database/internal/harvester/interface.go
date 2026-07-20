@@ -18,6 +18,7 @@ package harvester
 
 import (
 	"context"
+	"errors"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -29,6 +30,7 @@ import (
 // future typed clients.
 type ClientInterface interface {
 	ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error
+	ResolveVMImage(ctx context.Context, ref string) (ResolvedVMImage, error)
 
 	// CreatePostgresVM creates the VM from an already-provisioned cloud-init
 	// Secret (p.CloudInitSecretName) — credential/TLS material and the
@@ -49,6 +51,23 @@ type ClientInterface interface {
 	// authoritative cleanup; owner-ref GC is the backup.
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error
 }
+
+// ResolvedVMImage contains the provider-neutral image fields needed to build a
+// VM. Harvester API types stay behind ClientInterface.
+type ResolvedVMImage struct {
+	Namespace        string
+	Name             string
+	StorageClassName string
+}
+
+// Semantic image-resolution failures let the controller choose terminal or
+// pending reconciliation without inspecting provider error strings.
+var (
+	ErrVMImageReferenceInvalid = errors.New("invalid VM image reference")
+	ErrVMImageNotFound         = errors.New("VM image not found")
+	ErrVMImageNotReady         = errors.New("VM image not ready")
+	ErrVMImageAmbiguous        = errors.New("ambiguous VM image reference")
+)
 
 // VMCreateParams bundles everything needed to create a PostgreSQL VM. Fields
 // used only for credential/cloud-init generation (DBName, MaxConnections,
