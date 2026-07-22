@@ -56,14 +56,7 @@ func (r *DBInstanceReconciler) reconcileInstance(ctx context.Context, inst *dbaa
 		return ctrl.Result{}, err
 	}
 
-	switch res.Outcome {
-	case OutcomeTerminal:
-		return ctrl.Result{}, nil
-	case OutcomeTransient:
-		return ctrl.Result{}, res.Err
-	default:
-		return res.Result, nil
-	}
+	return res.Result, res.Err
 }
 
 // instanceEnsureSteps is the ordered ensure-step chain the runner walks for
@@ -107,12 +100,12 @@ func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1
 		case OutcomeSatisfied:
 			continue
 		case OutcomePending, OutcomeTerminal, OutcomeTransient:
-			// use log levels 
-			logger.V(1).Info("Ensure step stopped","step", step.name,"outcome", res.Outcome,"reason", res.Reason,"message", res.Message,"requeueAfter", res.Result.RequeueAfter,"error", res.Err)
+			// use log levels
+			logger.V(1).Info("Ensure step stopped", "step", step.name, "outcome", res.Outcome, "reason", res.Reason, "message", res.Message, "requeueAfter", res.Result.RequeueAfter, "error", res.Err)
 			return res
 		default:
 			res = transient(fmt.Errorf("step %q returned unknown outcome %q", step.name, res.Outcome))
-			logger.V(1).Info("Ensure step stopped","step", step.name,"outcome", res.Outcome,"error", res.Err)
+			logger.V(1).Info("Ensure step stopped", "step", step.name, "outcome", res.Outcome, "error", res.Err)
 			return res
 		}
 	}
