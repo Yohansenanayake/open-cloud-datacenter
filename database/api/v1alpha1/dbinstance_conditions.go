@@ -56,7 +56,7 @@ const (
 	ConditionDegraded        = "Degraded"
 	ConditionDeletionBlocked = "DeletionBlocked"
 )
-
+// Find a condition witg more reasons
 // Condition reason constants used in Conditions[].Reason and related events.
 const (
 	ReasonFinalizerAdded              ConditionReason = "FinalizerAdded"

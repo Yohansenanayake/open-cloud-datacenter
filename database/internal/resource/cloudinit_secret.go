@@ -51,6 +51,7 @@ func (b CloudInitSecret) Build() (client.Object, error) {
 	}}, nil
 }
 
+// Defines the desired state of the Secret.
 func (b CloudInitSecret) Update(obj client.Object) error {
 	sec, ok := obj.(*corev1.Secret)
 	if !ok {

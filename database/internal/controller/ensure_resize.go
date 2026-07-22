@@ -95,7 +95,7 @@ func observeShapeDrift(vm *kubevirtv1.VirtualMachine, inst *dbaasv1.DBInstance, 
 // "desired running, declared Halted" and restarts.
 //
 // This step runs before ensureDatabaseHealth, so health never gets a chance to
-// re-observe the VM while a resize holds it down — each halting branch sets
+// re-observe the VM while a resize holds VM down — each halting branch sets
 // DatabaseReady=False itself so Ready doesn't stay stale-True for the whole
 // resize window (same reasoning as the crash-loop halt in ensure_health.go).
 func (r *DBInstanceReconciler) ensureResize(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {

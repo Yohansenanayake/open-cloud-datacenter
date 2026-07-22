@@ -37,6 +37,8 @@ func (r *DBInstanceReconciler) ensureConnectionSecret(ctx context.Context, inst 
 		return pendingAfter(dbaasv1.ReasonWaitingForEndpoint, msg, credentialRequeue)
 	}
 
+	// Read the durable CA from the operator TLS Secret for publication in the
+	// connection Secret; re-observe newly created material before using it.
 	resolved, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {
 		return transient(err)

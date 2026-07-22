@@ -55,7 +55,7 @@ const (
 // steady-state liveness monitor, all from one VMI observation per pass:
 //
 //  1. while parked under CrashLoopHalted it re-probes every 30s and
-//     auto-recovers when an operator brings the VM back healthy out-of-band;
+//     auto-recovers when an administrator brings the VM back healthy out-of-band;
 //  2. otherwise, the crash-loop guard runs FIRST — a gate can never starve it;
 //  3. while catching up (observedGeneration != generation) it GATES: booting /
 //     probe-not-passing → Pending;
@@ -85,15 +85,10 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 		readiness = harvester.VMIReadiness{} // VMI object gone: boot gate / parked
 	}
 
-	// Parked under CrashLoopHalted: recovery is an out-of-band operator start.
-	// Handle the parked state before restart-counting:
-	// the recovery VMI has a new UID by definition and must get a chance to prove
-	// healthy instead of being counted as another crash-loop restart and halted
-	// immediately.
+	// Check manual recovery before restart counting so a new VMI (manually up) can prove healthy
+	// without being immediately halted again.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
-		// StopVM teardown is asynchronous, so the VMI that triggered the halt can
-		// remain fully healthy briefly. Only a different VMI UID proves that an
-		// operator started a new recovery VM out-of-band.
+		// The old VMI may remain healthy during teardown; only a new UID proves a manual recovery start.
 		recoveryVMI := readiness.VMIUID != "" && readiness.VMIUID != inst.Status.LastKnownVMIUID
 		if recoveryVMI && readiness.Running && readiness.Ready && readiness.AgentConnected && readiness.IP != "" {
 			if err := r.Harvester.ClearCrashLoopHalt(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
@@ -106,12 +101,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// unplanned restart.
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
 			inst.Status.RecentUnplannedRestarts = 0
-			// Falls through rather than returning: readiness was already fetched
-			// once above and just proved fully healthy, so the checks below
-			// (using that same snapshot) re-derive Endpoint/DatabaseReady/Phase in
-			// this same pass instead of wasting a reconcile on a "Recovering"
-			// state no observer could ever reliably catch. The Recorder event
-			// above is the durable record that a recovery happened.
+			// Fall through with the healthy VMI snapshot to update endpoint and readiness now.
 		} else if recoveryVMI && readiness.Running && readiness.Ready && readiness.AgentConnected {
 			msg := "recovery VM healthy; waiting for data-net IP"
 			return pendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
@@ -128,9 +118,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 
 	port := specPort(inst.Spec.Port)
 
-	// While catching up (spec change / provisioning in flight) the step GATES so
-	// downstream steps and Ready wait for real readiness. Once caught up, blips
-	// are report-only (below) so the pass always finishes.
+	// Readiness gates booting / change in flight instances; steady state failures are report-only.
 	caughtUp := inst.Status.ObservedGeneration == inst.Generation
 
 	if !readiness.Running || readiness.IP == "" {
@@ -229,17 +217,9 @@ func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.
 	return pendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue), true
 }
 
-// reportDegraded records a report-only degradation on a caught-up instance.
-//
-// ASSUMPTION (must hold for this design): our readiness probe is an Exec probe,
-// which KubeVirt runs *inside the guest via the qemu-guest-agent*. So when
-// AgentConnected=False the probe physically cannot execute, KubeVirt scores those
-// attempts as failures, and Ready flips False after FailureThreshold. We therefore
-// treat Ready as the single health signal and use AgentConnected / Running only to
-// *attribute* a failure, never as separately-debounced signals. If a future
-// KubeVirt version froze Ready stale-True (or "Unknown") on agent loss instead of
-// failing the probe, this would under-report a pure guest-agent outage and would
-// need an AgentConnected-based debounce of its own.
+// reportDegraded records caught-up failures without blocking reconciliation.
+// VMI Ready is authoritative because its exec probe fails on guest-agent loss;
+// Running and AgentConnected only attribute the cause.
 func (r *DBInstanceReconciler) reportDegraded(inst *dbaasv1.DBInstance, readiness harvester.VMIReadiness) {
 	reason := dbaasv1.ReasonPostgresUnreachable
 	msg := "PostgreSQL readiness probe failing; database not accepting connections"

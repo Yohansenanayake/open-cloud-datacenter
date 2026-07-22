@@ -55,7 +55,7 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 	// Crash-loop halt: ensureDatabaseHealth halted the VM at detection and owns
 	// park + recovery. This step only REFUSES TO START (spec.running=true must not
 	// resurrect a crash-looper) — it must not actively stop either, because
-	// recovery is an out-of-band operator start that power would otherwise fight
+	// recovery starts through manual administrator action that power would otherwise fight
 	// before health can observe it healthy. Satisfied lets the pass reach health.
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		setStepCond(inst, dbaasv1.ConditionPowerStateReady, metav1.ConditionFalse,
@@ -79,13 +79,13 @@ func (r *DBInstanceReconciler) ensurePowerState(ctx context.Context, inst *dbaas
 		if !apierrors.IsNotFound(err) {
 			return transient(err)
 		}
-		//VMI is gone (not found) - treat as stopped.
+		// An absent VMI is the runtime representation of a fully stopped VM. Zero value represents that.
 		readiness = harvester.VMIReadiness{}
 	}
 
 	// Normally the persisted CrashLoopHalted condition returns above. This annotation
 	// recovers that status if the VM halt succeeded but its status write did not;
-	// its VMI UID also prevents health from mistaking teardown for recovery.
+	// its VMI UID also prevents health step from mistaking teardown for recovery.
 	if haltedVMIUID := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; haltedVMIUID != "" {
 		msg := "VM halted after repeated unplanned restarts; manual intervention required"
 		inst.Status.LastKnownVMIUID = haltedVMIUID

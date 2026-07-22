@@ -82,6 +82,7 @@ func (r *DBInstanceReconciler) ensureVM(ctx context.Context, inst *dbaasv1.DBIns
 	err := r.Get(ctx, types.NamespacedName{Namespace: inst.Namespace, Name: vmName}, &vm)
 	switch {
 	case err == nil:
+		//TODO:
 		// Observed == desired: the VM object exists. Re-record the ref for
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName
@@ -125,7 +126,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 	osImage := inst.Spec.OSImage
 	if osImage == "" {
 		osImage = defaultOSImage
-	}
+	} // Do we need this OS Validation?
 	storageType := inst.Spec.StorageType
 	if storageType == "" {
 		storageType = defaultStorageType
@@ -200,7 +201,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		OSImage:        osImage,
 		DBName:         dbName,
 		MasterUsername: masterUser,
-		EngineVersion:  inst.Spec.EngineVersion,
+		EngineVersion:  inst.Spec.EngineVersion, // In Image Baking features, this will be removed
 		Port:           specPort(inst.Spec.Port),
 		StorageType:    storageType,
 		VMPassword:     inst.Spec.VMPassword,
@@ -209,8 +210,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 	setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionFalse,
 		dbaasv1.ReasonVMCreated, "created virtualmachine, waiting for it to register")
 
-	// Event-driven Pending: this pass changed status (Resources/conditions), so the
-	// status patch re-triggers a reconcile immediately; the VMI watch covers boot
-	// progress after that. No timer needed.
+	// Stop this pass so the next one observes the new VM before later steps run.
+	// VM watch events and status events requeue reconciliation; VMI events cover boot progress.
 	return pending(dbaasv1.ReasonVMCreated, "created virtualmachine")
 }

@@ -62,7 +62,7 @@ func (b MetricsService) Update(obj client.Object) error {
 	}
 	svc.Spec.Type = corev1.ServiceTypeClusterIP
 	// Headless is a create-time decision: clusterIP is immutable and
-	// server-owned after creation, so only assert it on a new object.
+	// server-owned after creation, so only assert headless on a new object.
 	if svc.ResourceVersion == "" {
 		svc.Spec.ClusterIP = corev1.ClusterIPNone
 	}

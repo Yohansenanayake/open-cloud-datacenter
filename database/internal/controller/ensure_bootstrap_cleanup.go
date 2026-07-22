@@ -34,28 +34,7 @@ const redactedCloudInitUserData = "#cloud-config\n{}\n"
 // ensureBootstrapCleanup redacts the sensitive half of the ephemeral
 // cloud-init Secret once the database is provably up. It does NOT delete the
 // Secret and does NOT touch the VM.
-//
-// It used to delete the Secret outright (and strip the disk reference from
-// the VM template first, to keep a future VMI restart from trying to mount
-// a Secret that was about to disappear). That broke in practice: a live
-// VMI/pod's mounted volumes are immutable — patching the VM template never
-// affects the *already-running* pod, only some hypothetical future VMI
-// generation. So the running pod kept referencing the cloud-init volume for
-// its whole life, and once the Secret was deleted, kubelet's periodic
-// Secret-volume re-sync kept failing with FailedMount for as long as that
-// pod lived (harmless to the already-mounted data, but noisy indefinitely).
-//
-// Redacting in place instead: `userdata` carries the actual sensitive
-// bootstrap material (admin/repl/exporter passwords, TLS private key) via
-// cloud-init's runcmd/write_files modules, which run at the default
-// once-per-instance frequency — provably never re-consulted on a
-// same-instance reboot, so blanking it is safe. `networkdata` (netplan
-// config) is left byte-for-byte correct: cloud-init's network stage is one
-// of the few that commonly runs on every boot, so its content is kept valid
-// rather than risking a future boot losing static IP/gateway/DNS config.
-// The Secret object itself is never deleted, so there's nothing left for
-// kubelet to fail to mount, ever.
-//
+
 // A create/update stops the pass so the next reconcile re-observes the
 // persisted redaction. Once the Secret is unchanged, the step is Satisfied and
 // generation reconciliation may continue.
