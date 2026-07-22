@@ -47,8 +47,11 @@ import (
 // can't drift apart over time. A change here should be rare and accompanied
 // by docs/USAGE updates. (Crash-loop detection constants live with their
 // logic in ensure_health.go.)
+
+// controller config mangement methods (Env,)
+// Put ensure steps to a seperate package
 const (
-	defaultOSImage     = "ubuntu-22.04-server-cloudimg-amd64.img"
+	defaultOSImage     = "ubuntu-22.04-server-cloudimg-amd64.img" //remove this
 	defaultStorageType = "longhorn"
 	defaultMasterUser  = "dbadmin"
 	defaultPort        = 5432
@@ -111,6 +114,15 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	logger.Info("Reconciling", "name", inst.Name, "phase", inst.Status.Phase)
+	// use defer statement to patch status
+
+
+
+	/* defer func() {
+		if err := r.patchStatusIfChanged(ctx, &inst, &inst); err != nil {
+			logger.Error(err, "Failed to patch status")
+		}
+	}() */
 
 	// --- Handle deletion via finalizer ---
 	if !inst.DeletionTimestamp.IsZero() {

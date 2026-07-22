@@ -30,6 +30,10 @@ import (
 // pre-dispatch for this, matching every other concern in the chain. Finalizer
 // presence is already authoritative in metadata, so this short-lived transition
 // deliberately does not add a duplicate status condition.
+
+
+
+// Take this out to reconcile Loop
 func (r *DBInstanceReconciler) ensureFinalizer(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
 	if controllerutil.ContainsFinalizer(inst, dbaasv1.FinalizerName) {
 		return satisfied()

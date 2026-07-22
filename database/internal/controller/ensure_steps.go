@@ -30,6 +30,8 @@ import (
 // ensureStep is one idempotent unit of the bounded reconcile runner. Each step
 // observes real cluster/provider state, diffs it against desired, and returns a
 // StepResult — it never consults a status flag as its memory of past actions.
+
+// can be an interface
 type ensureStep struct {
 	name string
 	run  func(ctx context.Context, inst *dbaasv1.DBInstance) StepResult
@@ -105,6 +107,7 @@ func (r *DBInstanceReconciler) runEnsureSteps(ctx context.Context, inst *dbaasv1
 		case OutcomeSatisfied:
 			continue
 		case OutcomePending, OutcomeTerminal, OutcomeTransient:
+			// use log levels 
 			logger.V(1).Info("Ensure step stopped","step", step.name,"outcome", res.Outcome,"reason", res.Reason,"message", res.Message,"requeueAfter", res.Result.RequeueAfter,"error", res.Err)
 			return res
 		default:
