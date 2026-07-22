@@ -71,7 +71,6 @@ func (r *DBInstanceReconciler) reconcileInstance(ctx context.Context, inst *dbaa
 // Halted" and restarts. No cross-step coupling or persisted operation state.
 func (r *DBInstanceReconciler) instanceEnsureSteps() []ensureStep {
 	return []ensureStep{
-		{"finalizer", r.ensureFinalizer},
 		{"preflight", r.ensurePreflight},
 		{"credentials", r.ensureCredentials},
 		{"vm", r.ensureVM},

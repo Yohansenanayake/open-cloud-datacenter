@@ -116,8 +116,6 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	logger.Info("Reconciling", "name", inst.Name, "phase", inst.Status.Phase)
 	// use defer statement to patch status
 
-
-
 	/* defer func() {
 		if err := r.patchStatusIfChanged(ctx, &inst, &inst); err != nil {
 			logger.Error(err, "Failed to patch status")
@@ -132,12 +130,21 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	// Add the cleanup finalizer before creating any child resources. Updating the
+	// DBInstance generates a watch event, so no explicit requeue is necessary.
+	if !controllerutil.ContainsFinalizer(&inst, dbaasv1.FinalizerName) {
+		controllerutil.AddFinalizer(&inst, dbaasv1.FinalizerName)
+		if err := r.Update(ctx, &inst); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Every DBInstance, in every state, runs the same bounded ensure-step
 	// runner — there's no separate dispatch for provisioning vs. steady-state
-	// vs. crash-loop-parked, including finalizer add: ensureFinalizer (first
-	// in the chain) handles that on the very first pass. Steady-state
-	// liveness, crash-loop halt/park/recovery, and Degraded reporting live in
-	// ensureDatabaseHealth; bootstrap cleanup in ensureBootstrapCleanup.
+	// vs. crash-loop-parked. Steady-state liveness, crash-loop halt/park/recovery,
+	// and Degraded reporting live in ensureDatabaseHealth; bootstrap cleanup in
+	// ensureBootstrapCleanup.
 	// Steady state is event-driven off the VMI watch: an all-Satisfied pass
 	// writes nothing (DeepEqual skip) and requeues nothing.
 	return r.reconcileInstance(ctx, &inst)
