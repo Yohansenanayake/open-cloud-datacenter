@@ -56,6 +56,7 @@ const (
 	ConditionDegraded        = "Degraded"
 	ConditionDeletionBlocked = "DeletionBlocked"
 )
+
 // Find a condition witg more reasons
 // Condition reason constants used in Conditions[].Reason and related events.
 const (
@@ -179,6 +180,23 @@ func (s *DBInstanceStatus) SetCondition(c metav1.Condition) {
 	meta.SetStatusCondition(&s.Conditions, c)
 }
 
+// SetCurrentCondition adds or updates a condition for the DBInstance's current
+// generation.
+func (in *DBInstance) SetCurrentCondition(conditionType string, status metav1.ConditionStatus, reason ConditionReason, message string) {
+	in.Status.SetCondition(metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             string(reason),
+		Message:            message,
+		ObservedGeneration: in.Generation,
+	})
+}
+
+// RemoveCondition removes a condition by type.
+func (s *DBInstanceStatus) RemoveCondition(conditionType string) {
+	meta.RemoveStatusCondition(&s.Conditions, conditionType)
+}
+
 // GetCondition returns the condition of the given type, or nil if absent.
 func (s *DBInstanceStatus) GetCondition(condType string) *metav1.Condition {
 	return meta.FindStatusCondition(s.Conditions, condType)
@@ -214,8 +232,10 @@ type PhaseSummary struct {
 	Message string
 }
 
-func desiredRunning(inst *DBInstance) bool {
-	return inst.Spec.Running == nil || *inst.Spec.Running
+// WantRunning reports the desired power state. An omitted running field
+// defaults to true.
+func (s *DBInstanceSpec) WantRunning() bool {
+	return s.Running == nil || *s.Running
 }
 
 func conditionMessage(s *DBInstanceStatus, condType, fallback string) string {
@@ -249,24 +269,24 @@ func DerivePhaseSummary(inst *DBInstance) PhaseSummary {
 		return PhaseSummary{StatusCrashLoopHalted, conditionMessage(s, ConditionCrashLoopHalted, "Crash-loop halted; operator intervention required")}
 	case s.IsCurrentConditionFalse(ConditionAccepted, inst.Generation):
 		return PhaseSummary{StatusIncompatibleParameters, conditionMessage(s, ConditionAccepted, "Current specification is not supported")}
-	case !desiredRunning(inst) && s.IsCurrentConditionFalse(ConditionPowerStateReady, inst.Generation):
+	case !inst.Spec.WantRunning() && s.IsCurrentConditionFalse(ConditionPowerStateReady, inst.Generation):
 		return PhaseSummary{StatusStopping, conditionMessage(s, ConditionPowerStateReady, "Stopping database instance")}
-	case !desiredRunning(inst) && s.IsCurrentConditionTrue(ConditionPowerStateReady, inst.Generation):
+	case !inst.Spec.WantRunning() && s.IsCurrentConditionTrue(ConditionPowerStateReady, inst.Generation):
 		return PhaseSummary{StatusStopped, conditionMessage(s, ConditionPowerStateReady, "Stopped. Storage preserved.")}
 	case s.IsConditionTrue(ConditionDegraded):
 		return PhaseSummary{StatusDegraded, conditionMessage(s, ConditionDegraded, "Database instance is degraded")}
 	case s.IsConditionTrue(ConditionResizeInProgress):
 		return PhaseSummary{StatusModifying, conditionMessage(s, ConditionResizeInProgress, "Applying database instance resize")}
-	case s.ObservedGeneration > 0 && desiredRunning(inst) &&
+	case s.ObservedGeneration > 0 && inst.Spec.WantRunning() &&
 		s.IsConditionTrue(ConditionDatabaseReady) &&
 		s.IsCurrentConditionFalse(ConditionMonitoringReady, inst.Generation) &&
 		currentConditionHasReason(s, ConditionMonitoringReady, inst.Generation, ReasonMonitoringDeployFailed):
 		return PhaseSummary{StatusDegraded, conditionMessage(s, ConditionMonitoringReady, "Database is available, but monitoring is not ready")}
-	case s.ObservedGeneration > 0 && desiredRunning(inst) &&
+	case s.ObservedGeneration > 0 && inst.Spec.WantRunning() &&
 		s.IsCurrentConditionFalse(ConditionPowerStateReady, inst.Generation) &&
 		currentConditionHasReason(s, ConditionPowerStateReady, inst.Generation, ReasonStarting, ReasonStartWaitingForTeardown):
 		return PhaseSummary{StatusStarting, conditionMessage(s, ConditionPowerStateReady, "Starting database instance")}
-	case s.ObservedGeneration > 0 && desiredRunning(inst) &&
+	case s.ObservedGeneration > 0 && inst.Spec.WantRunning() &&
 		s.IsCurrentConditionFalse(ConditionReady, inst.Generation):
 		// Power convergence is only the first half of starting a stopped
 		// instance. Keep the lifecycle phase until PostgreSQL is ready too.

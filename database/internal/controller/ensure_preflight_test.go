@@ -173,15 +173,15 @@ func TestEnsurePreflightImageFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &DBInstanceReconciler{Harvester: &stubHarvester{resolveVMImageErr: tt.err}}
+			r := &DBInstanceReconciler{Harvester: &stubHarvester{ResolveVMImageErr: tt.err}}
 			inst := newProvisionInst()
 			res := r.ensurePreflight(context.Background(), inst)
 
 			if res.Outcome != tt.outcome {
 				t.Fatalf("Outcome = %q, want %q", res.Outcome, tt.outcome)
 			}
-			if (res.Result.RequeueAfter == preflightRequeue) != tt.requeue {
-				t.Fatalf("RequeueAfter = %v, want timer=%v", res.Result.RequeueAfter, tt.requeue)
+			if (res.ControllerResult.RequeueAfter == preflightRequeue) != tt.requeue {
+				t.Fatalf("RequeueAfter = %v, want timer=%v", res.ControllerResult.RequeueAfter, tt.requeue)
 			}
 			cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
 			if cond == nil || cond.Status != tt.status || cond.Reason != string(tt.reason) {
@@ -193,7 +193,7 @@ func TestEnsurePreflightImageFailures(t *testing.T) {
 
 func TestEnsurePreflightImageAPIFailureIsTransient(t *testing.T) {
 	boom := errors.New("harvester API unavailable")
-	r := &DBInstanceReconciler{Harvester: &stubHarvester{resolveVMImageErr: boom}}
+	r := &DBInstanceReconciler{Harvester: &stubHarvester{ResolveVMImageErr: boom}}
 	inst := newProvisionInst()
 
 	res := r.ensurePreflight(context.Background(), inst)

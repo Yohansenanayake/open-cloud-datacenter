@@ -39,13 +39,13 @@ import (
 // instance under CrashLoopHalted + phase=failed.
 func TestCrashLoopHaltsAtThreshold(t *testing.T) {
 	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"},
+		Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"},
 	}
 	r, inst := newCaughtUpFixture(stub)
 	ctx := context.Background()
 
 	for i := 1; i <= crashLoopThreshold; i++ {
-		stub.readiness.VMIUID = fmt.Sprintf("vmi-uid-crash-%d", i)
+		stub.Readiness.VMIUID = fmt.Sprintf("vmi-uid-crash-%d", i)
 		res := r.ensureDatabaseHealth(ctx, inst)
 
 		if i < crashLoopThreshold {
@@ -65,8 +65,8 @@ func TestCrashLoopHaltsAtThreshold(t *testing.T) {
 		if res.Outcome != OutcomePending {
 			t.Fatalf("threshold cycle: res = %+v, want Pending", res)
 		}
-		if res.Result.RequeueAfter != crashLoopParkRequeue {
-			t.Fatalf("RequeueAfter = %v, want %v (cold park probe)", res.Result.RequeueAfter, crashLoopParkRequeue)
+		if res.ControllerResult.RequeueAfter != crashLoopParkRequeue {
+			t.Fatalf("RequeueAfter = %v, want %v (cold park probe)", res.ControllerResult.RequeueAfter, crashLoopParkRequeue)
 		}
 	}
 
@@ -97,7 +97,7 @@ func TestCrashLoopHaltsAtThreshold(t *testing.T) {
 // starts a fresh chain instead of extending the old one.
 func TestCrashLoopChainResetsAfterQuietGap(t *testing.T) {
 	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-new"},
+		Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-new"},
 	}
 	r, inst := newCaughtUpFixture(stub)
 	stale := metav1.NewTime(time.Now().Add(-crashLoopWindow - time.Minute))
@@ -202,7 +202,7 @@ func TestCrashLoopRecoversWhenHealthyOutOfBand(t *testing.T) {
 
 	// Operator starts the VM out-of-band and it comes up healthy.
 	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyAlways)
-	stub.readiness = harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-uid-recovered"}
+	stub.Readiness = harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-uid-recovered"}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("recovery reconcile error: %v", err)

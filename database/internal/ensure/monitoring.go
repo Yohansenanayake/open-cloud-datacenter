@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -31,6 +31,12 @@ import (
 
 const monitoringRequeue = 5 * time.Second
 
+type monitoringStep struct{ Dependencies }
+
+func newMonitoringStep(deps Dependencies) Step { return &monitoringStep{Dependencies: deps} }
+
+func (*monitoringStep) Name() string { return "monitoring" }
+
 // ensureMonitoring reconciles the per-instance monitoring trio — selectorless
 // metrics Service, manual Endpoints pinned to the current data-net IP, and
 // ServiceMonitor — as builder-managed, controller-owned children. Owner refs
@@ -41,21 +47,21 @@ const monitoringRequeue = 5 * time.Second
 // so the next pass re-observes the persisted trio; API failures retry through
 // controller-runtime backoff. Stopping an instance makes the scrape target
 // inactive but deliberately retains the monitoring children until deletion.
-func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *monitoringStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// Desired stopped: retain any existing monitoring children, but do not deploy
 	// or retarget them against an inactive endpoint.
-	if !wantRunning(inst) {
-		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+	if !inst.Spec.WantRunning() {
+		inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
 			dbaasv1.ReasonInstanceStopped, "monitoring target is inactive while the database instance is stopped")
-		return satisfied()
+		return Satisfied()
 	}
 
 	// Ordered after ensureDatabaseHealth, so an endpoint is normally present;
 	// defensive wait if not.
 	if inst.Status.Endpoint == nil || inst.Status.Endpoint.Address == "" {
 		msg := "waiting for database endpoint before monitoring setup"
-		setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse, dbaasv1.ReasonWaitingForEndpoint, msg)
-		return pendingAfter(dbaasv1.ReasonWaitingForEndpoint, msg, healthRequeue)
+		inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse, dbaasv1.ReasonWaitingForEndpoint, msg)
+		return PendingAfter(dbaasv1.ReasonWaitingForEndpoint, msg, healthRequeue)
 	}
 
 	builders := []resource.Builder{
@@ -68,9 +74,9 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 		op, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, b)
 		if err != nil {
 			log.FromContext(ctx).Error(err, "monitoring reconcile failed")
-			setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+			inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
 				dbaasv1.ReasonMonitoringDeployFailed, err.Error())
-			return transient(err)
+			return Transient(err)
 		}
 		if op != controllerutil.OperationResultNone {
 			changed = true
@@ -89,9 +95,9 @@ func (r *DBInstanceReconciler) ensureMonitoring(ctx context.Context, inst *dbaas
 	if changed {
 		msg = "metrics Service, Endpoints, and ServiceMonitor reconciled; waiting for observation"
 	}
-	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue, dbaasv1.ReasonMonitoringDeployed, msg)
+	inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue, dbaasv1.ReasonMonitoringDeployed, msg)
 	if changed {
-		return pendingAfter(dbaasv1.ReasonMonitoringDeployed, msg, monitoringRequeue)
+		return PendingAfter(dbaasv1.ReasonMonitoringDeployed, msg, monitoringRequeue)
 	}
-	return satisfied()
+	return Satisfied()
 }

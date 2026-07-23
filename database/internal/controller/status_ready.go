@@ -30,11 +30,11 @@ import (
 // PostgreSQL availability.
 func (r *DBInstanceReconciler) syncReadyCondition(inst *dbaasv1.DBInstance) {
 	if !inst.DeletionTimestamp.IsZero() {
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, dbaasv1.ReasonDeleting, "instance is deleting")
+		inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionFalse, dbaasv1.ReasonDeleting, "instance is deleting")
 		return
 	}
-	if !wantRunning(inst) {
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, dbaasv1.ReasonStopped, "instance is deliberately stopped")
+	if !inst.Spec.WantRunning() {
+		inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionFalse, dbaasv1.ReasonStopped, "instance is deliberately stopped")
 		return
 	}
 
@@ -49,7 +49,7 @@ func (r *DBInstanceReconciler) syncReadyCondition(inst *dbaasv1.DBInstance) {
 			}
 			msg = dbReady.Message
 		}
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, reason, msg)
+		inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionFalse, reason, msg)
 		return
 	}
 
@@ -62,9 +62,9 @@ func (r *DBInstanceReconciler) syncReadyCondition(inst *dbaasv1.DBInstance) {
 			}
 			msg = monitoringReady.Message
 		}
-		setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionFalse, reason, msg)
+		inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionFalse, reason, msg)
 		return
 	}
 
-	setStepCond(inst, dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "database and monitoring ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "database and monitoring ready")
 }

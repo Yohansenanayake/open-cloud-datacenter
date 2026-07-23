@@ -35,7 +35,11 @@ func TestProductionConditionReasonsUseConstants(t *testing.T) {
 		t.Fatal("runtime.Caller failed")
 	}
 	moduleRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	dirs := []string{filepath.Join(moduleRoot, "api", "v1alpha1"), filepath.Join(moduleRoot, "internal", "controller")}
+	dirs := []string{
+		filepath.Join(moduleRoot, "api", "v1alpha1"),
+		filepath.Join(moduleRoot, "internal", "controller"),
+		filepath.Join(moduleRoot, "internal", "ensure"),
+	}
 
 	fset := token.NewFileSet()
 	for _, dir := range dirs {
@@ -86,15 +90,18 @@ func TestProductionConditionReasonsUseConstants(t *testing.T) {
 						}
 					}
 				case *ast.CallExpr:
-					ident, ok := n.Fun.(*ast.Ident)
-					if !ok {
-						break
+					var name string
+					switch fun := n.Fun.(type) {
+					case *ast.Ident:
+						name = fun.Name
+					case *ast.SelectorExpr:
+						name = fun.Sel.Name
 					}
 					reasonArg := -1
-					switch ident.Name {
-					case "setStepCond":
-						reasonArg = 3
-					case "pending", "pendingAfter", "terminal", "terminalErr":
+					switch name {
+					case "SetCurrentCondition":
+						reasonArg = 2
+					case "Pending", "PendingAfter", "Terminal", "terminalErr":
 						reasonArg = 0
 					}
 					if reasonArg >= 0 && len(n.Args) > reasonArg {

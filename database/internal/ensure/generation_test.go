@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -24,7 +24,7 @@ import (
 )
 
 func TestMarkGenerationReconciledAdvancesObservedGeneration(t *testing.T) {
-	r := &DBInstanceReconciler{}
+	r := &testHarness{}
 	inst := newProvisionInst()
 	inst.Generation = 5
 
@@ -39,7 +39,7 @@ func TestMarkGenerationReconciledAdvancesObservedGeneration(t *testing.T) {
 }
 
 func TestMarkGenerationReconciledDoesNotModifyPhase(t *testing.T) {
-	r := &DBInstanceReconciler{}
+	r := &testHarness{}
 	inst := newProvisionInst()
 	inst.Generation = 6
 	inst.Status.Phase = dbaasv1.StatusDegraded

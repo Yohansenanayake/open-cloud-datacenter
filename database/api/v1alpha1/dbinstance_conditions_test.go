@@ -38,6 +38,29 @@ func TestSetConditionUpsert(t *testing.T) {
 	}
 }
 
+func TestCurrentConditionHelpers(t *testing.T) {
+	inst := &DBInstance{ObjectMeta: metav1.ObjectMeta{Generation: 7}}
+	inst.SetCurrentCondition(ConditionReady, metav1.ConditionTrue, ReasonDBInstanceReady, "ready")
+
+	condition := inst.Status.GetCurrentCondition(ConditionReady, 7)
+	if condition == nil || condition.Reason != string(ReasonDBInstanceReady) {
+		t.Fatalf("current Ready condition = %+v", condition)
+	}
+
+	inst.Status.RemoveCondition(ConditionReady)
+	if condition := inst.Status.GetCondition(ConditionReady); condition != nil {
+		t.Fatalf("Ready condition was not removed: %+v", condition)
+	}
+
+	if !(&DBInstanceSpec{}).WantRunning() {
+		t.Fatal("running should default to true")
+	}
+	stopped := false
+	if (&DBInstanceSpec{Running: &stopped}).WantRunning() {
+		t.Fatal("explicit running=false should be honored")
+	}
+}
+
 func TestDerivePhaseSummary(t *testing.T) {
 	running, stopped := true, false
 

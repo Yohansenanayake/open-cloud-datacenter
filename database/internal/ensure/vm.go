@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -30,6 +30,12 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
+
+type vmStep struct{ Dependencies }
+
+func newVMStep(deps Dependencies) Step { return &vmStep{Dependencies: deps} }
+
+func (*vmStep) Name() string { return "vm" }
 
 // vmNameFor returns the deterministic VM name for an instance. It matches the
 // name CreatePostgresVM derives ("pg-<id>"), preferring the recorded ref for
@@ -75,7 +81,7 @@ func ownerRefFor(inst *dbaasv1.DBInstance) *metav1.OwnerReference {
 // PostgreSQL readiness belong to ensureDatabaseHealth. This step therefore never
 // returns the timer flavor of Pending — its only Pending is the event-driven one
 // right after a create.
-func (r *DBInstanceReconciler) ensureVM(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	vmName := vmNameFor(inst)
 
 	var vm kubevirtv1.VirtualMachine
@@ -87,15 +93,15 @@ func (r *DBInstanceReconciler) ensureVM(ctx context.Context, inst *dbaasv1.DBIns
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName
 		inst.Status.Resources.DataVolumeName = dataVolumeNameFor(inst)
-		setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionTrue,
+		inst.SetCurrentCondition(dbaasv1.ConditionVMReady, metav1.ConditionTrue,
 			dbaasv1.ReasonVMPresent, "virtualmachine exists")
-		return satisfied()
+		return Satisfied()
 
 	case apierrors.IsNotFound(err):
 		return r.createVM(ctx, inst)
 
 	default:
-		return transient(err)
+		return Transient(err)
 	}
 }
 
@@ -105,14 +111,14 @@ func (r *DBInstanceReconciler) ensureVM(ctx context.Context, inst *dbaasv1.DBIns
 // rebuilt from durable Material every time this runs — so re-invoking it after
 // a partial failure or an out-of-band VM delete is safe and reproduces the
 // same VM.
-func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
 	if !ok {
 		// ensurePreflight validates this first; defensive so ensureVM alone can
 		// never create a VM from an unknown class.
 		msg := fmt.Sprintf("unknown dbInstanceClass %q", inst.Spec.DBInstanceClass)
-		setStepCond(inst, dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, msg)
-		return terminal(dbaasv1.ReasonInvalidClass, msg)
+		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, msg)
+		return Terminal(dbaasv1.ReasonInvalidClass, msg)
 	}
 
 	masterUser := inst.Spec.MasterUsername
@@ -139,11 +145,11 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 	// by ensureCredentials earlier in the step order; this re-read is cheap.
 	resolved, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {
-		return transient(err)
+		return Transient(err)
 	}
 	if resolved.Changed {
 		msg := "credential material changed unexpectedly while preparing the VM; waiting for observation"
-		return pendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
+		return PendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
 	}
 	userdata, networkdata := credentials.BuildCloudInit(credentials.BootstrapParams{
 		ID:             inst.Name,
@@ -164,7 +170,7 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		UserData:    userdata,
 		NetworkData: networkdata,
 	}); err != nil {
-		return transient(err)
+		return Transient(err)
 	}
 	inst.Status.Resources.CloudInitSecretName = cloudInitName
 
@@ -189,9 +195,9 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 	// (TeardownAll) clean up anything created before the error.
 	inst.Status.Resources.VMName = vmName
 	if err != nil {
-		setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionFalse,
+		inst.SetCurrentCondition(dbaasv1.ConditionVMReady, metav1.ConditionFalse,
 			dbaasv1.ReasonVMCreateFailed, err.Error())
-		return transient(err)
+		return Transient(err)
 	}
 
 	// Snapshot the immutable fields as applied; immutableDrift refuses later spec
@@ -207,10 +213,10 @@ func (r *DBInstanceReconciler) createVM(ctx context.Context, inst *dbaasv1.DBIns
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork.DeepCopy(),
 	}
-	setStepCond(inst, dbaasv1.ConditionVMReady, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionVMReady, metav1.ConditionFalse,
 		dbaasv1.ReasonVMCreated, "created virtualmachine, waiting for it to register")
 
 	// Stop this pass so the next one observes the new VM before later steps run.
 	// VM watch events and status events requeue reconciliation; VMI events cover boot progress.
-	return pending(dbaasv1.ReasonVMCreated, "created virtualmachine")
+	return Pending(dbaasv1.ReasonVMCreated, "created virtualmachine")
 }

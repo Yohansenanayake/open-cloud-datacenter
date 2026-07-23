@@ -63,7 +63,7 @@ func newCaughtUpFixture(stub *stubHarvester) (*DBInstanceReconciler, *dbaasv1.DB
 // touched, and the step still returns Satisfied (report-only).
 func TestHealthCaughtUpProbeFailureSetsDegraded(t *testing.T) {
 	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: true, Ready: false, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-uid-abc"},
+		Readiness: harvester.VMIReadiness{Running: true, Ready: false, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-uid-abc"},
 	}
 	r, inst := newCaughtUpFixture(stub)
 
@@ -83,14 +83,14 @@ func TestHealthCaughtUpProbeFailureSetsDegraded(t *testing.T) {
 		t.Fatal("DatabaseReady must be False while degraded")
 	}
 	if stub.StopVMCalls != 0 || stub.StartVMCalls != 0 {
-		t.Fatalf("VM must not be restarted on readiness failure (stop=%d start=%d)", stub.StopVMCalls, stub.StartVMCalls)
+		t.Fatalf("VM must not be restarted on Readiness failure (stop=%d start=%d)", stub.StopVMCalls, stub.StartVMCalls)
 	}
 }
 
 // Agent disconnect: health is UNKNOWN, not a PostgreSQL fault — attribution matters.
 func TestHealthCaughtUpAgentDisconnectAttributed(t *testing.T) {
 	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: true, Ready: false, AgentConnected: false, VMIUID: "vmi-uid-abc"},
+		Readiness: harvester.VMIReadiness{Running: true, Ready: false, AgentConnected: false, VMIUID: "vmi-uid-abc"},
 	}
 	r, inst := newCaughtUpFixture(stub)
 
@@ -110,7 +110,7 @@ func TestHealthCaughtUpAgentDisconnectAttributed(t *testing.T) {
 // A VMI that is gone entirely (out-of-band halt / mid-restart) on a caught-up
 // instance is degraded with VMRestarting attribution — still report-only.
 func TestHealthCaughtUpVMIGoneAttributedRestarting(t *testing.T) {
-	stub := &stubHarvester{} // zero readiness: not running
+	stub := &stubHarvester{} // zero Readiness: not running
 	r, inst := newCaughtUpFixture(stub)
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
@@ -129,7 +129,7 @@ func TestHealthCaughtUpVMIGoneAttributedRestarting(t *testing.T) {
 // Recovery: probe Ready again clears Degraded and republishes the endpoint.
 func TestHealthCaughtUpHealthyClearsDegraded(t *testing.T) {
 	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: true, Ready: false, AgentConnected: true, VMIUID: "vmi-uid-abc"},
+		Readiness: harvester.VMIReadiness{Running: true, Ready: false, AgentConnected: true, VMIUID: "vmi-uid-abc"},
 	}
 	r, inst := newCaughtUpFixture(stub)
 	ctx := context.Background()
@@ -138,10 +138,10 @@ func TestHealthCaughtUpHealthyClearsDegraded(t *testing.T) {
 		t.Fatalf("degraded cycle: %+v", res)
 	}
 	if degradedReason(inst) == "" {
-		t.Fatal("Degraded condition not set after readiness failure")
+		t.Fatal("Degraded condition not set after Readiness failure")
 	}
 
-	stub.readiness = harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-uid-abc"}
+	stub.Readiness = harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-uid-abc"}
 	res := r.ensureDatabaseHealth(ctx, inst)
 
 	if res.Outcome != OutcomeSatisfied {
@@ -163,9 +163,9 @@ func TestHealthCaughtUpHealthyClearsDegraded(t *testing.T) {
 
 // RF-3 regression, PR6 shape: a failed VMI fetch is not a health signal. The
 // step returns Transient (taxonomy §8.2 — backoff) but must not flip Degraded
-// from the zero-value readiness and must not touch the VM.
+// from the zero-value Readiness and must not touch the VM.
 func TestHealthReadinessFetchErrorIsTransientAndLeavesConditionsUntouched(t *testing.T) {
-	stub := &stubHarvester{readinessErr: errors.New("apiserver timeout")}
+	stub := &stubHarvester{ReadinessErr: errors.New("apiserver timeout")}
 	r, inst := newCaughtUpFixture(stub)
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
@@ -185,7 +185,7 @@ func TestHealthReadinessFetchErrorIsTransientAndLeavesConditionsUntouched(t *tes
 // instance: counted, reported as degraded, absorbed — never a gate, never a fail.
 func TestHealthCaughtUpRestartBelowThresholdAbsorbed(t *testing.T) {
 	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: false, VMIUID: "vmi-uid-new"}, // rebooting under a fresh UID
+		Readiness: harvester.VMIReadiness{Running: false, VMIUID: "vmi-uid-new"}, // rebooting under a fresh UID
 	}
 	r, inst := newCaughtUpFixture(stub)
 

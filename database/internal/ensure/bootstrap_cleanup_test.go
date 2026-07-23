@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -28,9 +28,9 @@ import (
 func TestEnsureBootstrapCleanupDefersUntilDatabaseReady(t *testing.T) {
 	inst := newProvisionInst()
 	inst.Status.Resources.CloudInitSecretName = "pg-orders-cloudinit"
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonPostgresInitializing, "initializing")
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonPostgresInitializing, "initializing")
 
-	res := (&DBInstanceReconciler{}).ensureBootstrapCleanup(context.Background(), inst)
+	res := (&testHarness{}).ensureBootstrapCleanup(context.Background(), inst)
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
@@ -38,9 +38,9 @@ func TestEnsureBootstrapCleanupDefersUntilDatabaseReady(t *testing.T) {
 
 func TestEnsureBootstrapCleanupSatisfiedWhenNothingToScrub(t *testing.T) {
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
 
-	res := (&DBInstanceReconciler{}).ensureBootstrapCleanup(context.Background(), inst)
+	res := (&testHarness{}).ensureBootstrapCleanup(context.Background(), inst)
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}

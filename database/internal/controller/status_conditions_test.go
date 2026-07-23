@@ -60,7 +60,7 @@ func TestSyncAcceptedConditionTruthTable(t *testing.T) {
 
 func TestFinalizeStatusAggregatesIntervention(t *testing.T) {
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, "halted")
+	inst.SetCurrentCondition(dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, "halted")
 
 	(&DBInstanceReconciler{}).finalizeStatus(inst)
 

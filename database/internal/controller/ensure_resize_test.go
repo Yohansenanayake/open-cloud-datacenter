@@ -29,15 +29,15 @@ import (
 
 // newResizeFixture: the VM in the cluster is shaped db.t3.small/20Gi; the test
 // varies the *spec* (class/storage) to create drift, plus the VM's runStrategy
-// and observed readiness to walk the cold-resize sequence.
-func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.VirtualMachineRunStrategy, readiness harvester.VMIReadiness) (*DBInstanceReconciler, *dbaasv1.DBInstance, *stubHarvester) {
+// and observed Readiness to walk the cold-resize sequence.
+func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.VirtualMachineRunStrategy, Readiness harvester.VMIReadiness) (*DBInstanceReconciler, *dbaasv1.DBInstance, *stubHarvester) {
 	t.Helper()
 	inst := newProvisionInst()
 	inst.Spec.DBInstanceClass = class
 	inst.Spec.AllocatedStorage = storageGB
 	inst.Status.Resources.VMName = "pg-orders"
 	inst.Status.Resources.DataVolumeName = "pg-orders-data"
-	stub := &stubHarvester{readiness: readiness}
+	stub := &stubHarvester{Readiness: Readiness}
 	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-data", rs)
 	r := newProvisionReconciler(t, stub, inst, vm)
 	return r, inst, stub
@@ -45,7 +45,7 @@ func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.V
 
 func TestEnsureStorageResizeNoDriftSatisfied(t *testing.T) {
 	r, inst, stub := newResizeFixture(t, "db.t3.small", 20, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
-	setStepCond(inst, dbaasv1.ConditionStorageChangeRejected, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionStorageChangeRejected, metav1.ConditionTrue,
 		dbaasv1.ReasonUnsupportedShrink, "previous rejection")
 
 	res := r.ensureResize(context.Background(), inst)
@@ -69,9 +69,9 @@ func TestEnsureStorageResizeNoDriftSatisfied(t *testing.T) {
 
 func TestEnsureStorageResizeKeepsActivityUntilDatabaseRecovers(t *testing.T) {
 	r, inst, _ := newResizeFixture(t, "db.t3.small", 20, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
-	setStepCond(inst, dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionResizeInProgress, metav1.ConditionTrue,
 		dbaasv1.ReasonResizeApplied, "resize applied")
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
 		dbaasv1.ReasonVMBooting, "VM booting")
 
 	if res := r.ensureResize(context.Background(), inst); res.Outcome != OutcomeSatisfied {
@@ -85,13 +85,13 @@ func TestEnsureStorageResizeKeepsActivityUntilDatabaseRecovers(t *testing.T) {
 		t.Fatalf("phase = %q, want %q while database is recovering", inst.Status.Phase, dbaasv1.StatusModifying)
 	}
 
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
 		dbaasv1.ReasonPostgresReady, "PostgreSQL is ready")
-	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue,
 		dbaasv1.ReasonMonitoringDeployed, "monitoring ready")
 	r.finalizeStatus(inst)
 	if inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress) != nil {
-		t.Fatal("ResizeInProgress must be removed after shape and database readiness converge")
+		t.Fatal("ResizeInProgress must be removed after shape and database Readiness converge")
 	}
 	if inst.Status.Phase != dbaasv1.StatusAvailable {
 		t.Fatalf("phase = %q, want %q after resize completion", inst.Status.Phase, dbaasv1.StatusAvailable)

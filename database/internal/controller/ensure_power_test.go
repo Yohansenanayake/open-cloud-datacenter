@@ -33,14 +33,14 @@ import (
 )
 
 // newPowerFixture builds a reconciler + instance around a shaped VM with the
-// given runStrategy and observed VMI readiness.
-func newPowerFixture(t *testing.T, running bool, rs kubevirtv1.VirtualMachineRunStrategy, readiness harvester.VMIReadiness) (*DBInstanceReconciler, *dbaasv1.DBInstance, *stubHarvester) {
+// given runStrategy and observed VMI Readiness.
+func newPowerFixture(t *testing.T, running bool, rs kubevirtv1.VirtualMachineRunStrategy, Readiness harvester.VMIReadiness) (*DBInstanceReconciler, *dbaasv1.DBInstance, *stubHarvester) {
 	t.Helper()
 	inst := newProvisionInst()
 	inst.Spec.Running = &running
 	inst.Status.Resources.VMName = "pg-orders"
 	inst.Status.Resources.DataVolumeName = "pg-orders-data"
-	stub := &stubHarvester{readiness: readiness}
+	stub := &stubHarvester{Readiness: Readiness}
 	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-data", rs)
 	r := newProvisionReconciler(t, stub, inst, vm)
 	return r, inst, stub
@@ -100,8 +100,8 @@ func TestEnsurePowerStateStartWaitsForTeardown(t *testing.T) {
 	if res.Outcome != OutcomePending {
 		t.Fatalf("res = %+v, want Pending", res)
 	}
-	if res.Result.RequeueAfter != powerRequeue {
-		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, powerRequeue)
+	if res.ControllerResult.RequeueAfter != powerRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v", res.ControllerResult.RequeueAfter, powerRequeue)
 	}
 	if stub.StartVMCalls != 0 {
 		t.Fatalf("StartVMCalls = %d, want 0 while VMI still running", stub.StartVMCalls)
@@ -122,7 +122,7 @@ func TestEnsurePowerStateWaitsForBoot(t *testing.T) {
 	if res.Outcome != OutcomePending {
 		t.Fatalf("res = %+v, want Pending (boot wait)", res)
 	}
-	if res.Result.RequeueAfter == 0 {
+	if res.ControllerResult.RequeueAfter == 0 {
 		t.Fatal("boot wait must carry a timer fallback")
 	}
 	if stub.StartVMCalls != 0 {
@@ -137,7 +137,7 @@ func TestEnsurePowerStateWaitsForBoot(t *testing.T) {
 func TestEnsurePowerStateStopsRunningVM(t *testing.T) {
 	r, inst, stub := newPowerFixture(t, false, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	// Was Available immediately before the stop request — DatabaseReady starts True.
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
 
 	res := r.ensurePowerState(context.Background(), inst)
 
@@ -164,7 +164,7 @@ func TestEnsurePowerStateStopsRunningVM(t *testing.T) {
 // waits for the VMI to disappear.
 func TestEnsurePowerStateStopWaitsForTeardownWithoutRepeatStop(t *testing.T) {
 	r, inst, stub := newPowerFixture(t, false, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{Running: true})
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, "PostgresReady", "ready")
 
 	res := r.ensurePowerState(context.Background(), inst)
 
@@ -187,8 +187,8 @@ func TestEnsurePowerStateStoppedSatisfiedAndClearsDegraded(t *testing.T) {
 	notFound := apierrors.NewNotFound(
 		schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachineinstances"}, "pg-orders")
 	r, inst, stub := newPowerFixture(t, false, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
-	stub.readinessErr = notFound // VMI object fully gone
-	setStepCond(inst, dbaasv1.ConditionDegraded, metav1.ConditionTrue, "PostgresUnreachable", "stale from running state")
+	stub.ReadinessErr = notFound // VMI object fully gone
+	inst.SetCurrentCondition(dbaasv1.ConditionDegraded, metav1.ConditionTrue, "PostgresUnreachable", "stale from running state")
 
 	res := r.ensurePowerState(context.Background(), inst)
 
@@ -210,7 +210,7 @@ func TestEnsurePowerStateStoppedSatisfiedAndClearsDegraded(t *testing.T) {
 // pass reaches health, which owns park/recovery.
 func TestEnsurePowerStateHonoursCrashLoopHalt(t *testing.T) {
 	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
-	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, "CrashLoopDetected", "3 restarts in 10m")
+	inst.SetCurrentCondition(dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, "CrashLoopDetected", "3 restarts in 10m")
 
 	res := r.ensurePowerState(context.Background(), inst)
 
@@ -264,10 +264,10 @@ func TestEnsurePowerStateRestoresCrashLoopHaltFromVMMarker(t *testing.T) {
 }
 
 func TestEnsurePowerStateRestoresMarkerForRunningRecoveryVM(t *testing.T) {
-	readiness := harvester.VMIReadiness{
+	Readiness := harvester.VMIReadiness{
 		Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-recovered",
 	}
-	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyAlways, readiness)
+	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyAlways, Readiness)
 	var vm kubevirtv1.VirtualMachine
 	key := client.ObjectKey{Namespace: inst.Namespace, Name: "pg-orders"}
 	if err := r.Get(context.Background(), key, &vm); err != nil {
@@ -302,7 +302,7 @@ func TestEnsurePowerStateRestoresMarkerForRunningRecoveryVM(t *testing.T) {
 func TestEnsurePowerStateGenericReadinessErrorIsTransient(t *testing.T) {
 	boom := errors.New("apiserver timeout")
 	r, inst, stub := newPowerFixture(t, true, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{})
-	stub.readinessErr = boom
+	stub.ReadinessErr = boom
 
 	res := r.ensurePowerState(context.Background(), inst)
 

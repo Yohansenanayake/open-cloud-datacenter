@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -29,15 +29,11 @@ import (
 
 const credentialRequeue = 5 * time.Second
 
-// credentialsResolver builds the Resolver for this pass. Cheap: no external
-// deps beyond the manager client and the configured operator namespace.
-func (r *DBInstanceReconciler) credentialsResolver() *credentials.Resolver {
-	return &credentials.Resolver{
-		Client:            r.Client,
-		Scheme:            r.Scheme(),
-		OperatorNamespace: r.operatorNamespace(),
-	}
-}
+type credentialsStep struct{ Dependencies }
+
+func newCredentialsStep(deps Dependencies) Step { return &credentialsStep{Dependencies: deps} }
+
+func (*credentialsStep) Name() string { return "credentials" }
 
 // ensureCredentials resolves the durable credential/TLS material: the
 // tenant admin-credentials Secret, and the two operator-namespace private
@@ -46,12 +42,12 @@ func (r *DBInstanceReconciler) credentialsResolver() *credentials.Resolver {
 // preserving the reuse-on-reentry invariant (a regenerated password/CA would
 // diverge from an already-booted VM). Creation stops this pass so the next pass
 // re-observes the persisted material before ensureVM is allowed to proceed.
-func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *credentialsStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	result, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {
-		setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionFalse,
+		inst.SetCurrentCondition(dbaasv1.ConditionCredentialsReady, metav1.ConditionFalse,
 			dbaasv1.ReasonCredentialsResolveFailed, err.Error())
-		return transient(err)
+		return Transient(err)
 	}
 
 	opNS := r.operatorNamespace()
@@ -60,13 +56,13 @@ func (r *DBInstanceReconciler) ensureCredentials(ctx context.Context, inst *dbaa
 	inst.Status.Resources.PrivateTLSSecretRef = fmt.Sprintf("%s/%s", opNS, credentials.TLSSecretName(inst))
 	if result.Changed {
 		msg := "credential material created; waiting for observation"
-		setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
+		inst.SetCurrentCondition(dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
 			dbaasv1.ReasonCredentialsCreated, msg)
-		// pendingAfter() is used here since cross-namespace owner references is not allowed
-		return pendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
+		// PendingAfter() is used here since cross-namespace owner references is not allowed
+		return PendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
 	}
 
-	setStepCond(inst, dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionCredentialsReady, metav1.ConditionTrue,
 		dbaasv1.ReasonCredentialsProvisioned, "admin credentials and private material observed")
-	return satisfied()
+	return Satisfied()
 }

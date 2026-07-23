@@ -110,7 +110,7 @@ func stopConverged(t *testing.T, r *DBInstanceReconciler, req ctrl.Request, stub
 
 	// Simulate StopVM's effect and the VMI finishing teardown.
 	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyHalted)
-	stub.readiness = harvester.VMIReadiness{}
+	stub.Readiness = harvester.VMIReadiness{}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("converge reconcile error: %v", err)
@@ -119,7 +119,7 @@ func stopConverged(t *testing.T, r *DBInstanceReconciler, req ctrl.Request, stub
 
 // Stopping converges to phase=stopped across observed passes.
 func TestStopConvergesToStopped(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
 	r, req := newLifecycleFixture(t, false, stub)
 
 	stopConverged(t, r, req, stub)
@@ -139,7 +139,7 @@ func TestStopConvergesToStopped(t *testing.T) {
 // Port of TestStoppedInstanceIsNotResurrected (RF-1): idle reconciles of a
 // stopped instance must not restart the VM, re-stop it, or flip the phase.
 func TestStoppedInstanceIsNotResurrected(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
 	r, req := newLifecycleFixture(t, false, stub)
 	ctx := context.Background()
 
@@ -165,7 +165,7 @@ func TestStoppedInstanceIsNotResurrected(t *testing.T) {
 // the UID baseline (planned start), and converges to available only after the
 // health gate passes — not immediately.
 func TestStartReentersChainAndConverges(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
 	r, req := newLifecycleFixture(t, false, stub)
 	ctx := context.Background()
 
@@ -199,7 +199,7 @@ func TestStartReentersChainAndConverges(t *testing.T) {
 	// but PostgreSQL not being ready yet. An established instance must stay in
 	// Starting rather than falling back to Creating after power converges.
 	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyAlways)
-	stub.readiness = harvester.VMIReadiness{Running: true, IP: "192.168.40.50", AgentConnected: true, VMIUID: "vmi-uid-new"}
+	stub.Readiness = harvester.VMIReadiness{Running: true, IP: "192.168.40.50", AgentConnected: true, VMIUID: "vmi-uid-new"}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("database recovery reconcile error: %v", err)
@@ -209,7 +209,7 @@ func TestStartReentersChainAndConverges(t *testing.T) {
 		t.Fatalf("phase = %q, want starting while PostgreSQL initializes", inst.Status.Phase)
 	}
 
-	stub.readiness.Ready = true
+	stub.Readiness.Ready = true
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("converge reconcile error: %v", err)
@@ -226,7 +226,7 @@ func TestStartReentersChainAndConverges(t *testing.T) {
 // Port of TestStartWaitsForVMITeardown: StartVM must not be called while the
 // previous VMI still exists (the start subresource would reject it).
 func TestStartWaitsForVMITeardown(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}
 	r, req := newLifecycleFixture(t, false, stub)
 	ctx := context.Background()
 
@@ -251,7 +251,7 @@ func TestStartWaitsForVMITeardown(t *testing.T) {
 	}
 
 	// VMI finishes terminating — next reconcile starts the VM.
-	stub.readiness = harvester.VMIReadiness{}
+	stub.Readiness = harvester.VMIReadiness{}
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("second start reconcile error: %v", err)
 	}

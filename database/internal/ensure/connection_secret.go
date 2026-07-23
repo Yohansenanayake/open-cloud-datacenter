@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -25,27 +25,35 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
+type connectionSecretStep struct{ Dependencies }
+
+func newConnectionSecretStep(deps Dependencies) Step {
+	return &connectionSecretStep{Dependencies: deps}
+}
+
+func (*connectionSecretStep) Name() string { return "connection-secret" }
+
 // ensureConnectionSecret publishes the endpoint-dependent tenant connection
 // contract after database health has established a reachable address. It is a
 // guaranteed bounded step: a create/update stops this pass and API failures
 // retry through controller-runtime backoff. The durable user-facing state is
 // status.resources.connectionSecretName and the Secret itself; the one-pass
 // create/update transition deliberately does not add another readiness condition.
-func (r *DBInstanceReconciler) ensureConnectionSecret(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *connectionSecretStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	if inst.Status.Endpoint == nil || inst.Status.Endpoint.Address == "" {
 		msg := "waiting for database endpoint before connection secret setup"
-		return pendingAfter(dbaasv1.ReasonWaitingForEndpoint, msg, credentialRequeue)
+		return PendingAfter(dbaasv1.ReasonWaitingForEndpoint, msg, credentialRequeue)
 	}
 
 	// Read the durable CA from the operator TLS Secret for publication in the
 	// connection Secret; re-observe newly created material before using it.
 	resolved, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {
-		return transient(err)
+		return Transient(err)
 	}
 	if resolved.Changed {
 		msg := "credential material changed while reconciling the connection secret; waiting for observation"
-		return pendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
+		return PendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
 	}
 
 	dbName := inst.Spec.DBName
@@ -60,12 +68,12 @@ func (r *DBInstanceReconciler) ensureConnectionSecret(ctx context.Context, inst 
 		CACertPEM: resolved.Material.TLS.CACertPEM,
 	})
 	if err != nil {
-		return transient(err)
+		return Transient(err)
 	}
 	inst.Status.Resources.ConnectionSecretName = resource.ConnectionSecretName(inst)
 	if op != controllerutil.OperationResultNone {
 		msg := "tenant connection secret reconciled; waiting for observation"
-		return pendingAfter(dbaasv1.ReasonConnectionSecretReconciled, msg, credentialRequeue)
+		return PendingAfter(dbaasv1.ReasonConnectionSecretReconciled, msg, credentialRequeue)
 	}
-	return satisfied()
+	return Satisfied()
 }

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -51,6 +51,12 @@ const (
 	crashLoopWindow    = 10 * time.Minute // max gap between restarts to extend the chain
 )
 
+type healthStep struct{ Dependencies }
+
+func newHealthStep(deps Dependencies) Step { return &healthStep{Dependencies: deps} }
+
+func (*healthStep) Name() string { return "health" }
+
 // ensureDatabaseHealth is both the provisioning readiness gate and the
 // steady-state liveness monitor, all from one VMI observation per pass:
 //
@@ -67,12 +73,12 @@ const (
 // the guest agent, already debounced by its FailureThreshold) is authoritative,
 // and the controller never restarts on readiness failure — the only
 // controller-initiated halt is the crash-loop guard.
-func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *dbaasv1.DBInstance) StepResult {
+func (r *healthStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// Desired stopped: there is nothing to gate on
-	if !wantRunning(inst) {
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+	if !inst.Spec.WantRunning() {
+		inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
 			dbaasv1.ReasonStopped, "instance is stopped")
-		return satisfied()
+		return Satisfied()
 	}
 
 	readiness, err := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, inst.Status.Resources.VMName)
@@ -80,7 +86,7 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 		if !apierrors.IsNotFound(err) {
 			// An unobserved VMI is not a health signal: Degraded is left untouched
 			// and no VM operation is issued — the error just backs off.
-			return transient(err)
+			return Transient(err)
 		}
 		readiness = harvester.VMIReadiness{} // VMI object gone: boot gate / parked
 	}
@@ -92,11 +98,11 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 		recoveryVMI := readiness.VMIUID != "" && readiness.VMIUID != inst.Status.LastKnownVMIUID
 		if recoveryVMI && readiness.Running && readiness.Ready && readiness.AgentConnected && readiness.IP != "" {
 			if err := r.Harvester.ClearCrashLoopHalt(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
-				return transient(err)
+				return Transient(err)
 			}
 			r.Recorder.Eventf(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonRecovered),
 				"VM healthy again after crash-loop halt; resuming reconciliation")
-			removeCondition(inst, dbaasv1.ConditionCrashLoopHalted)
+			inst.Status.RemoveCondition(dbaasv1.ConditionCrashLoopHalted)
 			// Re-snapshot the recovered VMI so its UID is not counted as another
 			// unplanned restart.
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
@@ -104,10 +110,10 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 			// Fall through with the healthy VMI snapshot to update endpoint and readiness now.
 		} else if recoveryVMI && readiness.Running && readiness.Ready && readiness.AgentConnected {
 			msg := "recovery VM healthy; waiting for data-net IP"
-			return pendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
+			return PendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
 		} else {
 			msg := "crash-loop halted; VM kept down — start the VM out-of-band once repaired to recover"
-			return pendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue)
+			return PendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue)
 		}
 	}
 
@@ -124,26 +130,26 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 	if !readiness.Running || readiness.IP == "" {
 		if caughtUp {
 			r.reportDegraded(inst, readiness)
-			return satisfied() //Report only by design, nothing left controller can do
+			return Satisfied() //Report only by design, nothing left controller can do
 		}
 		msg := "VM booting; waiting for guest agent and data-net IP"
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonVMBooting, msg)
-		return pendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
+		inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonVMBooting, msg)
+		return PendingAfter(dbaasv1.ReasonVMBooting, msg, healthRequeue)
 	}
 
 	if !readiness.Ready {
 		if caughtUp {
 			r.reportDegraded(inst, readiness)
-			return satisfied()
+			return Satisfied()
 		}
 		msg := fmt.Sprintf("PostgreSQL initializing; readiness probe not passing at %s:%d", readiness.IP, port)
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonPostgresInitializing, msg)
-		return pendingAfter(dbaasv1.ReasonPostgresInitializing, msg, healthRequeue)
+		inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonPostgresInitializing, msg)
+		return PendingAfter(dbaasv1.ReasonPostgresInitializing, msg, healthRequeue)
 	}
 
 	// Healthy: clear any Degraded, refresh the endpoint (the data-net IP can
 	// change after a restart or live migration), report ready.
-	removeCondition(inst, dbaasv1.ConditionDegraded)
+	inst.Status.RemoveCondition(dbaasv1.ConditionDegraded)
 	dbName := inst.Spec.DBName
 	if dbName == "" {
 		dbName = inst.Name
@@ -153,9 +159,9 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 		Port:    port,
 		JDBCURL: fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-ca", readiness.IP, port, dbName),
 	}
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
 		dbaasv1.ReasonPostgresReady, "PostgreSQL is ready")
-	return satisfied()
+	return Satisfied()
 }
 
 // trackRestarts detects unplanned restarts (VMI UID changes — distinct from live
@@ -167,17 +173,17 @@ func (r *DBInstanceReconciler) ensureDatabaseHealth(ctx context.Context, inst *d
 // At the threshold the VM is halted HERE, at detection (under RunStrategyAlways
 // KubeVirt would otherwise restart it forever); ensurePowerState then refuses to
 // start it while CrashLoopHalted but never fights an out-of-band recovery start.
-func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.DBInstance, readiness harvester.VMIReadiness) (StepResult, bool) {
+func (r *healthStep) trackRestarts(ctx context.Context, inst *dbaasv1.DBInstance, readiness harvester.VMIReadiness) (Result, bool) {
 	if readiness.VMIUID == "" {
-		return StepResult{}, false
+		return Result{}, false
 	}
 	if inst.Status.LastKnownVMIUID == "" {
 		// First observation of a running VMI — snapshot the baseline.
 		inst.Status.LastKnownVMIUID = readiness.VMIUID
-		return StepResult{}, false
+		return Result{}, false
 	}
 	if inst.Status.LastKnownVMIUID == readiness.VMIUID {
-		return StepResult{}, false
+		return Result{}, false
 	}
 
 	log.FromContext(ctx).Info("unplanned VMI restart detected",
@@ -199,28 +205,28 @@ func (r *DBInstanceReconciler) trackRestarts(ctx context.Context, inst *dbaasv1.
 	inst.Status.LastUnplannedRestartTime = &now
 
 	if inst.Status.RecentUnplannedRestarts < crashLoopThreshold {
-		return StepResult{}, false // absorbed; gates/Degraded reflect the reboot
+		return Result{}, false // absorbed; gates/Degraded reflect the reboot
 	}
 
 	// Threshold reached: halt now, then park under CrashLoopHalted. If the halt
 	// fails nothing is recorded — the whole detection re-runs next pass.
 	if err := r.Harvester.StopVMForCrashLoop(ctx, inst.Namespace, inst.Status.Resources.VMName, readiness.VMIUID); err != nil {
 		log.FromContext(ctx).Error(err, "StopVMForCrashLoop failed during crash-loop halt (will retry)")
-		return transient(err), true
+		return Transient(err), true
 	}
 	msg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
 		inst.Status.RecentUnplannedRestarts, crashLoopWindow)
 	r.Recorder.Eventf(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonCrashLoopDetected), "%s", msg)
-	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, msg)
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonCrashLoopDetected, msg)
-	removeCondition(inst, dbaasv1.ConditionDegraded)
-	return pendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue), true
+	inst.SetCurrentCondition(dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue, dbaasv1.ReasonCrashLoopDetected, msg)
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonCrashLoopDetected, msg)
+	inst.Status.RemoveCondition(dbaasv1.ConditionDegraded)
+	return PendingAfter(dbaasv1.ReasonCrashLoopHalted, msg, crashLoopParkRequeue), true
 }
 
 // reportDegraded records caught-up failures without blocking reconciliation.
 // VMI Ready is authoritative because its exec probe fails on guest-agent loss;
 // Running and AgentConnected only attribute the cause.
-func (r *DBInstanceReconciler) reportDegraded(inst *dbaasv1.DBInstance, readiness harvester.VMIReadiness) {
+func (r *healthStep) reportDegraded(inst *dbaasv1.DBInstance, readiness harvester.VMIReadiness) {
 	reason := dbaasv1.ReasonPostgresUnreachable
 	msg := "PostgreSQL readiness probe failing; database not accepting connections"
 	switch {
@@ -237,6 +243,6 @@ func (r *DBInstanceReconciler) reportDegraded(inst *dbaasv1.DBInstance, readines
 	if !hasConditionReason(inst, dbaasv1.ConditionDegraded, reason) {
 		r.Recorder.Eventf(inst, corev1.EventTypeWarning, string(reason), "%s", msg)
 	}
-	setStepCond(inst, dbaasv1.ConditionDegraded, metav1.ConditionTrue, reason, msg)
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, reason, msg)
+	inst.SetCurrentCondition(dbaasv1.ConditionDegraded, metav1.ConditionTrue, reason, msg)
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, reason, msg)
 }

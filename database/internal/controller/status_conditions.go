@@ -34,12 +34,12 @@ func conditionReason(c *metav1.Condition) dbaasv1.ConditionReason {
 func (r *DBInstanceReconciler) syncAcceptedCondition(inst *dbaasv1.DBInstance) {
 	preflight := inst.Status.GetCurrentCondition(dbaasv1.ConditionPreflightReady, inst.Generation)
 	if preflight == nil || preflight.Status == metav1.ConditionUnknown {
-		setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionUnknown,
+		inst.SetCurrentCondition(dbaasv1.ConditionAccepted, metav1.ConditionUnknown,
 			dbaasv1.ReasonValidationPending, "current specification has not been fully evaluated")
 		return
 	}
 	if preflight.Status == metav1.ConditionFalse {
-		setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionFalse,
+		inst.SetCurrentCondition(dbaasv1.ConditionAccepted, metav1.ConditionFalse,
 			conditionReason(preflight), preflight.Message)
 		return
 	}
@@ -49,28 +49,28 @@ func (r *DBInstanceReconciler) syncAcceptedCondition(inst *dbaasv1.DBInstance) {
 	if rejected := inst.Status.GetCurrentCondition(dbaasv1.ConditionStorageChangeRejected, inst.Generation); rejected != nil {
 		switch rejected.Status {
 		case metav1.ConditionTrue:
-			setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionFalse,
+			inst.SetCurrentCondition(dbaasv1.ConditionAccepted, metav1.ConditionFalse,
 				conditionReason(rejected), rejected.Message)
 			return
 		case metav1.ConditionUnknown:
-			setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionUnknown,
+			inst.SetCurrentCondition(dbaasv1.ConditionAccepted, metav1.ConditionUnknown,
 				dbaasv1.ReasonValidationPending, "storage change validation is incomplete")
 			return
 		}
 	}
 
-	setStepCond(inst, dbaasv1.ConditionAccepted, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionAccepted, metav1.ConditionTrue,
 		dbaasv1.ReasonSpecAccepted, "current specification is accepted")
 }
 
 func (r *DBInstanceReconciler) syncInterventionRequiredCondition(inst *dbaasv1.DBInstance) {
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
-		setStepCond(inst, dbaasv1.ConditionInterventionRequired, metav1.ConditionTrue,
+		inst.SetCurrentCondition(dbaasv1.ConditionInterventionRequired, metav1.ConditionTrue,
 			dbaasv1.ReasonInterventionRequired,
 			conditionMessage(inst, dbaasv1.ConditionCrashLoopHalted, "operator intervention required"))
 		return
 	}
-	setStepCond(inst, dbaasv1.ConditionInterventionRequired, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionInterventionRequired, metav1.ConditionFalse,
 		dbaasv1.ReasonNoInterventionRequired, "no operator intervention required")
 }
 
@@ -85,16 +85,16 @@ func (r *DBInstanceReconciler) syncResizeInProgressCondition(inst *dbaasv1.DBIns
 		return
 	}
 
-	if wantRunning(inst) {
+	if inst.Spec.WantRunning() {
 		if inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionReady, inst.Generation) {
-			removeCondition(inst, dbaasv1.ConditionResizeInProgress)
+			inst.Status.RemoveCondition(dbaasv1.ConditionResizeInProgress)
 		}
 		return
 	}
 
 	// A User Stopped instance also can be resized
 	if inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionPowerStateReady, inst.Generation) {
-		removeCondition(inst, dbaasv1.ConditionResizeInProgress)
+		inst.Status.RemoveCondition(dbaasv1.ConditionResizeInProgress)
 	}
 }
 

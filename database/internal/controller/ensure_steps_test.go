@@ -18,47 +18,28 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"testing"
-	"time"
 
-	"github.com/harvester/harvester/pkg/util"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	dbresource "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
 )
 
 // newProvisionInst returns a DBInstance mid-provisioning: valid spec, finalizer
 // already present (Reconcile adds it pre-dispatch in production).
 func newProvisionInst() *dbaasv1.DBInstance {
-	return &dbaasv1.DBInstance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "orders",
-			Namespace:       "tenant-a",
-			UID:             "orders-uid",
-			Generation:      3,
-			Finalizers:      []string{dbaasv1.FinalizerName},
-			ResourceVersion: "1",
-		},
-		Spec: dbaasv1.DBInstanceSpec{
-			DBInstanceClass:  "db.t3.small",
-			AllocatedStorage: 20,
-			NetworkRef:       "tenant-a/data-net",
-		},
-	}
+	return testutil.NewProvisionInstance()
 }
 
 // newProvisionReconciler wires a reconciler with the dbaas + KubeVirt + core +
@@ -66,24 +47,14 @@ func newProvisionInst() *dbaasv1.DBInstance {
 // ensureMonitoring can apply its builder-managed children through the fake client.
 func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Object) *DBInstanceReconciler {
 	t.Helper()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{
-		dbaasv1.AddToScheme, kubevirtv1.AddToScheme, corev1.AddToScheme, monitoringv1.AddToScheme,
-	} {
-		if err := add(scheme); err != nil {
-			t.Fatalf("add scheme: %v", err)
-		}
-	}
-	fakeClient := ctrlfake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&dbaasv1.DBInstance{}).
-		WithObjects(objs...).
-		Build()
-	return &DBInstanceReconciler{
-		Client:         fakeClient,
+	r := &DBInstanceReconciler{
+		Client:         testutil.NewClient(t, objs...),
 		Harvester:      stub,
+		Recorder:       record.NewFakeRecorder(100),
 		GrafanaBaseURL: "https://grafana.example",
 	}
+	r.EnsureRunner = ensure.NewDefaultRunner(r.testEnsureDependencies())
+	return r
 }
 
 // testVM returns a VirtualMachine shaped the way CreatePostgresVM builds it for
@@ -91,37 +62,11 @@ func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Ob
 // resources.limits, data-disk PVC in the volumeClaimTemplates annotation. The
 // resize and power steps observe this shape.
 func testVM(name, ns string) *kubevirtv1.VirtualMachine {
-	return shapedVM(name, ns, "db.t3.small", 20, name+"-data", kubevirtv1.RunStrategyAlways)
+	return testutil.VM(name, ns)
 }
 
 func shapedVM(name, ns, class string, storageGB int, dvName string, rs kubevirtv1.VirtualMachineRunStrategy) *kubevirtv1.VirtualMachine {
-	classSpec := dbaasv1.InstanceClasses[class]
-	pvcs := []*corev1.PersistentVolumeClaim{{
-		ObjectMeta: metav1.ObjectMeta{Name: dvName},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", storageGB)),
-				},
-			},
-		},
-	}}
-	raw, _ := json.Marshal(pvcs)
-
-	vm := &kubevirtv1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   ns,
-			Annotations: map[string]string{util.AnnotationVolumeClaimTemplates: string(raw)},
-		},
-	}
-	vm.Spec.RunStrategy = &rs
-	vm.Spec.Template = &kubevirtv1.VirtualMachineInstanceTemplateSpec{}
-	vm.Spec.Template.Spec.Domain.Resources.Limits = corev1.ResourceList{
-		corev1.ResourceCPU:    *resource.NewQuantity(int64(classSpec.CPUCores), resource.DecimalSI),
-		corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", classSpec.MemoryMB)),
-	}
-	return vm
+	return testutil.ShapedVM(name, ns, class, storageGB, dvName, rs)
 }
 
 // setVMRunStrategy simulates the effect of a StartVM/StopVM provider call on the
@@ -135,56 +80,6 @@ func setVMRunStrategy(t *testing.T, c client.Client, name, ns string, rs kubevir
 	vm.Spec.RunStrategy = &rs
 	if err := c.Update(context.Background(), &vm); err != nil {
 		t.Fatalf("update vm: %v", err)
-	}
-}
-
-// --- runner mechanics (injected steps) ---
-
-func TestRunEnsureStepsStopsAtFirstNonSatisfied(t *testing.T) {
-	r := &DBInstanceReconciler{}
-	inst := &dbaasv1.DBInstance{}
-	var ran []string
-	mk := func(name string, res StepResult) ensureStep {
-		return ensureStep{name: name, run: func(context.Context, *dbaasv1.DBInstance) StepResult {
-			ran = append(ran, name)
-			return res
-		}}
-	}
-
-	steps := []ensureStep{
-		mk("a", satisfied()),
-		mk("b", pendingAfter("Waiting", "waiting", 10*time.Second)),
-		mk("c", satisfied()),
-	}
-	res := r.runEnsureSteps(context.Background(), inst, steps)
-
-	if res.Outcome != OutcomePending {
-		t.Fatalf("Outcome = %q, want %q", res.Outcome, OutcomePending)
-	}
-	if len(ran) != 2 || ran[0] != "a" || ran[1] != "b" {
-		t.Fatalf("ran = %v, want [a b] (step c must not run)", ran)
-	}
-}
-
-func TestRunEnsureStepsAllSatisfied(t *testing.T) {
-	r := &DBInstanceReconciler{}
-	ok := ensureStep{name: "ok", run: func(context.Context, *dbaasv1.DBInstance) StepResult {
-		return satisfied()
-	}}
-	res := r.runEnsureSteps(context.Background(), &dbaasv1.DBInstance{}, []ensureStep{ok, ok, ok})
-	if res.Outcome != OutcomeSatisfied {
-		t.Fatalf("Outcome = %q, want %q", res.Outcome, OutcomeSatisfied)
-	}
-}
-
-func TestRunEnsureStepsUnknownOutcomeIsTransient(t *testing.T) {
-	r := &DBInstanceReconciler{}
-	bogus := ensureStep{name: "bogus", run: func(context.Context, *dbaasv1.DBInstance) StepResult {
-		return StepResult{Outcome: StepOutcome("Bogus")}
-	}}
-	res := r.runEnsureSteps(context.Background(), &dbaasv1.DBInstance{}, []ensureStep{bogus})
-	if res.Outcome != OutcomeTransient || res.Err == nil {
-		t.Fatalf("want Transient with error, got %+v", res)
 	}
 }
 
@@ -219,7 +114,7 @@ func TestReconcileInstanceTerminalParks(t *testing.T) {
 func TestReconcileInstanceTransientReturnsError(t *testing.T) {
 	inst := newProvisionInst()
 	boom := errors.New("vmi lookup boom")
-	stub := &stubHarvester{readinessErr: boom}
+	stub := &stubHarvester{ReadinessErr: boom}
 	// VM object present so the pass reaches the health gate.
 	r := newProvisionReconciler(t, stub, inst, testVM("pg-orders", "tenant-a"))
 	convergeCredentials(t, context.Background(), r, inst)
@@ -233,7 +128,7 @@ func TestReconcileInstanceTransientReturnsError(t *testing.T) {
 func TestReconcileInstanceFullWalk(t *testing.T) {
 	ctx := context.Background()
 	inst := newProvisionInst()
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
 		Running: true,
 		IP:      "192.168.40.50",
 		Ready:   true,

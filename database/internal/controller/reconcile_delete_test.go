@@ -201,9 +201,9 @@ func TestReconcileDeleteReturnsInitialStatusPatchErrorBeforeTeardown(t *testing.
 func TestReconcileDeleteJoinsTeardownAndStatusPatchErrors(t *testing.T) {
 	ctx := context.Background()
 	inst := newDeletingInst()
-	teardownErr := errors.New("teardown failed")
+	TeardownErr := errors.New("teardown failed")
 	statusErr := errors.New("status unavailable")
-	stub := &stubHarvester{teardownErr: teardownErr}
+	stub := &stubHarvester{TeardownErr: TeardownErr}
 	r := newProvisionReconciler(t, stub, inst)
 	watchClient, ok := r.Client.(client.WithWatch)
 	if !ok {
@@ -221,7 +221,7 @@ func TestReconcileDeleteJoinsTeardownAndStatusPatchErrors(t *testing.T) {
 	})
 
 	_, err := r.reconcileDelete(ctx, inst)
-	if !errors.Is(err, teardownErr) || !errors.Is(err, statusErr) {
+	if !errors.Is(err, TeardownErr) || !errors.Is(err, statusErr) {
 		t.Fatalf("reconcileDelete error = %v, want teardown and status errors", err)
 	}
 }

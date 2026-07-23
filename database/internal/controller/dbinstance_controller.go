@@ -24,7 +24,6 @@ import (
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -39,22 +38,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
-)
-
-// Controller-side defaults for fields the user can leave blank on the
-// DBInstance spec. Centralised here so the ensure steps and immutableDrift
-// can't drift apart over time. A change here should be rare and accompanied
-// by docs/USAGE updates. (Crash-loop detection constants live with their
-// logic in ensure_health.go.)
-
-// controller config mangement methods (Env,)
-// Put ensure steps to a seperate package
-const (
-	defaultOSImage     = "ubuntu-22.04-server-cloudimg-amd64.img" //remove this
-	defaultStorageType = "longhorn"
-	defaultMasterUser  = "dbadmin"
-	defaultPort        = 5432
 )
 
 // DBInstanceReconciler reconciles DBInstance CRDs.
@@ -72,6 +57,8 @@ type DBInstanceReconciler struct {
 	// --operator-namespace flag (default POD_NAMESPACE env, fallback
 	// dbaas-system — see operatorNamespace()).
 	OperatorNamespace string
+	// EnsureRunner owns the ordered non-deletion convergence workflow.
+	EnsureRunner *ensure.Runner
 	// MaxConcurrentReconciles bounds how many DBInstances reconcile in parallel.
 	// Reconciles are serialized per object regardless, so raising this only adds
 	// cross-instance parallelism (safe). <1 is treated as 1.
@@ -150,85 +137,6 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return r.reconcileInstance(ctx, &inst)
 }
 
-// immutableDrift returns a comma-separated list of immutable spec fields
-// that have drifted from the snapshot recorded at create time, or "" if no
-// drift exists. If the snapshot is missing (older instances created before
-// the snapshot was introduced), drift is treated as zero so we don't break
-// existing deployments.
-func immutableDrift(inst *dbaasv1.DBInstance) string {
-	a := inst.Status.AppliedSpec
-	if a == nil {
-		return ""
-	}
-	osImage := inst.Spec.OSImage
-	if osImage == "" {
-		osImage = defaultOSImage
-	}
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
-	masterUser := inst.Spec.MasterUsername
-	if masterUser == "" {
-		masterUser = defaultMasterUser
-	}
-	storageType := inst.Spec.StorageType
-	if storageType == "" {
-		storageType = defaultStorageType
-	}
-	appliedOSImage := a.OSImage
-	if appliedOSImage == "" {
-		appliedOSImage = defaultOSImage
-	}
-	appliedDBName := a.DBName
-	if appliedDBName == "" {
-		appliedDBName = inst.Name
-	}
-	appliedMasterUser := a.MasterUsername
-	if appliedMasterUser == "" {
-		appliedMasterUser = defaultMasterUser
-	}
-	appliedPort := a.Port
-	if appliedPort == 0 {
-		appliedPort = defaultPort
-	}
-	appliedStorageType := a.StorageType
-	if appliedStorageType == "" {
-		appliedStorageType = defaultStorageType
-	}
-
-	var changed []string
-	if a.NetworkRef != inst.Spec.NetworkRef {
-		changed = append(changed, "networkRef")
-	}
-	if appliedOSImage != osImage {
-		changed = append(changed, "osImage")
-	}
-	if appliedDBName != dbName {
-		changed = append(changed, "dbName")
-	}
-	if appliedMasterUser != masterUser {
-		changed = append(changed, "masterUsername")
-	}
-	if a.EngineVersion != inst.Spec.EngineVersion {
-		changed = append(changed, "engineVersion")
-	}
-	port := specPort(inst.Spec.Port)
-	if appliedPort != port {
-		changed = append(changed, "port")
-	}
-	if appliedStorageType != storageType {
-		changed = append(changed, "storageType")
-	}
-	if a.VMPassword != inst.Spec.VMPassword {
-		changed = append(changed, "vmPassword")
-	}
-	if !equality.Semantic.DeepEqual(a.StaticNetwork, inst.Spec.StaticNetwork) {
-		changed = append(changed, "staticNetwork")
-	}
-	return strings.Join(changed, ",")
-}
-
 func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ns := inst.Namespace
@@ -237,7 +145,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 	original := inst.DeepCopy()
 
 	if inst.Spec.DeletionProtection {
-		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
+		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
 			dbaasv1.ReasonDeletionProtected, "Cannot delete: DeletionProtection is enabled")
 		r.finalizeStatus(inst)
 		if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
@@ -246,7 +154,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 		return ctrl.Result{}, nil
 	}
 
-	setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,
 		dbaasv1.ReasonDeletionProgressing, "Tearing down resources")
 	r.finalizeStatus(inst)
 	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
@@ -255,14 +163,14 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 
 	logger.Info("Tearing down child resources", "namespace", ns)
 	if err := r.Harvester.TeardownAll(ctx, inst.Name, ns, inst.Status.Resources); err != nil {
-		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
+		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
 			dbaasv1.ReasonTeardownFailed, fmt.Sprintf("Teardown failed, will retry: %v", err))
 		r.finalizeStatus(inst)
 		return ctrl.Result{}, goerrors.Join(err, r.patchStatusIfChanged(ctx, original, inst))
 	}
 
 	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
-		setStepCond(inst, dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
+		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
 			dbaasv1.ReasonOperatorSecretCleanupFailed, fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err))
 		r.finalizeStatus(inst)
 		return ctrl.Result{}, goerrors.Join(err, r.patchStatusIfChanged(ctx, original, inst))
@@ -330,14 +238,6 @@ func (r *DBInstanceReconciler) deleteOperatorSecrets(ctx context.Context, inst *
 // Helpers
 // ============================================================
 
-// specPort returns 5432 if port is 0, otherwise port.
-func specPort(port int) int {
-	if port == 0 {
-		return defaultPort
-	}
-	return port
-}
-
 // operatorNamespace returns the configured operator namespace, defaulting to
 // "dbaas-system" so tests and any deployment that omits the flag still work.
 func (r *DBInstanceReconciler) operatorNamespace() string {
@@ -347,31 +247,18 @@ func (r *DBInstanceReconciler) operatorNamespace() string {
 	return r.OperatorNamespace
 }
 
-// hasConditionReason reports whether a condition of condType is present, True,
-// and carries the given reason. Used to emit Warning events only on a Degraded
-// transition (entry or cause change) rather than on every reconcile.
-func hasConditionReason(inst *dbaasv1.DBInstance, condType string, reason dbaasv1.ConditionReason) bool {
-	for _, c := range inst.Status.Conditions {
-		if c.Type == condType {
-			return c.Status == metav1.ConditionTrue && c.Reason == string(reason)
-		}
-	}
-	return false
-}
-
-// removeCondition removes a condition by type from inst.Status.Conditions.
-func removeCondition(inst *dbaasv1.DBInstance, condType string) {
-	for i, c := range inst.Status.Conditions {
-		if c.Type == condType {
-			inst.Status.Conditions = append(inst.Status.Conditions[:i], inst.Status.Conditions[i+1:]...)
-			return
-		}
-	}
-}
-
 // SetupWithManager registers the reconciler with controller-runtime.
 func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
+	if r.EnsureRunner == nil {
+		r.EnsureRunner = ensure.NewDefaultRunner(ensure.Dependencies{
+			Client:            r.Client,
+			Harvester:         r.Harvester,
+			Recorder:          r.Recorder,
+			GrafanaBaseURL:    r.GrafanaBaseURL,
+			OperatorNamespace: r.operatorNamespace(),
+		})
+	}
 
 	maxConcurrent := r.MaxConcurrentReconciles
 	if maxConcurrent < 1 {

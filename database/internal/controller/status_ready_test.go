@@ -27,8 +27,8 @@ import (
 func TestSyncReadyConditionTrueWhenRequiredComponentsReady(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
-	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue, dbaasv1.ReasonMonitoringDeployed, "monitoring ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue, dbaasv1.ReasonMonitoringDeployed, "monitoring ready")
 
 	r.syncReadyCondition(inst)
 
@@ -43,7 +43,7 @@ func TestSyncReadyConditionFalseWhenStopped(t *testing.T) {
 	stopped := false
 	inst.Spec.Running = &stopped
 	// Even a stale True DatabaseReady must not leak through: wantRunning wins.
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
 
 	r.syncReadyCondition(inst)
 
@@ -59,7 +59,7 @@ func TestSyncReadyConditionFalseWhenStopped(t *testing.T) {
 func TestSyncReadyConditionMirrorsDatabaseReadyReason(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
 		dbaasv1.ReasonPostgresUnreachable, "probe failing")
 
 	r.syncReadyCondition(inst)
@@ -73,7 +73,7 @@ func TestSyncReadyConditionMirrorsDatabaseReadyReason(t *testing.T) {
 func TestSyncReadyConditionFalseWhenMonitoringReadyNeverSet(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
 
 	r.syncReadyCondition(inst)
 
@@ -86,8 +86,8 @@ func TestSyncReadyConditionFalseWhenMonitoringReadyNeverSet(t *testing.T) {
 func TestSyncReadyConditionMirrorsMonitoringFailure(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
-	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue, dbaasv1.ReasonPostgresReady, "ready")
+	inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
 		dbaasv1.ReasonMonitoringDeployFailed, "service monitor apply failed")
 
 	r.syncReadyCondition(inst)
@@ -102,9 +102,9 @@ func TestSyncReadyConditionMirrorsMonitoringFailure(t *testing.T) {
 func TestSyncReadyConditionDatabaseFailureTakesPrecedence(t *testing.T) {
 	r := &DBInstanceReconciler{}
 	inst := newProvisionInst()
-	setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse,
 		dbaasv1.ReasonPostgresUnreachable, "database probe failed")
-	setStepCond(inst, dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
+	inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionFalse,
 		dbaasv1.ReasonMonitoringDeployFailed, "monitoring failed")
 
 	r.syncReadyCondition(inst)

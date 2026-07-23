@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 
 	res := r.ensureCredentials(ctx, inst)
 
-	if res.Outcome != OutcomePending || res.Result.RequeueAfter != credentialRequeue {
+	if res.Outcome != OutcomePending || res.ControllerResult.RequeueAfter != credentialRequeue {
 		t.Fatalf("first result = %+v, want timed Pending", res)
 	}
 	refs := inst.Status.Resources
@@ -184,12 +184,12 @@ func TestEnsureConnectionSecretWaitsForEndpoint(t *testing.T) {
 	convergeCredentials(t, ctx, r, inst)
 
 	res := r.ensureConnectionSecret(ctx, inst)
-	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonWaitingForEndpoint || res.Result.RequeueAfter != credentialRequeue {
+	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonWaitingForEndpoint || res.ControllerResult.RequeueAfter != credentialRequeue {
 		t.Fatalf("result = %+v, want timed Pending/WaitingForEndpoint", res)
 	}
 }
 
-func convergeCredentials(t *testing.T, ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) {
+func convergeCredentials(t *testing.T, ctx context.Context, r *testHarness, inst *dbaasv1.DBInstance) {
 	t.Helper()
 	if res := r.ensureCredentials(ctx, inst); res.Outcome != OutcomePending {
 		t.Fatalf("credential create result = %+v, want Pending", res)
@@ -199,7 +199,7 @@ func convergeCredentials(t *testing.T, ctx context.Context, r *DBInstanceReconci
 	}
 }
 
-func convergeConnectionSecret(t *testing.T, ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) {
+func convergeConnectionSecret(t *testing.T, ctx context.Context, r *testHarness, inst *dbaasv1.DBInstance) {
 	t.Helper()
 	if res := r.ensureConnectionSecret(ctx, inst); res.Outcome != OutcomePending {
 		t.Fatalf("connection secret apply result = %+v, want Pending", res)

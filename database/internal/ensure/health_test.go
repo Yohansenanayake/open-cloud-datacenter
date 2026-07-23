@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -40,8 +40,8 @@ func newHealthInst() *dbaasv1.DBInstance {
 
 // Ported from TestPhaseWaitReadyRequeuesWhenVMINotRunning.
 func TestEnsureDatabaseHealthPendingWhileVMINotRunning(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{Running: false}}
-	r := &DBInstanceReconciler{Harvester: stub}
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{Running: false}}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
@@ -49,8 +49,8 @@ func TestEnsureDatabaseHealthPendingWhileVMINotRunning(t *testing.T) {
 	if res.Outcome != OutcomePending {
 		t.Fatalf("res = %+v, want Pending", res)
 	}
-	if res.Result.RequeueAfter != healthRequeue {
-		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
+	if res.ControllerResult.RequeueAfter != healthRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v", res.ControllerResult.RequeueAfter, healthRequeue)
 	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonVMBooting) {
@@ -65,8 +65,8 @@ func TestEnsureDatabaseHealthPendingWhileVMINotRunning(t *testing.T) {
 func TestEnsureDatabaseHealthPendingWhileVMIAbsent(t *testing.T) {
 	notFound := apierrors.NewNotFound(
 		schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachineinstances"}, "pg-orders")
-	stub := &stubHarvester{readinessErr: notFound}
-	r := &DBInstanceReconciler{Harvester: stub}
+	stub := &stubHarvester{ReadinessErr: notFound}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
@@ -82,12 +82,12 @@ func TestEnsureDatabaseHealthPendingWhileVMIAbsent(t *testing.T) {
 
 // Ported from TestPhaseWaitReadyRequeuesWhenReadinessProbeNotYetPassed.
 func TestEnsureDatabaseHealthPendingWhileProbeNotPassing(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
 		Running: true,
 		IP:      "192.168.40.50",
 		Ready:   false, // probe has not passed yet
 	}}
-	r := &DBInstanceReconciler{Harvester: stub}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
@@ -95,8 +95,8 @@ func TestEnsureDatabaseHealthPendingWhileProbeNotPassing(t *testing.T) {
 	if res.Outcome != OutcomePending {
 		t.Fatalf("res = %+v, want Pending", res)
 	}
-	if res.Result.RequeueAfter != healthRequeue {
-		t.Fatalf("RequeueAfter = %v, want %v", res.Result.RequeueAfter, healthRequeue)
+	if res.ControllerResult.RequeueAfter != healthRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v", res.ControllerResult.RequeueAfter, healthRequeue)
 	}
 	if cond := inst.Status.GetCondition(dbaasv1.ConditionDatabaseReady); cond == nil ||
 		cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonPostgresInitializing) ||
@@ -107,12 +107,12 @@ func TestEnsureDatabaseHealthPendingWhileProbeNotPassing(t *testing.T) {
 
 // Ported from TestPhaseWaitReadyAdvancesWhenBothGatesPass.
 func TestEnsureDatabaseHealthSatisfiedWhenReady(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
 		Running: true,
 		IP:      "192.168.40.50",
 		Ready:   true,
 	}}
-	r := &DBInstanceReconciler{Harvester: stub}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
@@ -133,18 +133,18 @@ func TestEnsureDatabaseHealthSatisfiedWhenReady(t *testing.T) {
 }
 
 func TestCrashLoopRecoveryWaitsForDataNetIP(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
 		Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-recovered",
 	}}
-	r := &DBInstanceReconciler{Harvester: stub}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 	inst.Status.LastKnownVMIUID = "vmi-halted"
-	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
 		dbaasv1.ReasonCrashLoopDetected, "seeded")
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Result.RequeueAfter != healthRequeue {
+	if res.Outcome != OutcomePending || res.ControllerResult.RequeueAfter != healthRequeue {
 		t.Fatalf("res = %+v, want short Pending", res)
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
@@ -153,18 +153,18 @@ func TestCrashLoopRecoveryWaitsForDataNetIP(t *testing.T) {
 }
 
 func TestCrashLoopDoesNotRecoverFromHaltedVMIStillTearingDown(t *testing.T) {
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
 		Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.4", VMIUID: "vmi-halted",
 	}}
-	r := &DBInstanceReconciler{Harvester: stub}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 	inst.Status.LastKnownVMIUID = "vmi-halted"
-	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
 		dbaasv1.ReasonCrashLoopDetected, "seeded")
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
 
-	if res.Outcome != OutcomePending || res.Result.RequeueAfter != crashLoopParkRequeue {
+	if res.Outcome != OutcomePending || res.ControllerResult.RequeueAfter != crashLoopParkRequeue {
 		t.Fatalf("res = %+v, want parked Pending", res)
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
@@ -178,15 +178,15 @@ func TestCrashLoopDoesNotRecoverFromHaltedVMIStillTearingDown(t *testing.T) {
 func TestCrashLoopRecoveryKeepsConditionWhenMarkerClearFails(t *testing.T) {
 	clearErr := errors.New("VM update failed")
 	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{
+		Readiness: harvester.VMIReadiness{
 			Running: true, Ready: true, AgentConnected: true, IP: "10.0.0.5", VMIUID: "vmi-recovered",
 		},
-		clearCrashLoopHaltErr: clearErr,
+		ClearCrashLoopHaltErr: clearErr,
 	}
-	r := &DBInstanceReconciler{Harvester: stub}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 	inst.Status.LastKnownVMIUID = "vmi-halted"
-	setStepCond(inst, dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
+	inst.SetCurrentCondition(dbaasv1.ConditionCrashLoopHalted, metav1.ConditionTrue,
 		dbaasv1.ReasonCrashLoopDetected, "seeded")
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)
@@ -199,11 +199,11 @@ func TestCrashLoopRecoveryKeepsConditionWhenMarkerClearFails(t *testing.T) {
 	}
 }
 
-// A non-NotFound readiness error is infrastructure failure, not a boot gate.
+// A non-NotFound Readiness error is infrastructure failure, not a boot gate.
 func TestEnsureDatabaseHealthGenericErrorIsTransient(t *testing.T) {
 	boom := errors.New("apiserver timeout")
-	stub := &stubHarvester{readinessErr: boom}
-	r := &DBInstanceReconciler{Harvester: stub}
+	stub := &stubHarvester{ReadinessErr: boom}
+	r := newHealthHarness(stub)
 	inst := newHealthInst()
 
 	res := r.ensureDatabaseHealth(context.Background(), inst)

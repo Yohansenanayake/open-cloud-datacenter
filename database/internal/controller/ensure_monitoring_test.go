@@ -60,7 +60,7 @@ func TestEnsureMonitoringAppliesTrioWithOwnerRefs(t *testing.T) {
 
 	res := r.ensureMonitoring(ctx, inst)
 
-	if res.Outcome != OutcomePending || res.Result.RequeueAfter != monitoringRequeue {
+	if res.Outcome != OutcomePending || res.ControllerResult.RequeueAfter != monitoringRequeue {
 		t.Fatalf("result = %+v, want timed Pending", res)
 	}
 
@@ -279,7 +279,7 @@ func TestEnsureMonitoringRetargetsEndpointsWithBoundedOutcome(t *testing.T) {
 
 func TestReconcileInstanceMonitoringFailureRetriesWithoutCompletingGeneration(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubHarvester{readiness: harvester.VMIReadiness{
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
 		Running: true, Ready: true, AgentConnected: true,
 		IP: "192.168.40.50", VMIUID: "vmi-uid-abc",
 	}}
@@ -307,6 +307,7 @@ func TestReconcileInstanceMonitoringFailureRetriesWithoutCompletingGeneration(t 
 			return c.Create(ctx, obj, opts...)
 		},
 	})
+	r.resetEnsureRunner()
 
 	if _, err := r.reconcileInstance(ctx, inst); !errors.Is(err, boom) {
 		t.Fatalf("reconcileInstance error = %v, want monitoring API error", err)

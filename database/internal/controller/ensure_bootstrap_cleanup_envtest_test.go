@@ -61,7 +61,7 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 
 		secretName := dbresource.CloudInitSecretName(inst)
 		inst.Status.Resources.CloudInitSecretName = secretName
-		setStepCond(inst, dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
+		inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
 			dbaasv1.ReasonPostgresReady, "PostgreSQL is ready")
 		key := types.NamespacedName{Namespace: inst.Namespace, Name: secretName}
 		DeferCleanup(func() {
@@ -89,7 +89,7 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 		res := r.ensureBootstrapCleanup(ctx, inst)
 		Expect(res.Outcome).To(Equal(OutcomePending))
 		Expect(res.Reason).To(Equal(dbaasv1.ReasonBootstrapCleanupReconciled))
-		Expect(res.Result.RequeueAfter).To(BeZero())
+		Expect(res.ControllerResult.RequeueAfter).To(BeZero())
 		Expect(inst.Status.Resources.CloudInitSecretName).To(Equal(key.Name))
 
 		secret := &corev1.Secret{}
@@ -115,7 +115,7 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 		secret := &corev1.Secret{}
 		Expect(k8sClient.Get(ctx, key, secret)).To(Succeed())
 		Expect(string(secret.Data["userdata"])).To(Equal(redactedCloudInitUserData))
-		Expect(res.Result.RequeueAfter).To(BeZero())
+		Expect(res.ControllerResult.RequeueAfter).To(BeZero())
 
 		res = r.ensureBootstrapCleanup(ctx, inst)
 		Expect(res.Outcome).To(Equal(OutcomeSatisfied))

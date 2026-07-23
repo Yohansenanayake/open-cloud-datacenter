@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -41,8 +41,8 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	if res.Outcome != OutcomePending {
 		t.Fatalf("res = %+v, want Pending", res)
 	}
-	if res.Result.RequeueAfter != 0 {
-		t.Fatalf("VM create must be event-driven Pending, got RequeueAfter %v", res.Result.RequeueAfter)
+	if res.ControllerResult.RequeueAfter != 0 {
+		t.Fatalf("VM create must be event-driven Pending, got RequeueAfter %v", res.ControllerResult.RequeueAfter)
 	}
 	if stub.CreateVMCalls != 1 {
 		t.Fatalf("CreateVMCalls = %d, want 1", stub.CreateVMCalls)
@@ -189,7 +189,7 @@ func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {
 
 func TestEnsureVMCreateErrorIsTransientAndRecordsRefs(t *testing.T) {
 	inst := newProvisionInst()
-	stub := &stubHarvester{createVMErr: errors.New("harvester unavailable")}
+	stub := &stubHarvester{CreateVMErr: errors.New("harvester unavailable")}
 	r := newProvisionReconciler(t, stub, inst)
 	convergeCredentials(t, context.Background(), r, inst)
 
