@@ -35,7 +35,8 @@ import (
 
 var secretBuilderSequence atomic.Int64
 
-// These specs intentionally use envtest rather than controller-runtime's fake
+// These resource-package specs intentionally share the controller envtest API
+// server rather than using controller-runtime's fake
 // client. Secret.stringData is write-only API input: the API server merges it
 // into data and omits it from reads, a behavior the fake client does not model.
 var _ = Describe("Secret builders against the API server", func() {

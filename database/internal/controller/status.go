@@ -42,7 +42,6 @@ import (
 //
 // `original` must be the DeepCopy captured at the top of Reconcile (before the
 // pass mutated inst.Status).
-// use only merge patch no need to retry , early return
 func (r *DBInstanceReconciler) patchStatusIfChanged(ctx context.Context, original, inst *dbaasv1.DBInstance) error {
 	if equality.Semantic.DeepEqual(original.Status, inst.Status) {
 		return nil
@@ -56,7 +55,6 @@ func (r *DBInstanceReconciler) patchStatusIfChanged(ctx context.Context, origina
 			return err
 		}
 		if equality.Semantic.DeepEqual(latest.Status, *desiredStatus) {
-			inst.Status = *latest.Status.DeepCopy() //redudant ? can we remove this ?
 			return nil
 		}
 

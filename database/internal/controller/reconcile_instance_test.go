@@ -43,8 +43,8 @@ func newProvisionInst() *dbaasv1.DBInstance {
 }
 
 // newProvisionReconciler wires a reconciler with the dbaas + KubeVirt + core +
-// monitoring schemes so ensureVM can observe VirtualMachine objects and
-// ensureMonitoring can apply its builder-managed children through the fake client.
+// monitoring schemes so the VM step can observe VirtualMachine objects and the
+// monitoring step can apply its builder-managed children through the fake client.
 func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Object) *DBInstanceReconciler {
 	t.Helper()
 	r := &DBInstanceReconciler{
@@ -53,7 +53,7 @@ func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Ob
 		Recorder:       record.NewFakeRecorder(100),
 		GrafanaBaseURL: "https://grafana.example",
 	}
-	r.EnsureRunner = ensure.NewDefaultRunner(r.testEnsureDependencies())
+	r.EnsureRunner = ensure.NewDefaultRunner(testEnsureDependencies(r))
 	return r
 }
 
@@ -63,10 +63,6 @@ func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Ob
 // resize and power steps observe this shape.
 func testVM(name, ns string) *kubevirtv1.VirtualMachine {
 	return testutil.VM(name, ns)
-}
-
-func shapedVM(name, ns, class string, storageGB int, dvName string, rs kubevirtv1.VirtualMachineRunStrategy) *kubevirtv1.VirtualMachine {
-	return testutil.ShapedVM(name, ns, class, storageGB, dvName, rs)
 }
 
 // setVMRunStrategy simulates the effect of a StartVM/StopVM provider call on the
@@ -83,7 +79,7 @@ func setVMRunStrategy(t *testing.T, c client.Client, name, ns string, rs kubevir
 	}
 }
 
-// --- reconcileInstance outcome→Result mapping through real scenarios ---
+// --- reconcileInstance outcome-to-Result mapping through real scenarios ---
 
 func TestReconcileInstanceTerminalParks(t *testing.T) {
 	inst := newProvisionInst()
@@ -162,7 +158,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 		t.Fatal("Ready must not be True after pass 1")
 	}
 	if cond := after1.Status.GetCondition(dbaasv1.ConditionVMReady); cond != nil {
-		t.Fatalf("VMReady condition = %+v, want absent before ensureVM runs", cond)
+		t.Fatalf("VMReady condition = %+v, want absent before the VM step runs", cond)
 	}
 
 	// Pass 2: credentials are observed, then the absent VM is created.

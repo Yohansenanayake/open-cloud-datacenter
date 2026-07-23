@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -29,10 +28,8 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
-	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
@@ -43,19 +40,9 @@ func newMonitoringInst() *dbaasv1.DBInstance {
 	return inst
 }
 
-func convergeMonitoring(t *testing.T, ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) {
-	t.Helper()
-	if res := r.ensureMonitoring(ctx, inst); res.Outcome != OutcomePending {
-		t.Fatalf("monitoring apply result = %+v, want Pending", res)
-	}
-	if res := r.ensureMonitoring(ctx, inst); res.Outcome != OutcomeSatisfied {
-		t.Fatalf("monitoring observe result = %+v, want Satisfied", res)
-	}
-}
-
 func TestEnsureMonitoringAppliesTrioWithOwnerRefs(t *testing.T) {
 	inst := newMonitoringInst()
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 	ctx := context.Background()
 
 	res := r.ensureMonitoring(ctx, inst)
@@ -109,7 +96,7 @@ func TestEnsureMonitoringAppliesTrioWithOwnerRefs(t *testing.T) {
 func TestEnsureMonitoringOmitsGrafanaURLWhenBaseUnset(t *testing.T) {
 	inst := newMonitoringInst()
 	inst.Status.GrafanaURL = "https://old.example/d/old"
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 	r.GrafanaBaseURL = ""
 
 	if res := r.ensureMonitoring(context.Background(), inst); res.Outcome != OutcomePending {
@@ -133,7 +120,7 @@ func TestEnsureMonitoringRepairsOutOfBandDeletion(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := newMonitoringInst()
-			r := newProvisionReconciler(t, &stubHarvester{}, inst)
+			r := newTestHarness(t, &stubHarvester{}, inst)
 			ctx := context.Background()
 
 			if res := r.ensureMonitoring(ctx, inst); res.Outcome != OutcomePending {
@@ -180,7 +167,11 @@ func TestEnsureMonitoringFailureIsTransient(t *testing.T) {
 		WithStatusSubresource(&dbaasv1.DBInstance{}).
 		WithObjects(inst).
 		Build()
-	r := &DBInstanceReconciler{Client: fakeClient, Harvester: &stubHarvester{}, GrafanaBaseURL: "https://grafana.example"}
+	r := &testHarness{Dependencies: Dependencies{
+		Client:         fakeClient,
+		Harvester:      &stubHarvester{},
+		GrafanaBaseURL: "https://grafana.example",
+	}}
 
 	res := r.ensureMonitoring(context.Background(), inst)
 
@@ -195,7 +186,7 @@ func TestEnsureMonitoringFailureIsTransient(t *testing.T) {
 
 func TestEnsureMonitoringWaitsForEndpoint(t *testing.T) {
 	inst := newProvisionInst() // no endpoint
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 
 	res := r.ensureMonitoring(context.Background(), inst)
 
@@ -212,7 +203,7 @@ func TestEnsureMonitoringSkipsWhenStopped(t *testing.T) {
 	inst := newMonitoringInst()
 	stopped := false
 	inst.Spec.Running = &stopped
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 	ctx := context.Background()
 
 	res := r.ensureMonitoring(ctx, inst)
@@ -228,7 +219,7 @@ func TestEnsureMonitoringSkipsWhenStopped(t *testing.T) {
 
 func TestEnsureMonitoringRetainsResourcesWhenStopped(t *testing.T) {
 	inst := newMonitoringInst()
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 	ctx := context.Background()
 
 	if res := r.ensureMonitoring(ctx, inst); res.Outcome != OutcomePending {
@@ -257,7 +248,7 @@ func TestEnsureMonitoringRetainsResourcesWhenStopped(t *testing.T) {
 
 func TestEnsureMonitoringRetargetsEndpointsWithBoundedOutcome(t *testing.T) {
 	inst := newMonitoringInst()
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 	ctx := context.Background()
 
 	if res := r.ensureMonitoring(ctx, inst); res.Outcome != OutcomePending {
@@ -274,60 +265,5 @@ func TestEnsureMonitoringRetargetsEndpointsWithBoundedOutcome(t *testing.T) {
 	}
 	if got := endpoints.Subsets[0].Addresses[0].IP; got != "192.168.40.99" {
 		t.Fatalf("Endpoints IP = %q, want 192.168.40.99", got)
-	}
-}
-
-func TestReconcileInstanceMonitoringFailureRetriesWithoutCompletingGeneration(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
-		Running: true, Ready: true, AgentConnected: true,
-		IP: "192.168.40.50", VMIUID: "vmi-uid-abc",
-	}}
-	r, _ := newLifecycleFixture(t, true, stub)
-	inst := getInst(t, r.Client)
-
-	serviceMonitor := &monitoringv1.ServiceMonitor{ObjectMeta: metav1.ObjectMeta{
-		Namespace: inst.Namespace,
-		Name:      resource.ServiceMonitorName(inst),
-	}}
-	if err := r.Delete(ctx, serviceMonitor); err != nil {
-		t.Fatalf("delete ServiceMonitor: %v", err)
-	}
-
-	watchClient, ok := r.Client.(client.WithWatch)
-	if !ok {
-		t.Fatal("fixture's fake client does not implement client.WithWatch")
-	}
-	boom := errors.New("service monitor API unavailable")
-	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
-		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, ok := obj.(*monitoringv1.ServiceMonitor); ok {
-				return boom
-			}
-			return c.Create(ctx, obj, opts...)
-		},
-	})
-	r.resetEnsureRunner()
-
-	if _, err := r.reconcileInstance(ctx, inst); !errors.Is(err, boom) {
-		t.Fatalf("reconcileInstance error = %v, want monitoring API error", err)
-	}
-	got := getInst(t, r.Client)
-	if got.Status.ObservedGeneration != 1 {
-		t.Fatalf("ObservedGeneration = %d, want prior converged generation 1", got.Status.ObservedGeneration)
-	}
-	if !got.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
-		t.Fatal("DatabaseReady should remain True when only monitoring failed")
-	}
-	if got.Status.IsConditionTrue(dbaasv1.ConditionReady) {
-		t.Fatal("aggregate Ready should be False when guaranteed monitoring failed")
-	}
-	monitoringReady := got.Status.GetCondition(dbaasv1.ConditionMonitoringReady)
-	if monitoringReady == nil || monitoringReady.Status != metav1.ConditionFalse ||
-		monitoringReady.Reason != string(dbaasv1.ReasonMonitoringDeployFailed) {
-		t.Fatalf("MonitoringReady = %+v, want False/MonitoringDeployFailed", monitoringReady)
-	}
-	if got.Status.Phase != dbaasv1.StatusDegraded {
-		t.Fatalf("Phase = %q, want %q", got.Status.Phase, dbaasv1.StatusDegraded)
 	}
 }

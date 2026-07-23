@@ -16,109 +16,20 @@ limitations under the License.
 
 package controller
 
-// Crash-loop detection, park, and recovery (PR6): condition-driven via
-// CrashLoopHalted. ensureDatabaseHealth detects (and halts at the threshold);
-// ensurePowerState refuses to start while halted; recovery is an out-of-band
+// Full-reconcile crash-loop parking and recovery (PR6): condition-driven via
+// CrashLoopHalted. The health step detects and halts at the threshold; the
+// power step refuses to start while halted; recovery is an out-of-band
 // operator start observed healthy.
 
 import (
 	"context"
-	"fmt"
 	"testing"
-	"time"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 )
-
-// KI-006 Problem A regression: under RunStrategyAlways KubeVirt auto-recovers a
-// crash-looping VM forever. A chain of crashLoopThreshold unplanned restarts
-// (UID changes), each within crashLoopWindow, must halt the VM once and park the
-// instance under CrashLoopHalted + phase=failed.
-func TestCrashLoopHaltsAtThreshold(t *testing.T) {
-	stub := &stubHarvester{
-		Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"},
-	}
-	r, inst := newCaughtUpFixture(stub)
-	ctx := context.Background()
-
-	for i := 1; i <= crashLoopThreshold; i++ {
-		stub.Readiness.VMIUID = fmt.Sprintf("vmi-uid-crash-%d", i)
-		res := r.ensureDatabaseHealth(ctx, inst)
-
-		if i < crashLoopThreshold {
-			if res.Outcome != OutcomeSatisfied {
-				t.Fatalf("cycle %d: res = %+v, want Satisfied (absorbed)", i, res)
-			}
-			if inst.Status.Phase == dbaasv1.StatusFailed {
-				t.Fatalf("cycle %d: failed before threshold", i)
-			}
-			if inst.Status.RecentUnplannedRestarts != i {
-				t.Fatalf("cycle %d: RecentUnplannedRestarts = %d, want %d", i, inst.Status.RecentUnplannedRestarts, i)
-			}
-			continue
-		}
-
-		// Threshold cycle: halt + park.
-		if res.Outcome != OutcomePending {
-			t.Fatalf("threshold cycle: res = %+v, want Pending", res)
-		}
-		if res.ControllerResult.RequeueAfter != crashLoopParkRequeue {
-			t.Fatalf("RequeueAfter = %v, want %v (cold park probe)", res.ControllerResult.RequeueAfter, crashLoopParkRequeue)
-		}
-	}
-
-	if stub.StopVMForCrashLoopCalls != 1 {
-		t.Fatalf("StopVMForCrashLoop called %d times, want 1 (halt exactly once, at detection)", stub.StopVMForCrashLoopCalls)
-	}
-	if stub.StopVMCalls != 0 {
-		t.Fatalf("plain StopVM called %d times, want 0", stub.StopVMCalls)
-	}
-	if stub.LastHaltedVMIUID != "vmi-uid-crash-3" {
-		t.Fatalf("halted VMI UID = %q, want vmi-uid-crash-3", stub.LastHaltedVMIUID)
-	}
-	if stub.StartVMCalls != 0 {
-		t.Fatalf("StartVM called %d times, want 0", stub.StartVMCalls)
-	}
-	crashLoopHalted := inst.Status.GetCondition(dbaasv1.ConditionCrashLoopHalted)
-	if crashLoopHalted == nil || crashLoopHalted.Status != metav1.ConditionTrue ||
-		crashLoopHalted.Reason != string(dbaasv1.ReasonCrashLoopDetected) {
-		t.Fatalf("CrashLoopHalted = %+v, want True/CrashLoopDetected", crashLoopHalted)
-	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusCrashLoopHalted {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusCrashLoopHalted)
-	}
-}
-
-// Window decay: an unplanned restart after more than crashLoopWindow of quiet
-// starts a fresh chain instead of extending the old one.
-func TestCrashLoopChainResetsAfterQuietGap(t *testing.T) {
-	stub := &stubHarvester{
-		Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-new"},
-	}
-	r, inst := newCaughtUpFixture(stub)
-	stale := metav1.NewTime(time.Now().Add(-crashLoopWindow - time.Minute))
-	inst.Status.RecentUnplannedRestarts = crashLoopThreshold - 1
-	inst.Status.LastUnplannedRestartTime = &stale
-
-	res := r.ensureDatabaseHealth(context.Background(), inst)
-
-	if res.Outcome != OutcomeSatisfied {
-		t.Fatalf("res = %+v, want Satisfied", res)
-	}
-	if inst.Status.RecentUnplannedRestarts != 1 {
-		t.Fatalf("RecentUnplannedRestarts = %d, want 1 (chain must reset after quiet gap)", inst.Status.RecentUnplannedRestarts)
-	}
-	if inst.Status.Phase == dbaasv1.StatusFailed {
-		t.Fatal("instance failed despite the chain being broken by a quiet gap")
-	}
-	if stub.StopVMCalls != 0 {
-		t.Fatalf("StopVM called %d times, want 0", stub.StopVMCalls)
-	}
-}
 
 // seedCrashLoopPark puts a full-Reconcile fixture into the parked state: halted
 // VM, CrashLoopHalted condition, phase=failed, generation observed.

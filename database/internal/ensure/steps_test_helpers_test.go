@@ -34,7 +34,7 @@ type testHarness struct{ Dependencies }
 
 func newProvisionInst() *dbaasv1.DBInstance { return testutil.NewProvisionInstance() }
 
-func newProvisionReconciler(t testing.TB, stub *stubHarvester, objects ...client.Object) *testHarness {
+func newTestHarness(t testing.TB, stub *stubHarvester, objects ...client.Object) *testHarness {
 	t.Helper()
 	return &testHarness{Dependencies: Dependencies{
 		Client:            testutil.NewClient(t, objects...),
@@ -49,6 +49,14 @@ func testVM(name, namespace string) *kubevirtv1.VirtualMachine {
 	return testutil.VM(name, namespace)
 }
 
+func shapedVM(name, namespace, class string, storageGB int, dataVolumeName string, strategy kubevirtv1.VirtualMachineRunStrategy) *kubevirtv1.VirtualMachine {
+	return testutil.ShapedVM(name, namespace, class, storageGB, dataVolumeName, strategy)
+}
+
+func (r *testHarness) ensurePreflight(ctx context.Context, inst *dbaasv1.DBInstance) Result {
+	return newPreflightStep(r.Dependencies).Run(ctx, inst)
+}
+
 func (r *testHarness) ensureCredentials(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	return newCredentialsStep(r.Dependencies).Run(ctx, inst)
 }
@@ -61,12 +69,24 @@ func (r *testHarness) ensureVM(ctx context.Context, inst *dbaasv1.DBInstance) Re
 	return newVMStep(r.Dependencies).Run(ctx, inst)
 }
 
+func (r *testHarness) ensureResize(ctx context.Context, inst *dbaasv1.DBInstance) Result {
+	return newResizeStep(r.Dependencies).Run(ctx, inst)
+}
+
+func (r *testHarness) ensurePowerState(ctx context.Context, inst *dbaasv1.DBInstance) Result {
+	return newPowerStep(r.Dependencies).Run(ctx, inst)
+}
+
 func (r *testHarness) ensureDatabaseHealth(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	return newHealthStep(r.Dependencies).Run(ctx, inst)
 }
 
 func (r *testHarness) ensureBootstrapCleanup(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	return newBootstrapCleanupStep(r.Dependencies).Run(ctx, inst)
+}
+
+func (r *testHarness) ensureMonitoring(ctx context.Context, inst *dbaasv1.DBInstance) Result {
+	return newMonitoringStep(r.Dependencies).Run(ctx, inst)
 }
 
 func (r *testHarness) markGenerationReconciled(ctx context.Context, inst *dbaasv1.DBInstance) Result {

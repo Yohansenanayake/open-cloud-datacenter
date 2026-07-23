@@ -33,7 +33,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	ctx := context.Background()
 	inst := newProvisionInst()
 	stub := &stubHarvester{}
-	r := newProvisionReconciler(t, stub, inst)
+	r := newTestHarness(t, stub, inst)
 	convergeCredentials(t, ctx, r, inst)
 
 	res := r.ensureVM(ctx, inst)
@@ -120,7 +120,7 @@ func TestEnsureVMSnapshotsVMPasswordAndStaticNetwork(t *testing.T) {
 		Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
 	}
 	stub := &stubHarvester{}
-	r := newProvisionReconciler(t, stub, inst)
+	r := newTestHarness(t, stub, inst)
 	convergeCredentials(t, context.Background(), r, inst)
 
 	r.ensureVM(context.Background(), inst)
@@ -143,7 +143,7 @@ func TestEnsureVMSnapshotsVMPasswordAndStaticNetwork(t *testing.T) {
 func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{}
-	r := newProvisionReconciler(t, stub, inst, testVM("pg-orders", "tenant-a"))
+	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
 
 	res := r.ensureVM(context.Background(), inst)
 
@@ -170,7 +170,7 @@ func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {
 	inst := newProvisionInst()
 	inst.Status.Resources.VMName = "pg-orders" // status remembers a VM that no longer exists
 	stub := &stubHarvester{}
-	r := newProvisionReconciler(t, stub, inst) // no VM object in the cluster
+	r := newTestHarness(t, stub, inst) // no VM object in the cluster
 	convergeCredentials(t, context.Background(), r, inst)
 
 	res := r.ensureVM(context.Background(), inst)
@@ -190,7 +190,7 @@ func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {
 func TestEnsureVMCreateErrorIsTransientAndRecordsRefs(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{CreateVMErr: errors.New("harvester unavailable")}
-	r := newProvisionReconciler(t, stub, inst)
+	r := newTestHarness(t, stub, inst)
 	convergeCredentials(t, context.Background(), r, inst)
 
 	res := r.ensureVM(context.Background(), inst)

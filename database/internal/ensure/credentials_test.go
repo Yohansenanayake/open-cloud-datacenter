@@ -35,7 +35,7 @@ import (
 func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 	ctx := context.Background()
 	inst := newProvisionInst() // no Endpoint yet
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 
 	res := r.ensureCredentials(ctx, inst)
 
@@ -92,7 +92,7 @@ func TestEnsureCredentialsPublishesConnectionSecretOnceEndpointKnown(t *testing.
 	ctx := context.Background()
 	inst := newProvisionInst()
 	inst.Status.Endpoint = &dbaasv1.Endpoint{Address: "192.168.40.50", Port: defaultPort}
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 
 	convergeCredentials(t, ctx, r, inst)
 	res := r.ensureConnectionSecret(ctx, inst)
@@ -133,7 +133,7 @@ func TestEnsureCredentialsResolveFailureIsTransient(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-credentials", Namespace: "tenant-a"},
 		Data:       map[string][]byte{"admin_user": []byte("dbadmin")},
 	}
-	r := newProvisionReconciler(t, &stubHarvester{}, inst, broken)
+	r := newTestHarness(t, &stubHarvester{}, inst, broken)
 
 	res := r.ensureCredentials(ctx, inst)
 
@@ -152,7 +152,7 @@ func TestEnsureConnectionSecretFailureIsTransient(t *testing.T) {
 	inst.Status.Endpoint = &dbaasv1.Endpoint{Address: "192.168.40.50", Port: defaultPort}
 
 	boom := errors.New("apiserver unavailable")
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 	convergeCredentials(t, ctx, r, inst)
 	watchClient, ok := r.Client.(client.WithWatch)
 	if !ok {
@@ -180,7 +180,7 @@ func TestEnsureConnectionSecretFailureIsTransient(t *testing.T) {
 func TestEnsureConnectionSecretWaitsForEndpoint(t *testing.T) {
 	ctx := context.Background()
 	inst := newProvisionInst()
-	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+	r := newTestHarness(t, &stubHarvester{}, inst)
 	convergeCredentials(t, ctx, r, inst)
 
 	res := r.ensureConnectionSecret(ctx, inst)
@@ -196,15 +196,5 @@ func convergeCredentials(t *testing.T, ctx context.Context, r *testHarness, inst
 	}
 	if res := r.ensureCredentials(ctx, inst); res.Outcome != OutcomeSatisfied {
 		t.Fatalf("credential observe result = %+v, want Satisfied", res)
-	}
-}
-
-func convergeConnectionSecret(t *testing.T, ctx context.Context, r *testHarness, inst *dbaasv1.DBInstance) {
-	t.Helper()
-	if res := r.ensureConnectionSecret(ctx, inst); res.Outcome != OutcomePending {
-		t.Fatalf("connection secret apply result = %+v, want Pending", res)
-	}
-	if res := r.ensureConnectionSecret(ctx, inst); res.Outcome != OutcomeSatisfied {
-		t.Fatalf("connection secret observe result = %+v, want Satisfied", res)
 	}
 }

@@ -33,6 +33,7 @@ import (
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	dbresource "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
@@ -43,7 +44,7 @@ const (
 
 var bootstrapCleanupSequence atomic.Int64
 
-var _ = Describe("Bootstrap cleanup against the API server", func() {
+var _ = Describe("Ensure bootstrap cleanup against the API server", func() {
 	ctx := context.Background()
 
 	newFixture := func(createSecret bool) (*DBInstanceReconciler, *dbaasv1.DBInstance, types.NamespacedName) {
@@ -86,8 +87,8 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 	It("stops after redaction and is satisfied on unchanged re-observation", func() {
 		r, inst, key := newFixture(true)
 
-		res := r.ensureBootstrapCleanup(ctx, inst)
-		Expect(res.Outcome).To(Equal(OutcomePending))
+		res := runEnsureStep(ctx, r, inst, "bootstrap-cleanup")
+		Expect(res.Outcome).To(Equal(ensure.OutcomePending))
 		Expect(res.Reason).To(Equal(dbaasv1.ReasonBootstrapCleanupReconciled))
 		Expect(res.ControllerResult.RequeueAfter).To(BeZero())
 		Expect(inst.Status.Resources.CloudInitSecretName).To(Equal(key.Name))
@@ -99,8 +100,8 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 		Expect(string(secret.Data["networkdata"])).To(Equal(wantNetworkData))
 		resourceVersion := secret.ResourceVersion
 
-		res = r.ensureBootstrapCleanup(ctx, inst)
-		Expect(res.Outcome).To(Equal(OutcomeSatisfied))
+		res = runEnsureStep(ctx, r, inst, "bootstrap-cleanup")
+		Expect(res.Outcome).To(Equal(ensure.OutcomeSatisfied))
 		Expect(k8sClient.Get(ctx, key, secret)).To(Succeed())
 		Expect(secret.ResourceVersion).To(Equal(resourceVersion))
 	})
@@ -108,8 +109,8 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 	It("recreates a missing referenced Secret and converges on re-observation", func() {
 		r, inst, key := newFixture(false)
 
-		res := r.ensureBootstrapCleanup(ctx, inst)
-		Expect(res.Outcome).To(Equal(OutcomePending))
+		res := runEnsureStep(ctx, r, inst, "bootstrap-cleanup")
+		Expect(res.Outcome).To(Equal(ensure.OutcomePending))
 		Expect(res.Reason).To(Equal(dbaasv1.ReasonBootstrapCleanupReconciled))
 
 		secret := &corev1.Secret{}
@@ -117,8 +118,8 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 		Expect(string(secret.Data["userdata"])).To(Equal(redactedCloudInitUserData))
 		Expect(res.ControllerResult.RequeueAfter).To(BeZero())
 
-		res = r.ensureBootstrapCleanup(ctx, inst)
-		Expect(res.Outcome).To(Equal(OutcomeSatisfied))
+		res = runEnsureStep(ctx, r, inst, "bootstrap-cleanup")
+		Expect(res.Outcome).To(Equal(ensure.OutcomeSatisfied))
 	})
 
 	It("returns Transient when the API update fails", func() {
@@ -133,8 +134,8 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 			},
 		})
 
-		res := r.ensureBootstrapCleanup(ctx, inst)
-		Expect(res.Outcome).To(Equal(OutcomeTransient))
+		res := runEnsureStep(ctx, r, inst, "bootstrap-cleanup")
+		Expect(res.Outcome).To(Equal(ensure.OutcomeTransient))
 		Expect(res.Err).To(MatchError(boom))
 
 		secret := &corev1.Secret{}
@@ -154,8 +155,8 @@ var _ = Describe("Bootstrap cleanup against the API server", func() {
 			},
 		})
 
-		res := r.ensureBootstrapCleanup(ctx, inst)
-		Expect(res.Outcome).To(Equal(OutcomeTransient))
+		res := runEnsureStep(ctx, r, inst, "bootstrap-cleanup")
+		Expect(res.Outcome).To(Equal(ensure.OutcomeTransient))
 		Expect(res.Err).To(MatchError(boom))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &corev1.Secret{}))).To(BeTrue())
 	})

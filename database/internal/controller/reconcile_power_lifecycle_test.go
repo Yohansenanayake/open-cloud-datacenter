@@ -16,7 +16,7 @@ limitations under the License.
 
 package controller
 
-// Stop/start lifecycle through the bounded runner (PR5). The legacy
+// Full-reconcile stop/start lifecycle through the bounded runner (PR5). The legacy
 // reconcileStop/reconcileStart/phaseStopped pre-dispatcher paths are gone: the
 // power step converges spec.running from observed runStrategy + VMI state across
 // multiple reconciles. The stubHarvester does not mutate the fake cluster, so

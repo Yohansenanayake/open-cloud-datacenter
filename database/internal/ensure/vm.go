@@ -88,7 +88,6 @@ func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	err := r.Get(ctx, types.NamespacedName{Namespace: inst.Namespace, Name: vmName}, &vm)
 	switch {
 	case err == nil:
-		//TODO:
 		// Observed == desired: the VM object exists. Re-record the ref for
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 // newResizeFixture: the VM in the cluster is shaped db.t3.small/20Gi; the test
 // varies the *spec* (class/storage) to create drift, plus the VM's runStrategy
 // and observed Readiness to walk the cold-resize sequence.
-func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.VirtualMachineRunStrategy, Readiness harvester.VMIReadiness) (*DBInstanceReconciler, *dbaasv1.DBInstance, *stubHarvester) {
+func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.VirtualMachineRunStrategy, Readiness harvester.VMIReadiness) (*testHarness, *dbaasv1.DBInstance, *stubHarvester) {
 	t.Helper()
 	inst := newProvisionInst()
 	inst.Spec.DBInstanceClass = class
@@ -39,7 +39,7 @@ func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.V
 	inst.Status.Resources.DataVolumeName = "pg-orders-data"
 	stub := &stubHarvester{Readiness: Readiness}
 	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-data", rs)
-	r := newProvisionReconciler(t, stub, inst, vm)
+	r := newTestHarness(t, stub, inst, vm)
 	return r, inst, stub
 }
 
@@ -77,24 +77,8 @@ func TestEnsureStorageResizeKeepsActivityUntilDatabaseRecovers(t *testing.T) {
 	if res := r.ensureResize(context.Background(), inst); res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied after shape convergence", res)
 	}
-	r.finalizeStatus(inst)
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionResizeInProgress) {
-		t.Fatal("ResizeInProgress must remain True while the database is recovering")
-	}
-	if inst.Status.Phase != dbaasv1.StatusModifying {
-		t.Fatalf("phase = %q, want %q while database is recovering", inst.Status.Phase, dbaasv1.StatusModifying)
-	}
-
-	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionTrue,
-		dbaasv1.ReasonPostgresReady, "PostgreSQL is ready")
-	inst.SetCurrentCondition(dbaasv1.ConditionMonitoringReady, metav1.ConditionTrue,
-		dbaasv1.ReasonMonitoringDeployed, "monitoring ready")
-	r.finalizeStatus(inst)
-	if inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress) != nil {
-		t.Fatal("ResizeInProgress must be removed after shape and database Readiness converge")
-	}
-	if inst.Status.Phase != dbaasv1.StatusAvailable {
-		t.Fatalf("phase = %q, want %q after resize completion", inst.Status.Phase, dbaasv1.StatusAvailable)
+		t.Fatal("ResizeInProgress must remain True until aggregate status observes database recovery")
 	}
 }
 
@@ -112,10 +96,6 @@ func TestEnsureStorageResizeClassDriftStopsVM(t *testing.T) {
 	}
 	if stub.ResizeVMCalls != 0 {
 		t.Fatal("must not resize while the VM may still be running")
-	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusModifying {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusModifying)
 	}
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must go False once the VM is halted for resize")
@@ -186,10 +166,6 @@ func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 	if stub.ResizeVMCalls != 0 {
 		t.Fatalf("ResizeVMCalls = %d, want 0 (class unchanged)", stub.ResizeVMCalls)
 	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusModifying {
-		t.Fatalf("phase = %q, want %q for storage growth", inst.Status.Phase, dbaasv1.StatusModifying)
-	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionResizeInProgress)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonResizeApplied) {
 		t.Fatalf("ResizeInProgress = %+v, want True/ResizeApplied", cond)
@@ -259,7 +235,7 @@ func TestEnsureStorageResizeMissingShapeSatisfied(t *testing.T) {
 	bare.Name, bare.Namespace = "pg-orders", "tenant-a"
 	bare.Spec.RunStrategy = &rs
 	bare.Spec.Template = &kubevirtv1.VirtualMachineInstanceTemplateSpec{}
-	r := newProvisionReconciler(t, stub, inst, bare)
+	r := newTestHarness(t, stub, inst, bare)
 
 	res := r.ensureResize(context.Background(), inst)
 

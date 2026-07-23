@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 // Steady-state liveness (PR6): report-only Degraded on a caught-up instance,
 // driven by ensureDatabaseHealth (which absorbed legacy phaseAvailable's
@@ -42,19 +42,19 @@ func degradedReason(inst *dbaasv1.DBInstance) string {
 	return ""
 }
 
-// newCaughtUpFixture returns a reconciler + instance in converged steady state
+// newCaughtUpFixture returns a harness + instance in converged steady state
 // (observedGeneration == generation, known VMI UID) — the state where health
 // switches from gating to report-only liveness.
-func newCaughtUpFixture(stub *stubHarvester) (*DBInstanceReconciler, *dbaasv1.DBInstance) {
+func newCaughtUpFixture(stub *stubHarvester) (*testHarness, *dbaasv1.DBInstance) {
 	inst := newProvisionInst()
 	inst.Status.ObservedGeneration = inst.Generation
 	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.LastKnownVMIUID = "vmi-uid-abc"
 	inst.Status.Resources.VMName = "pg-orders"
-	r := &DBInstanceReconciler{
+	r := &testHarness{Dependencies: Dependencies{
 		Harvester: stub,
 		Recorder:  record.NewFakeRecorder(10),
-	}
+	}}
 	return r, inst
 }
 
@@ -74,10 +74,6 @@ func TestHealthCaughtUpProbeFailureSetsDegraded(t *testing.T) {
 	}
 	if got := degradedReason(inst); got != string(dbaasv1.ReasonPostgresUnreachable) {
 		t.Fatalf("Degraded reason = %q, want %q", got, dbaasv1.ReasonPostgresUnreachable)
-	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusDegraded {
-		t.Fatalf("Phase = %q, want %q (user-facing honesty)", inst.Status.Phase, dbaasv1.StatusDegraded)
 	}
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must be False while degraded")
@@ -199,10 +195,6 @@ func TestHealthCaughtUpRestartBelowThresholdAbsorbed(t *testing.T) {
 	}
 	if inst.Status.LastKnownVMIUID != "vmi-uid-new" {
 		t.Fatalf("LastKnownVMIUID = %q, want re-baselined to the new UID", inst.Status.LastKnownVMIUID)
-	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusDegraded {
-		t.Fatalf("Phase = %q, want %q while rebooting", inst.Status.Phase, dbaasv1.StatusDegraded)
 	}
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionCrashLoopHalted) {
 		t.Fatal("CrashLoopHalted must not be set below the threshold")

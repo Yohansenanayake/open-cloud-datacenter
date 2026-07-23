@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 )
 
 func TestEnsurePreflightUnknownClassIsTerminal(t *testing.T) {
-	r := &DBInstanceReconciler{}
+	r := &testHarness{}
 	inst := newProvisionInst()
 	inst.Spec.DBInstanceClass = "db.bogus"
 
@@ -41,17 +41,10 @@ func TestEnsurePreflightUnknownClassIsTerminal(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "InvalidClass" {
 		t.Fatalf("PreflightReady = %+v, want False/InvalidClass", cond)
 	}
-	r.finalizeStatus(inst)
-	if !inst.Status.IsCurrentConditionFalse(dbaasv1.ConditionAccepted, inst.Generation) {
-		t.Fatal("Accepted should be False")
-	}
-	if inst.Status.Phase != dbaasv1.StatusIncompatibleParameters {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusIncompatibleParameters)
-	}
 }
 
 func TestEnsurePreflightMissingNetworkRefIsTerminal(t *testing.T) {
-	r := &DBInstanceReconciler{}
+	r := &testHarness{}
 	inst := newProvisionInst()
 	inst.Spec.NetworkRef = ""
 
@@ -68,7 +61,7 @@ func TestEnsurePreflightMissingNetworkRefIsTerminal(t *testing.T) {
 
 func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	stub := &stubHarvester{}
-	r := &DBInstanceReconciler{Harvester: stub}
+	r := &testHarness{Dependencies: Dependencies{Harvester: stub}}
 	inst := newProvisionInst()
 
 	res := r.ensurePreflight(context.Background(), inst)
@@ -81,10 +74,6 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	}
 	if stub.LastVMImageRef != defaultOSImage {
 		t.Fatalf("resolved image = %q, want default %q", stub.LastVMImageRef, defaultOSImage)
-	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusCreating {
-		t.Fatalf("Phase = %q, want %q on first entry", inst.Status.Phase, dbaasv1.StatusCreating)
 	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
@@ -99,7 +88,7 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 // refused loudly — the guard that sat on the legacy stop/start/modify paths now
 // covers every runner entry.
 func TestEnsurePreflightImmutableDriftIsTerminal(t *testing.T) {
-	r := &DBInstanceReconciler{}
+	r := &testHarness{}
 	inst := newProvisionInst()
 	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{NetworkRef: "tenant-a/old-net"} // spec now says tenant-a/data-net
 
@@ -112,15 +101,11 @@ func TestEnsurePreflightImmutableDriftIsTerminal(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonImmutableFieldChanged) {
 		t.Fatalf("PreflightReady = %+v, want False/ImmutableFieldChanged", cond)
 	}
-	r.finalizeStatus(inst)
-	if !inst.Status.IsCurrentConditionFalse(dbaasv1.ConditionAccepted, inst.Generation) {
-		t.Fatal("Accepted should be False on immutable drift")
-	}
 }
 
 // A user fixing the spec after a terminal park must clear the failure.
 func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
-	r := &DBInstanceReconciler{Harvester: &stubHarvester{}}
+	r := &testHarness{Dependencies: Dependencies{Harvester: &stubHarvester{}}}
 	inst := newProvisionInst()
 	networkRef := inst.Spec.NetworkRef
 	inst.Spec.NetworkRef = ""
@@ -147,20 +132,13 @@ func TestEnsurePreflightRecoversFromTerminalPark(t *testing.T) {
 		recovered.Reason != string(dbaasv1.ReasonPreflightPassed) || recovered.ObservedGeneration != inst.Generation {
 		t.Fatalf("recovered PreflightReady = %+v, want current-generation True/PreflightPassed", recovered)
 	}
-	r.finalizeStatus(inst)
-	if !inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionAccepted, inst.Generation) {
-		t.Fatal("Accepted should be True after correcting the spec")
-	}
-	if inst.Status.Phase != dbaasv1.StatusCreating {
-		t.Fatalf("Phase = %q, want %q after recovery", inst.Status.Phase, dbaasv1.StatusCreating)
-	}
 }
 
 func TestEnsurePreflightImageFailures(t *testing.T) {
 	tests := []struct {
 		name    string
 		err     error
-		outcome StepOutcome
+		outcome Outcome
 		status  metav1.ConditionStatus
 		reason  dbaasv1.ConditionReason
 		requeue bool
@@ -173,7 +151,7 @@ func TestEnsurePreflightImageFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &DBInstanceReconciler{Harvester: &stubHarvester{ResolveVMImageErr: tt.err}}
+			r := &testHarness{Dependencies: Dependencies{Harvester: &stubHarvester{ResolveVMImageErr: tt.err}}}
 			inst := newProvisionInst()
 			res := r.ensurePreflight(context.Background(), inst)
 
@@ -193,7 +171,7 @@ func TestEnsurePreflightImageFailures(t *testing.T) {
 
 func TestEnsurePreflightImageAPIFailureIsTransient(t *testing.T) {
 	boom := errors.New("harvester API unavailable")
-	r := &DBInstanceReconciler{Harvester: &stubHarvester{ResolveVMImageErr: boom}}
+	r := &testHarness{Dependencies: Dependencies{Harvester: &stubHarvester{ResolveVMImageErr: boom}}}
 	inst := newProvisionInst()
 
 	res := r.ensurePreflight(context.Background(), inst)

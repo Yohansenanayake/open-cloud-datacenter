@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"context"
@@ -32,9 +32,9 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
-// newPowerFixture builds a reconciler + instance around a shaped VM with the
+// newPowerFixture builds a harness + instance around a shaped VM with the
 // given runStrategy and observed VMI Readiness.
-func newPowerFixture(t *testing.T, running bool, rs kubevirtv1.VirtualMachineRunStrategy, Readiness harvester.VMIReadiness) (*DBInstanceReconciler, *dbaasv1.DBInstance, *stubHarvester) {
+func newPowerFixture(t *testing.T, running bool, rs kubevirtv1.VirtualMachineRunStrategy, Readiness harvester.VMIReadiness) (*testHarness, *dbaasv1.DBInstance, *stubHarvester) {
 	t.Helper()
 	inst := newProvisionInst()
 	inst.Spec.Running = &running
@@ -42,7 +42,7 @@ func newPowerFixture(t *testing.T, running bool, rs kubevirtv1.VirtualMachineRun
 	inst.Status.Resources.DataVolumeName = "pg-orders-data"
 	stub := &stubHarvester{Readiness: Readiness}
 	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-data", rs)
-	r := newProvisionReconciler(t, stub, inst, vm)
+	r := newTestHarness(t, stub, inst, vm)
 	return r, inst, stub
 }
 
@@ -80,10 +80,6 @@ func TestEnsurePowerStateStartsHaltedVM(t *testing.T) {
 	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonStarting) {
 		t.Fatalf("PowerStateReady = %+v, want False/Starting", cond)
-	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusStarting {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStarting)
 	}
 	if inst.Status.LastKnownVMIUID != "" {
 		t.Fatal("LastKnownVMIUID must be cleared on a planned start")
@@ -150,10 +146,6 @@ func TestEnsurePowerStateStopsRunningVM(t *testing.T) {
 	cond := inst.Status.GetCondition(dbaasv1.ConditionPowerStateReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonStopping) {
 		t.Fatalf("PowerStateReady = %+v, want False/Stopping", cond)
-	}
-	r.finalizeStatus(inst)
-	if inst.Status.Phase != dbaasv1.StatusStopping {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStopping)
 	}
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must go False immediately when a stop is requested, not wait for health to run")

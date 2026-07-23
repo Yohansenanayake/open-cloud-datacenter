@@ -130,8 +130,8 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Every DBInstance, in every state, runs the same bounded ensure-step
 	// runner — there's no separate dispatch for provisioning vs. steady-state
 	// vs. crash-loop-parked. Steady-state liveness, crash-loop halt/park/recovery,
-	// and Degraded reporting live in ensureDatabaseHealth; bootstrap cleanup in
-	// ensureBootstrapCleanup.
+	// and Degraded reporting live in the health step; secret redaction lives in
+	// the bootstrap-cleanup step.
 	// Steady state is event-driven off the VMI watch: an all-Satisfied pass
 	// writes nothing (DeepEqual skip) and requeues nothing.
 	return r.reconcileInstance(ctx, &inst)

@@ -45,7 +45,7 @@ Each `DBInstance` (`dbaas.opencloud.wso2.com/v1alpha1`, namespaced) creates:
 | `pg-<name>-credentials` (tenant Secret) | `admin_user` / `admin_password` only. |
 | `pg-<name>-connect` (tenant Secret) | `host`, `port`, `dbname`, `jdbcUrl`, `sslmode`, `ca.crt` — no password material. |
 | TLS | Per-instance CA + server cert. Private key material lives in a controller-private Secret in the operator namespace, never exposed to tenants. `pg_hba.conf` enforces `hostssl … scram-sha-256` only; the master role gets `CREATEDB`/`CREATEROLE` but not `SUPERUSER`. |
-| Monitoring | Per-instance Prometheus `Service` + `ServiceMonitor` (exporter install is pending — see below). |
+| Monitoring | Per-instance Prometheus `Service` + `ServiceMonitor` (exporter install is pending). |
 
 `dbName` and `masterUsername` are validated against PostgreSQL identifier
 rules (`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`) at apply time, so invalid names are
