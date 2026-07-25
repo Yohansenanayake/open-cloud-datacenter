@@ -63,7 +63,7 @@ func TestReconcileInstanceMonitoringFailureRetriesWithoutCompletingGeneration(t 
 	})
 	resetEnsureRunner(r)
 
-	if _, err := r.reconcileInstance(ctx, inst); !errors.Is(err, boom) {
+	if _, err := runReconcileInstance(ctx, r, inst); !errors.Is(err, boom) {
 		t.Fatalf("reconcileInstance error = %v, want monitoring API error", err)
 	}
 	got := getInst(t, r.Client)
