@@ -27,7 +27,7 @@ import (
 
 // Getter is implemented by Kubernetes objects that expose metav1 conditions.
 type Getter interface {
-	client.Object 
+	client.Object
 	GetConditions() []metav1.Condition
 }
 
