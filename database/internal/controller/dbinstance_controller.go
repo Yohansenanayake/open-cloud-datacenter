@@ -20,15 +20,13 @@ import (
 	"context"
 	goerrors "errors"
 	"fmt"
-	"os"
-	"slices"
 	"strings"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	kubevirtv1 "kubevirt.io/api/core/v1"
@@ -43,6 +41,7 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
+	statuspatch "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/patch"
 )
 
 // DBInstanceReconciler reconciles DBInstance CRDs.
@@ -79,7 +78,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
 // +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop;virtualmachines/restart,verbs=update
-// +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete;patch
+// +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=harvesterhci.io,resources=virtualmachineimages,verbs=get;list
 // External references the controller never creates: preflight only validates they
 // exist (read-only). The NAD is inline-declared by the VM, not created here.
@@ -92,7 +91,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is the main entry point called by controller-runtime.
-func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := log.FromContext(ctx)
 
 	var inst dbaasv1.DBInstance
@@ -104,18 +103,30 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	logger.Info("Reconciling", "name", inst.Name, "phase", inst.Status.Phase)
-	// use defer statement to patch status
 
-	/* defer func() {
-		if err := r.patchStatusIfChanged(ctx, &inst, &inst); err != nil {
-			logger.Error(err, "Failed to patch status")
+	patcher := statuspatch.NewSerialPatcher(&inst, r.Client)
+	finalizeAndPatchStatus := false
+	defer func() {
+		if !finalizeAndPatchStatus {
+			return
 		}
-	}() */
+
+		r.finalizeStatus(&inst)
+		if err := patcher.Patch(ctx, &inst, dbInstancePatchOptions()...); err != nil {
+			if !inst.DeletionTimestamp.IsZero() {
+				err = kerrors.FilterOut(err, errors.IsNotFound)
+			}
+			if err != nil {
+				retErr = goerrors.Join(retErr, fmt.Errorf("patch DBInstance status: %w", err))
+			}
+		}
+	}()
 
 	// --- Handle deletion via finalizer ---
 	if !inst.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&inst, dbaasv1.FinalizerName) {
-			return r.reconcileDelete(ctx, &inst)
+			finalizeAndPatchStatus = true
+			return r.reconcileDelete(ctx, &inst, patcher)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -136,47 +147,48 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// and Degraded reporting live in the health step; secret redaction lives in
 	// the bootstrap-cleanup step.
 	// Steady state is event-driven off the VMI watch: an all-Satisfied pass
-	// writes nothing (DeepEqual skip) and requeues nothing.
+	// writes nothing and requeues nothing.
+	finalizeAndPatchStatus = true
 	return r.reconcileInstance(ctx, &inst)
 }
 
-func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv1.DBInstance, patcher *statuspatch.SerialPatcher) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ns := inst.Namespace
-	// Single snapshot reused across every patchStatusIfChanged call below; the
-	// helper re-fetches and retries conflicts for each attempted status write.
-	original := inst.DeepCopy()
 
 	if inst.Spec.DeletionProtection {
 		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
 			dbaasv1.ReasonDeletionProtected, "Cannot delete: DeletionProtection is enabled")
-		r.finalizeStatus(inst)
-		if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
-			return ctrl.Result{}, err
-		}
 		return ctrl.Result{}, nil
 	}
 
 	inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,
 		dbaasv1.ReasonDeletionProgressing, "Tearing down resources")
 	r.finalizeStatus(inst)
-	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
-		return ctrl.Result{}, err
+	if r.Recorder != nil {
+		r.Recorder.Event(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonDeletionProgressing), "Tearing down database resources")
+	}
+	if err := patcher.Patch(ctx, inst, dbInstancePatchOptions()...); err != nil {
+		logger.Error(err, "Failed to publish deletion progress; continuing teardown")
 	}
 
 	logger.Info("Tearing down child resources", "namespace", ns)
 	if err := r.Harvester.TeardownAll(ctx, inst.Name, ns, inst.Status.Resources); err != nil {
-		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
-			dbaasv1.ReasonTeardownFailed, fmt.Sprintf("Teardown failed, will retry: %v", err))
-		r.finalizeStatus(inst)
-		return ctrl.Result{}, goerrors.Join(err, r.patchStatusIfChanged(ctx, original, inst))
+		msg := fmt.Sprintf("Teardown failed, will retry: %v", err)
+		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue, dbaasv1.ReasonTeardownFailed, msg)
+		if r.Recorder != nil {
+			r.Recorder.Event(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonTeardownFailed), msg)
+		}
+		return ctrl.Result{}, err
 	}
 
 	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
-		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue,
-			dbaasv1.ReasonOperatorSecretCleanupFailed, fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err))
-		r.finalizeStatus(inst)
-		return ctrl.Result{}, goerrors.Join(err, r.patchStatusIfChanged(ctx, original, inst))
+		msg := fmt.Sprintf("Operator-namespace cleanup failed, will retry: %v", err)
+		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue, dbaasv1.ReasonOperatorSecretCleanupFailed, msg)
+		if r.Recorder != nil {
+			r.Recorder.Event(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonOperatorSecretCleanupFailed), msg)
+		}
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, r.removeDBInstanceFinalizer(ctx, client.ObjectKeyFromObject(inst))

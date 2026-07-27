@@ -25,6 +25,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,12 +33,16 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
+	statuspatch "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/patch"
 )
 
 func newDeletingInst() *dbaasv1.DBInstance {
@@ -56,6 +61,19 @@ func operatorSecret(name string, withUIDLabel bool) *corev1.Secret {
 	return sec
 }
 
+// runReconcileDelete executes the production deletion body and its top-level
+// deferred final status patch for tests that exercise deletion directly.
+func runReconcileDelete(ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	patcher := statuspatch.NewSerialPatcher(inst, r.Client)
+	result, reconcileErr := r.reconcileDelete(ctx, inst, patcher)
+	r.finalizeStatus(inst)
+	patchErr := patcher.Patch(ctx, inst, dbInstancePatchOptions()...)
+	if !inst.DeletionTimestamp.IsZero() {
+		patchErr = kerrors.FilterOut(patchErr, apierrors.IsNotFound)
+	}
+	return result, errors.Join(reconcileErr, patchErr)
+}
+
 func TestReconcileDeleteRemovesOperatorSecretsByRef(t *testing.T) {
 	ctx := context.Background()
 	inst := newDeletingInst()
@@ -66,7 +84,7 @@ func TestReconcileDeleteRemovesOperatorSecretsByRef(t *testing.T) {
 	tls := operatorSecret(credentials.TLSSecretName(inst), true)
 	r := newProvisionReconciler(t, &stubHarvester{}, inst, internal, tls)
 
-	if _, err := r.reconcileDelete(ctx, inst); err != nil {
+	if _, err := runReconcileDelete(ctx, r, inst); err != nil {
 		t.Fatalf("reconcileDelete: %v", err)
 	}
 
@@ -93,7 +111,7 @@ func TestReconcileDeleteSweepsByUIDLabelWhenRefsMissing(t *testing.T) {
 	tls := operatorSecret(credentials.TLSSecretName(inst), true)
 	r := newProvisionReconciler(t, &stubHarvester{}, inst, internal, tls)
 
-	if _, err := r.reconcileDelete(ctx, inst); err != nil {
+	if _, err := runReconcileDelete(ctx, r, inst); err != nil {
 		t.Fatalf("reconcileDelete: %v", err)
 	}
 
@@ -118,7 +136,7 @@ func TestReconcileDeleteSweepDoesNotTouchOtherInstances(t *testing.T) {
 	mine := operatorSecret(credentials.InternalSecretName(inst), true)
 	r := newProvisionReconciler(t, &stubHarvester{}, inst, mine, other)
 
-	if _, err := r.reconcileDelete(ctx, inst); err != nil {
+	if _, err := runReconcileDelete(ctx, r, inst); err != nil {
 		t.Fatalf("reconcileDelete: %v", err)
 	}
 
@@ -133,7 +151,7 @@ func TestReconcileDeleteProtectionPublishesBlockedSummary(t *testing.T) {
 	inst.Spec.DeletionProtection = true
 	r := newProvisionReconciler(t, &stubHarvester{}, inst)
 
-	if _, err := r.reconcileDelete(ctx, inst); err != nil {
+	if _, err := runReconcileDelete(ctx, r, inst); err != nil {
 		t.Fatalf("reconcileDelete returned error for stable protected state: %v", err)
 	}
 
@@ -169,12 +187,12 @@ func TestReconcileDeleteProtectionReturnsStatusPatchError(t *testing.T) {
 		},
 	})
 
-	if _, err := r.reconcileDelete(ctx, inst); !errors.Is(err, boom) {
+	if _, err := runReconcileDelete(ctx, r, inst); !errors.Is(err, boom) {
 		t.Fatalf("reconcileDelete error = %v, want status patch error", err)
 	}
 }
 
-func TestReconcileDeleteReturnsInitialStatusPatchErrorBeforeTeardown(t *testing.T) {
+func TestReconcileDeleteContinuesAfterInitialStatusPatchError(t *testing.T) {
 	ctx := context.Background()
 	inst := newDeletingInst()
 	statusErr := errors.New("status unavailable")
@@ -184,17 +202,22 @@ func TestReconcileDeleteReturnsInitialStatusPatchErrorBeforeTeardown(t *testing.
 	if !ok {
 		t.Fatal("fixture's fake client does not implement client.WithWatch")
 	}
+	patchCalls := 0
 	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
-		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
-			return statusErr
+		SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			patchCalls++
+			if patchCalls <= 2 {
+				return statusErr
+			}
+			return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
 		},
 	})
 
-	if _, err := r.reconcileDelete(ctx, inst); !errors.Is(err, statusErr) {
-		t.Fatalf("reconcileDelete error = %v, want status error", err)
+	if _, err := runReconcileDelete(ctx, r, inst); err != nil {
+		t.Fatalf("reconcileDelete error = %v, want best-effort status failure ignored", err)
 	}
-	if stub.TeardownCalls != 0 {
-		t.Fatalf("TeardownAll calls = %d, want 0", stub.TeardownCalls)
+	if stub.TeardownCalls != 1 {
+		t.Fatalf("TeardownAll calls = %d, want 1", stub.TeardownCalls)
 	}
 }
 
@@ -213,14 +236,14 @@ func TestReconcileDeleteJoinsTeardownAndStatusPatchErrors(t *testing.T) {
 	r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			patchCalls++
-			if patchCalls == 2 {
+			if patchCalls == 3 {
 				return statusErr
 			}
 			return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
 		},
 	})
 
-	_, err := r.reconcileDelete(ctx, inst)
+	_, err := runReconcileDelete(ctx, r, inst)
 	if !errors.Is(err, TeardownErr) || !errors.Is(err, statusErr) {
 		t.Fatalf("reconcileDelete error = %v, want teardown and status errors", err)
 	}
@@ -245,16 +268,47 @@ func TestReconcileDeleteJoinsSecretCleanupAndStatusPatchErrors(t *testing.T) {
 		},
 		SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			patchCalls++
-			if patchCalls == 2 {
+			if patchCalls == 3 {
 				return statusErr
 			}
 			return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
 		},
 	})
 
-	_, err := r.reconcileDelete(ctx, inst)
+	_, err := runReconcileDelete(ctx, r, inst)
 	if !errors.Is(err, cleanupErr) || !errors.Is(err, statusErr) {
 		t.Fatalf("reconcileDelete error = %v, want cleanup and status errors", err)
+	}
+}
+
+func TestReconcileDeleteEmitsProgressAndFailureEvents(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	teardownErr := errors.New("teardown failed")
+	r := newProvisionReconciler(t, &stubHarvester{TeardownErr: teardownErr}, inst)
+	recorder, ok := r.Recorder.(*record.FakeRecorder)
+	if !ok {
+		t.Fatalf("Recorder = %T, want *record.FakeRecorder", r.Recorder)
+	}
+
+	if _, err := runReconcileDelete(ctx, r, inst); !errors.Is(err, teardownErr) {
+		t.Fatalf("reconcileDelete error = %v, want %v", err, teardownErr)
+	}
+
+	var events []string
+	for len(events) < 2 {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		case <-time.After(time.Second):
+			t.Fatalf("events = %v, want deletion progress and failure events", events)
+		}
+	}
+	if !strings.Contains(events[0], corev1.EventTypeNormal+" "+string(dbaasv1.ReasonDeletionProgressing)) {
+		t.Fatalf("first event = %q, want normal deletion progress", events[0])
+	}
+	if !strings.Contains(events[1], corev1.EventTypeWarning+" "+string(dbaasv1.ReasonTeardownFailed)) {
+		t.Fatalf("second event = %q, want warning teardown failure", events[1])
 	}
 }
 

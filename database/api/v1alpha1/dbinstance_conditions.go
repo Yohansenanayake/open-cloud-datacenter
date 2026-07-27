@@ -180,6 +180,18 @@ func (s *DBInstanceStatus) SetCondition(c metav1.Condition) {
 	meta.SetStatusCondition(&s.Conditions, c)
 }
 
+// GetConditions exposes DBInstance conditions through the shared condition
+// patching contract.
+func (in *DBInstance) GetConditions() []metav1.Condition {
+	return in.Status.Conditions
+}
+
+// SetConditions replaces DBInstance conditions through the shared condition
+// patching contract.
+func (in *DBInstance) SetConditions(conditions []metav1.Condition) {
+	in.Status.Conditions = conditions
+}
+
 // SetCurrentCondition adds or updates a condition for the DBInstance's current
 // generation.
 func (in *DBInstance) SetCurrentCondition(conditionType string, status metav1.ConditionStatus, reason ConditionReason, message string) {

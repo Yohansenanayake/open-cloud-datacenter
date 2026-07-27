@@ -18,11 +18,15 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
+	statuspatch "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/patch"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
 )
 
@@ -49,6 +53,16 @@ func testEnsureDependencies(r *DBInstanceReconciler) ensure.Dependencies {
 
 func resetEnsureRunner(r *DBInstanceReconciler) {
 	r.EnsureRunner = ensure.NewDefaultRunner(testEnsureDependencies(r))
+}
+
+// runReconcileInstance executes the production instance body and its top-level
+// deferred final status patch for tests that exercise the body directly.
+func runReconcileInstance(ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	patcher := statuspatch.NewSerialPatcher(inst, r.Client)
+	result, reconcileErr := r.reconcileInstance(ctx, inst)
+	r.finalizeStatus(inst)
+	patchErr := patcher.Patch(ctx, inst, dbInstancePatchOptions()...)
+	return result, errors.Join(reconcileErr, patchErr)
 }
 
 func runEnsureStep(ctx context.Context, r *DBInstanceReconciler, inst *dbaasv1.DBInstance, name string) ensure.Result {

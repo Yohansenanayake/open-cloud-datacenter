@@ -86,7 +86,7 @@ func TestReconcileInstanceTerminalParks(t *testing.T) {
 	inst.Spec.DBInstanceClass = "db.bogus"
 	r := newProvisionReconciler(t, &stubHarvester{}, inst)
 
-	result, err := r.reconcileInstance(context.Background(), inst)
+	result, err := runReconcileInstance(context.Background(), r, inst)
 
 	if err != nil {
 		t.Fatalf("terminal must park without error, got %v", err)
@@ -115,7 +115,7 @@ func TestReconcileInstanceTransientReturnsError(t *testing.T) {
 	r := newProvisionReconciler(t, stub, inst, testVM("pg-orders", "tenant-a"))
 	convergeCredentials(t, context.Background(), r, inst)
 
-	_, err := r.reconcileInstance(context.Background(), inst)
+	_, err := runReconcileInstance(context.Background(), r, inst)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the injected transient error", err)
 	}
@@ -133,7 +133,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 	key := client.ObjectKeyFromObject(inst)
 
 	// Pass 1: durable credential Secrets are created and stop the pass.
-	result, err := r.reconcileInstance(ctx, inst)
+	result, err := runReconcileInstance(ctx, r, inst)
 	if err != nil || result.RequeueAfter != credentialRequeue {
 		t.Fatalf("pass 1 = (%+v, %v), want credential fallback requeue", result, err)
 	}
@@ -165,7 +165,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 2: %v", err)
 	}
-	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
+	if result, err = runReconcileInstance(ctx, r, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 2 = (%+v, %v), want event-driven VM-create Pending", result, err)
 	}
 	if stub.CreateVMCalls != 1 {
@@ -182,7 +182,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch: %v", err)
 	}
-	if result, err = r.reconcileInstance(ctx, inst); err != nil || result.RequeueAfter != credentialRequeue {
+	if result, err = runReconcileInstance(ctx, r, inst); err != nil || result.RequeueAfter != credentialRequeue {
 		t.Fatalf("pass 3 = (%+v, %v), want connection-secret fallback requeue", result, err)
 	}
 
@@ -191,7 +191,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 4: %v", err)
 	}
-	if result, err = r.reconcileInstance(ctx, inst); err != nil || result.RequeueAfter != monitoringRequeue {
+	if result, err = runReconcileInstance(ctx, r, inst); err != nil || result.RequeueAfter != monitoringRequeue {
 		t.Fatalf("pass 4 = (%+v, %v), want monitoring fallback requeue", result, err)
 	}
 	after4 := &dbaasv1.DBInstance{}
@@ -214,7 +214,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 5: %v", err)
 	}
-	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
+	if result, err = runReconcileInstance(ctx, r, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 5 = (%+v, %v), want event-driven bootstrap-cleanup Pending", result, err)
 	}
 	after5 := &dbaasv1.DBInstance{}
@@ -244,7 +244,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 6: %v", err)
 	}
-	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
+	if result, err = runReconcileInstance(ctx, r, inst); err != nil || result != (ctrl.Result{}) {
 		t.Fatalf("pass 6 = (%+v, %v), want zero Result and nil error", result, err)
 	}
 	got := &dbaasv1.DBInstance{}

@@ -17,53 +17,33 @@ limitations under the License.
 package controller
 
 import (
-	"context"
-
-	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/client-go/util/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	statuspatch "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/patch"
 )
 
-// patchStatusIfChanged persists inst.Status with an optimistic-lock MergeFrom
-// patch, skipping the write when the status is unchanged.
-//
-// The desired status is captured before retrying. Each attempt re-fetches the
-// latest object and uses its resourceVersion as a precondition, so a concurrent
-// write produces a conflict and retries from a fresh object. The DeepEqual skip
-// prevents an unchanged status from triggering a self-reconcile loop.
-//
-// DBInstance status is currently owned in full by this controller, so each
-// attempt applies the complete desired status produced by the ensure pass. If
-// DBaaS expands to multiple controllers that share status ownership, replace
-// this whole-status assignment with semantic transactions replayed against the
-// latest object so one controller preserves fields owned by another.
-//
-// `original` must be the DeepCopy captured at the top of Reconcile (before the
-// pass mutated inst.Status).
-func (r *DBInstanceReconciler) patchStatusIfChanged(ctx context.Context, original, inst *dbaasv1.DBInstance) error {
-	if equality.Semantic.DeepEqual(original.Status, inst.Status) {
-		return nil
+// dbInstanceOwnedConditions is the DBInstance controller's condition ownership
+// contract. A future controller that writes DBInstance conditions must use a
+// disjoint list; aggregate Ready remains owned here.
+var dbInstanceOwnedConditions = []string{
+	dbaasv1.ConditionAccepted,
+	dbaasv1.ConditionPreflightReady,
+	dbaasv1.ConditionCredentialsReady,
+	dbaasv1.ConditionVMReady,
+	dbaasv1.ConditionPowerStateReady,
+	dbaasv1.ConditionStorageReady,
+	dbaasv1.ConditionStorageChangeRejected,
+	dbaasv1.ConditionResizeInProgress,
+	dbaasv1.ConditionDatabaseReady,
+	dbaasv1.ConditionMonitoringReady,
+	dbaasv1.ConditionReady,
+	dbaasv1.ConditionInterventionRequired,
+	dbaasv1.ConditionCrashLoopHalted,
+	dbaasv1.ConditionDegraded,
+	dbaasv1.ConditionDeletionBlocked,
+}
+
+func dbInstancePatchOptions() []statuspatch.Option {
+	return []statuspatch.Option{
+		statuspatch.WithOwnedConditions{Conditions: dbInstanceOwnedConditions},
 	}
-
-	desiredStatus := inst.Status.DeepCopy()
-	key := client.ObjectKeyFromObject(inst)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest := &dbaasv1.DBInstance{}
-		if err := r.Get(ctx, key, latest); err != nil {
-			return err
-		}
-		if equality.Semantic.DeepEqual(latest.Status, *desiredStatus) {
-			return nil
-		}
-
-		base := latest.DeepCopy()
-		latest.Status = *desiredStatus.DeepCopy()
-		if err := r.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return err
-		}
-		inst.Status = *latest.Status.DeepCopy()
-		return nil
-	})
 }

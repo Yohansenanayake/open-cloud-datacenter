@@ -25,20 +25,13 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// reconcileInstance runs the non-deletion ensure workflow, derives aggregate
-// status, and persists status once per pass.
+// reconcileInstance runs the non-deletion ensure workflow. The top-level
+// Reconcile defer derives aggregate status and persists all status changes.
 func (r *DBInstanceReconciler) reconcileInstance(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	if r.EnsureRunner == nil {
 		return ctrl.Result{}, fmt.Errorf("ensure runner is not configured")
 	}
 
-	original := inst.DeepCopy()
 	result := r.EnsureRunner.Run(ctx, inst)
-	r.finalizeStatus(inst)
-
-	if err := r.patchStatusIfChanged(ctx, original, inst); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	return result.ControllerResult, result.Err
 }
