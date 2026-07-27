@@ -25,9 +25,11 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -38,6 +40,7 @@ import (
 	dbaasv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/controller"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/gateway"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -46,10 +49,25 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// defaultOperatorNamespace resolves the --operator-namespace flag's default:
+// the POD_NAMESPACE downward-API env var (set in config/manager/manager.yaml),
+// falling back to "dbaas-system" for local/dev runs where it's unset.
+func defaultOperatorNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "dbaas-system"
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(dbaasv1alpha1.AddToScheme(scheme))
+
+	// Child types the reconciler watches (Owns/Watches) must be in the manager's
+	// scheme so controller-runtime can build their informers.
+	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
+	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -62,9 +80,11 @@ func main() {
 	var probeAddr string
 	var gatewayAddr string
 	var grafanaURL string
+	var operatorNamespace string
 	var mgmtLogicalSwitch string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var maxConcurrentReconciles int
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -73,6 +93,10 @@ func main() {
 		"The address the DBInstance REST API gateway binds to.")
 	flag.StringVar(&grafanaURL, "grafana-url", "https://grafana.monitoring.svc",
 		"Base URL of the cluster Grafana instance, used to render per-DBInstance dashboard links.")
+	flag.StringVar(&operatorNamespace, "operator-namespace", defaultOperatorNamespace(),
+		"Namespace for controller-private Secrets (internal DB credentials, TLS material), "+
+			"outside every tenant namespace. Defaults to the POD_NAMESPACE env var (set via the "+
+			"downward API in config/manager/manager.yaml), falling back to \"dbaas-system\".")
 	flag.StringVar(&mgmtLogicalSwitch, "mgmt-logical-switch", "ovn-default",
 		"Kube-OVN logical switch to pin DB VM launcher pods' default (mgmt-net) network to, "+
 			"so the controller can reach the readiness probe across tenant VPCs. "+
@@ -91,6 +115,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1,
+		"Maximum number of DBInstances reconciled concurrently. Raise for many instances; "+
+			"reconciles are serialized per object regardless, so this only adds cross-instance parallelism.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -168,11 +195,12 @@ func main() {
 
 	restConfig := ctrl.GetConfigOrDie()
 
-	hvClient, err := newHarvesterClient(restConfig, grafanaURL, mgmtLogicalSwitch)
+	hvClient, err := harvester.NewTypedClient(restConfig, grafanaURL)
 	if err != nil {
 		setupLog.Error(err, "Failed to create Harvester client")
 		os.Exit(1)
 	}
+	hvClient.MgmtLogicalSwitch = mgmtLogicalSwitch
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
@@ -199,8 +227,11 @@ func main() {
 	}
 
 	if err := (&controller.DBInstanceReconciler{
-		Client:    mgr.GetClient(),
-		Harvester: hvClient,
+		Client:                  mgr.GetClient(),
+		Harvester:               hvClient,
+		GrafanaBaseURL:          grafanaURL,
+		OperatorNamespace:       operatorNamespace,
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbinstance")
 		os.Exit(1)

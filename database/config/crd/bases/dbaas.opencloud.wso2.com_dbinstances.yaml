@@ -70,6 +70,12 @@ spec:
                   backupRetentionPeriod, preferredBackupWindow. These fields exist in
                   the schema for forward compatibility but the reconciler does not
                   apply them. See ARCHITECTURE.md for the roadmap.
+
+              Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
+              vmPassword carry a CEL "self == oldSelf" rule: the other five (osImage,
+              dbName, masterUsername, port, storageType) are compared post-defaulting in
+              immutableDrift(), so a raw CEL rule on them would be stricter than that
+              check — see immutableDrift's doc comment.
             properties:
               allocatedStorage:
                 description: |-
@@ -136,11 +142,14 @@ spec:
                 default: "17"
                 description: |-
                   EngineVersion is the PostgreSQL major version, e.g. "16".
-                  Immutable after first reconcile. The default below will be removed once
-                  the DBInstance defaulting webhook is deployed (dbinstance_webhook.go
-                  DBInstanceDefaulter), which will set this dynamically from the
-                  BakedImages catalog instead of a hardcoded value.
+                  NOT YET IMPLEMENTED: cloud-init installs whatever PostgreSQL the OS
+                  image's apt repo provides (Ubuntu 24.04 → PG 16; older → older). The
+                  field is recorded but does not drive package selection.
+                  Immutable after first reconcile.
                 type: string
+                x-kubernetes-validations:
+                - message: engineVersion is immutable after creation
+                  rule: self == oldSelf
               manageMasterUserPassword:
                 description: |-
                   ManageMasterUserPassword: if true, auto-generate the admin password
@@ -192,6 +201,16 @@ spec:
                   Immutable after first reconcile.
                   Example: "iaas-net/vm-subnet-001".
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: networkRef is immutable after creation
+                  rule: self == oldSelf
+              osImage:
+                description: |-
+                  OSImage is the Harvester VirtualMachineImage to clone for the VM's
+                  OS disk. Either "<ns>/<name>" or just "<name>" (resolved in the
+                  "default" namespace), or the image's spec.displayName.
+                  Immutable after first reconcile.
                 type: string
               port:
                 description: |-
@@ -255,12 +274,14 @@ spec:
                       Nameservers are the DNS server IPs the VM should use. Supply at
                       least one — cloud-init will fail to resolve apt mirrors without DNS.
                     items:
+                      pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$
                       type: string
                     minItems: 1
                     type: array
                   searchDomains:
                     description: SearchDomains are DNS search-domain suffixes. Optional.
                     items:
+                      pattern: ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$
                       type: string
                     type: array
                 required:
@@ -268,6 +289,9 @@ spec:
                 - gateway
                 - nameservers
                 type: object
+                x-kubernetes-validations:
+                - message: staticNetwork is immutable after creation
+                  rule: self == oldSelf
               storageType:
                 description: |-
                   StorageType maps to a Longhorn StorageClass. Default "longhorn".
@@ -287,6 +311,9 @@ spec:
                   (ubuntu). For development and debugging only — leave empty in
                   production. Immutable after first reconcile.
                 type: string
+                x-kubernetes-validations:
+                - message: vmPassword is immutable after creation
+                  rule: self == oldSelf
             required:
             - allocatedStorage
             - dbInstanceClass
@@ -320,12 +347,47 @@ spec:
                     type: string
                   port:
                     type: integer
+                  staticNetwork:
+                    description: |-
+                      NetworkConfig is a static IPv4 configuration for the database VM's data
+                      NIC. When set on DBInstanceSpec.StaticNetwork, these values are written
+                      into cloud-init's netplan in place of `dhcp4: true`.
+                    properties:
+                      address:
+                        description: Address is the IPv4 address with CIDR prefix,
+                          e.g. "192.168.40.50/24".
+                        pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}\/(3[0-2]|[12]?\d)$
+                        type: string
+                      gateway:
+                        description: Gateway is the IPv4 default gateway, e.g. "192.168.40.1".
+                        pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$
+                        type: string
+                      nameservers:
+                        description: |-
+                          Nameservers are the DNS server IPs the VM should use. Supply at
+                          least one — cloud-init will fail to resolve apt mirrors without DNS.
+                        items:
+                          pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$
+                          type: string
+                        minItems: 1
+                        type: array
+                      searchDomains:
+                        description: SearchDomains are DNS search-domain suffixes.
+                          Optional.
+                        items:
+                          pattern: ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$
+                          type: string
+                        type: array
+                    required:
+                    - address
+                    - gateway
+                    - nameservers
+                    type: object
                   storageType:
                     type: string
+                  vmPassword:
+                    type: string
                 type: object
-              caCertPem:
-                description: CACertPEM is the generated CA for SSL verification.
-                type: string
               conditions:
                 description: Conditions for each sub-resource.
                 items:
@@ -405,7 +467,7 @@ spec:
               lastKnownVMIUID:
                 description: |-
                   LastKnownVMIUID is the UID of the VMI last recorded by the controller.
-                  A UID change during phaseAvailable indicates an unplanned restart.
+                  A UID change while the instance is Available indicates an unplanned restart.
                 type: string
               lastUnplannedRestartTime:
                 description: |-
@@ -413,18 +475,6 @@ spec:
                   unplanned VMI restart (UID change). Input to crash-loop detection.
                 format: date-time
                 type: string
-              masterUserSecret:
-                description: MasterUserSecret references the K8s Secret with credentials.
-                properties:
-                  name:
-                    type: string
-                  status:
-                    description: Status is "active" or "impaired".
-                    type: string
-                required:
-                - name
-                - status
-                type: object
               message:
                 description: Message is a human-readable description of the current
                   state.
@@ -441,9 +491,6 @@ spec:
                 description: PrometheusTarget is the scrape target for the instance's
                   metrics exporter.
                 type: string
-              provisioningPhase:
-                description: ProvisioningPhase tracks which reconcile step we're on.
-                type: string
               readReplicas:
                 description: ReadReplicas tracks child replica identifiers.
                 items:
@@ -458,17 +505,36 @@ spec:
                   RunStrategyAlways KubeVirt would otherwise restart the VM forever).
                 type: integer
               resources:
-                description: Resources tracks every Harvester object created for cleanup
-                  and idempotency.
+                description: Resources tracks managed resource references used by
+                  clients and cleanup.
                 properties:
+                  adminCredentialsSecretName:
+                    description: |-
+                      AdminCredentialsSecretName is the tenant-facing Secret containing the
+                      administrator username and password.
+                    type: string
                   cloudInitSecretName:
                     description: |-
                       CloudInitSecretName is the ephemeral Secret that holds cloud-init
-                      userdata and networkdata. It is deleted by the controller as soon as
-                      the VM reaches Available so the installation script and embedded
-                      passwords are not left on-cluster indefinitely.
+                      userdata and networkdata. Once PostgreSQL is ready, the controller scrubs
+                      sensitive userdata but retains the object because the running VMI keeps the
+                      Secret volume mounted.
+                    type: string
+                  connectionSecretName:
+                    description: |-
+                      ConnectionSecretName is the tenant-facing Secret with connection
+                      metadata (host/port/dbname/jdbcUrl/sslmode/ca.crt) and no password
+                      material. Lives in the DBInstance's own namespace.
                     type: string
                   dataVolumeName:
+                    type: string
+                  internalSecretRef:
+                    description: |-
+                      InternalSecretRef is "namespace/name" of the controller-private Secret
+                      holding DBaaS-internal credentials (repl_password, exporter_password).
+                      Namespace-qualified because it lives in the operator namespace, not the
+                      DBInstance's own namespace, and so cannot carry an owner reference —
+                      cleanup is finalizer-driven by this ref plus a UID-label sweep backstop.
                     type: string
                   metricsServiceName:
                     description: |-
@@ -482,19 +548,11 @@ spec:
                       attaches to. The controller does not create the NAD; this just records
                       the reference from spec.networkRef so callers can see it on the CR.
                     type: string
-                  osDiskPVCName:
+                  privateTLSSecretRef:
                     description: |-
-                      OSDiskPVCName is the exact current name of the OS disk PVC: pg-<id>-os
-                      at first provision, or a revision-suffixed pg-<id>-os-<rev> after a
-                      repave. Authoritative — TeardownAll and repave's old-disk cleanup read
-                      this instead of deriving the name by string-prefix matching against a
-                      namespace-wide PVC scan, which is ambiguous whenever one instance's
-                      name is itself a prefix of another's (e.g. "orders" and "orders-os").
-                      Empty on instances provisioned before this field existed; callers fall
-                      back to reading the live VM's own volumeClaimTemplates annotation (see
-                      collectDiskPVCNames), which is exact but requires the VM to still exist.
-                    type: string
-                  secretName:
+                      PrivateTLSSecretRef is "namespace/name" of the controller-private
+                      Secret holding the CA and server TLS material. Same cross-namespace
+                      cleanup model as InternalSecretRef.
                     type: string
                   serviceMonitor:
                     type: string

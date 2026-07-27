@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package ensure
 
 import (
 	"testing"
@@ -31,6 +31,7 @@ func TestImmutableDriftNormalizesCreateDefaults(t *testing.T) {
 			DBInstanceClass:  "db.t3.medium",
 			AllocatedStorage: 50,
 			NetworkRef:       "default/vm-network",
+			OSImage:          "ubuntu-22.04-server-cloudimg-amd64.img",
 			DBName:           "orders",
 			MasterUsername:   "dbadmin",
 			Port:             5432,
@@ -60,6 +61,7 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 		Status: dbaasv1.DBInstanceStatus{
 			AppliedSpec: &dbaasv1.AppliedSpec{
 				NetworkRef:     "default/vm-network",
+				OSImage:        "ubuntu-22.04-server-cloudimg-amd64.img",
 				DBName:         "orders",
 				MasterUsername: "dbadmin",
 				Port:           5432,
@@ -73,28 +75,78 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 	}
 }
 
-func TestImmutableDriftDetectsEngineVersionChange(t *testing.T) {
+func TestImmutableDriftDetectsVMPasswordChange(t *testing.T) {
 	inst := &dbaasv1.DBInstance{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
 		Spec: dbaasv1.DBInstanceSpec{
 			DBInstanceClass:  "db.t3.medium",
 			AllocatedStorage: 50,
 			NetworkRef:       "default/vm-network",
-			EngineVersion:    "17", // user tried to bump PG version
+			VMPassword:       "changed",
 		},
 		Status: dbaasv1.DBInstanceStatus{
 			AppliedSpec: &dbaasv1.AppliedSpec{
-				NetworkRef:     "default/vm-network",
-				DBName:         "orders",
-				MasterUsername: "dbadmin",
-				EngineVersion:  "16", // VM was provisioned with PG 16
-				Port:           5432,
-				StorageType:    "longhorn",
+				NetworkRef: "default/vm-network",
+				VMPassword: "original",
 			},
 		},
 	}
 
-	if drift := immutableDrift(inst); drift != "engineVersion" {
-		t.Fatalf("immutableDrift() = %q, want engineVersion", drift)
+	if drift := immutableDrift(inst); drift != "vmPassword" {
+		t.Fatalf("immutableDrift() = %q, want vmPassword", drift)
+	}
+}
+
+func TestImmutableDriftDetectsStaticNetworkChange(t *testing.T) {
+	inst := &dbaasv1.DBInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
+		Spec: dbaasv1.DBInstanceSpec{
+			DBInstanceClass:  "db.t3.medium",
+			AllocatedStorage: 50,
+			NetworkRef:       "default/vm-network",
+			StaticNetwork: &dbaasv1.NetworkConfig{
+				Address: "192.168.40.51/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+			},
+		},
+		Status: dbaasv1.DBInstanceStatus{
+			AppliedSpec: &dbaasv1.AppliedSpec{
+				NetworkRef: "default/vm-network",
+				StaticNetwork: &dbaasv1.NetworkConfig{
+					Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+				},
+			},
+		},
+	}
+
+	if drift := immutableDrift(inst); drift != "staticNetwork" {
+		t.Fatalf("immutableDrift() = %q, want staticNetwork", drift)
+	}
+}
+
+// A distinct pointer with an identical value must not be treated as drift —
+// guards against a naive pointer-identity comparison creeping back in.
+func TestImmutableDriftStaticNetworkSameValueDifferentPointerIsNotDrift(t *testing.T) {
+	inst := &dbaasv1.DBInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
+		Spec: dbaasv1.DBInstanceSpec{
+			DBInstanceClass:  "db.t3.medium",
+			AllocatedStorage: 50,
+			NetworkRef:       "default/vm-network",
+			StaticNetwork: &dbaasv1.NetworkConfig{
+				Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+			},
+		},
+		Status: dbaasv1.DBInstanceStatus{
+			AppliedSpec: &dbaasv1.AppliedSpec{
+				NetworkRef: "default/vm-network",
+				StaticNetwork: &dbaasv1.NetworkConfig{
+					Address: "192.168.40.50/24", Gateway: "192.168.40.1", Nameservers: []string{"1.1.1.1"},
+				},
+			},
+		},
+	}
+
+	if drift := immutableDrift(inst); drift != "" {
+		t.Fatalf("immutableDrift() = %q, want no drift", drift)
 	}
 }

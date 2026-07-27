@@ -25,14 +25,11 @@ import (
 
 	harvesterbuilder "github.com/harvester/harvester/pkg/builder"
 	"github.com/harvester/harvester/pkg/util"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -44,6 +41,15 @@ import (
 	kvclientset "kubevirt.io/client-go/kubevirt"
 )
 
+const (
+	vmiPhaseRunning = "Running"
+	// dataNetInterface is the VM's tenant-facing NIC, bridged onto the
+	// Multus NAD from spec.networkRef. Tenant clients (psql / app pods
+	// on the same VLAN) reach the DB through this interface; the
+	// published status.endpoint.address is this interface's IP.
+	dataNetInterface = "data-net"
+)
+
 // TypedClient manages Harvester resources through Harvester's generated
 // clientset and standard Kubernetes typed clients.
 type TypedClient struct {
@@ -53,17 +59,6 @@ type TypedClient struct {
 	CdiClientset      cdiclientset.Interface
 	GrafanaURL        string
 	MgmtLogicalSwitch string
-}
-
-// credentialMaterial is the per-instance secret material shared by the
-// credentials Secret (user-facing) and the cloud-init bootstrap (what the VM
-// is actually provisioned with). Both must come from the same generation, so
-// CreatePostgresVM derives them from one source — see ensureCredentialsSecret.
-type credentialMaterial struct {
-	adminPw    string
-	replPw     string
-	exporterPw string
-	tls        *TLSBundle
 }
 
 var _ ClientInterface = (*TypedClient)(nil)
@@ -92,14 +87,6 @@ func NewTypedClientWithClientsets(clientset harvesterclientset.Interface, kubeCl
 	return &TypedClient{Clientset: clientset, KubeClient: kubeClient, KvClientset: kvClientset, CdiClientset: cdiClient, GrafanaURL: grafanaURL}
 }
 
-func (c *TypedClient) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error) {
-	dvName := fmt.Sprintf("pg-%s-data", id)
-	// In the Harvester-owned storage path, this phase reserves the deterministic
-	// data disk PVC/template name. The actual PVC is created later by Harvester
-	// from the VM's harvesterhci.io/volumeClaimTemplates annotation.
-	return dvName, nil
-}
-
 func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error {
 	newReq := resource.MustParse(fmt.Sprintf("%dGi", newSizeGB))
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -107,13 +94,13 @@ func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName s
 		if err != nil {
 			return err
 		}
-		pvcs, err := typedVolumeClaimTemplates(vm)
+		pvcs, err := VolumeClaimTemplates(vm)
 		if err != nil {
 			return err
 		}
 		// Index into the slice rather than range-copy: the mutation below must
 		// reach the element that gets re-marshalled, independent of whether
-		// typedVolumeClaimTemplates returns pointers or values.
+		// VolumeClaimTemplates returns pointers or values.
 		found := false
 		for i := range pvcs {
 			if pvcs[i].Name != dvName {
@@ -151,154 +138,33 @@ func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName s
 	})
 }
 
-func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error) {
-	vmName = fmt.Sprintf("pg-%s", p.ID)
-	credSecretName = fmt.Sprintf("pg-%s-credentials", p.ID)
-	cloudInitSecretName = fmt.Sprintf("pg-%s-cloudinit", p.ID)
+func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error) {
+	vmName = VMName(p.ID)
 
-	// Resolve the image first so a bad/missing image fails before we create any
-	// Secrets (no orphans on the most common early failure).
-	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.ImageName)
+	image, err := c.ResolveVMImage(ctx, p.OSImage)
 	if err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
+		return vmName, err
 	}
 
-	// Obtain credential + TLS material idempotently. The credentials Secret is
-	// the single source of truth: on a retry where it already exists we reuse
-	// its material instead of regenerating, so the cloud-init Secret and the
-	// returned CA always match what the VM was bootstrapped with. Regenerating
-	// here would silently publish a CA/passwords that diverge from the running
-	// VM (verify-ca failures, wrong credentials) on any partial re-entry.
-	creds, err := c.ensureCredentialsSecret(ctx, p, vmName, credSecretName)
+	vm, err := c.buildPostgresVM(p, vmName, p.CloudInitSecretName,
+		fmt.Sprintf("%s/%s", image.Namespace, image.Name), image.StorageClassName, true)
 	if err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
+		return vmName, err
 	}
-	caCertPEM = creds.tls.CACertPEM
-
-	// cloud-init Secret, always derived from the settled material above.
-	if err = c.ensureCloudInitSecret(ctx, p, cloudInitSecretName, creds); err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
-	}
-
-	vm, err := c.buildPostgresVM(p, vmName, cloudInitSecretName, fmt.Sprintf("%s/%s", imgNs, imgName), imgSC, true)
-	if err != nil {
-		return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
-	}
+	vm.OwnerReferences = ownerRefSlice(p.Owner)
 	if _, e := c.Clientset.KubevirtV1().VirtualMachines(p.Namespace).Create(ctx, vm, metav1.CreateOptions{}); e != nil {
-		if err = ignoreAlreadyExists(e); err != nil {
-			return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
-		}
+		err = ignoreAlreadyExists(e)
 	}
-	return vmName, credSecretName, cloudInitSecretName, caCertPEM, err
+	return vmName, err
 }
 
-// ensureCredentialsSecret returns the credential + TLS material for the
-// instance, reusing the existing credentials Secret if present (retry-safe) and
-// otherwise generating fresh material and creating it.
-func (c *TypedClient) ensureCredentialsSecret(ctx context.Context, p VMCreateParams, vmName, name string) (*credentialMaterial, error) {
-	if existing, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
-		return materialFromSecret(existing, p.Namespace, name)
-	} else if !apierrors.IsNotFound(err) {
-		return nil, err
-	}
-
-	// First creation: generate fresh material and persist it.
-	tls, err := generateTLS(vmName)
-	if err != nil {
-		return nil, fmt.Errorf("TLS generation: %w", err)
-	}
-	m := &credentialMaterial{
-		adminPw:    randomString(32),
-		replPw:     randomString(32),
-		exporterPw: randomString(24),
-		tls:        tls,
-	}
-	credSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"admin_user":        p.MasterUser,
-			"admin_password":    m.adminPw,
-			"repl_password":     m.replPw,
-			"exporter_password": m.exporterPw,
-			"ca_cert":           tls.CACertPEM,
-			"ca_key":            tls.CAKeyPEM,
-			"server_cert":       tls.ServerCertPEM,
-			"server_key":        tls.ServerKeyPEM,
-		},
-	}
-	if _, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Create(ctx, credSecret, metav1.CreateOptions{}); err != nil {
-		// Lost a race: created concurrently between our Get and Create. Reuse the winner.
-		// Classic race : TOCTOU (time-of-check-to-time-of-use)
-		if apierrors.IsAlreadyExists(err) {
-			won, gerr := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, name, metav1.GetOptions{})
-			if gerr != nil {
-				return nil, gerr
-			}
-			return materialFromSecret(won, p.Namespace, name)
-		}
-		return nil, err
-	}
-	return m, nil
-}
-
-// ensureCloudInitSecret creates the cloud-init Secret from the given material,
-// or overwrites an existing one so it always matches that material. Overwriting
-// is safe because CreatePostgresVM only runs before the VM exists (phaseVM is
-// guarded by VMName), so the Secret has not been consumed by a boot yet.
-func (c *TypedClient) ensureCloudInitSecret(ctx context.Context, p VMCreateParams, name string, m *credentialMaterial) error {
-	desired := map[string]string{
-		"userdata":    buildCloudInit(p, m.adminPw, m.replPw, m.exporterPw, m.tls),
-		"networkdata": buildNetworkData(p),
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.Namespace},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: desired,
-	}
-	if _, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err == nil {
+// ownerRefSlice wraps an optional controller owner reference for ObjectMeta
+// assignment (nil in → nil out, leaving OwnerReferences unset).
+func ownerRefSlice(ref *metav1.OwnerReference) []metav1.OwnerReference {
+	if ref == nil {
 		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
 	}
-	// Already Exist cloud-init Secret: overwrite to match the credential generated from ensureCredentialsSecret().
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		existing, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		existing.Data = nil
-		existing.StringData = desired
-		_, err = c.KubeClient.CoreV1().Secrets(p.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
-		return err
-	})
-}
-
-// materialFromSecret reconstructs credentialMaterial struct from a persisted
-// credentials Secret. It reads Data (populated by the apiserver) and falls back
-// to StringData (set on a freshly built object, e.g. under the fake client).
-func materialFromSecret(s *corev1.Secret, ns, name string) (*credentialMaterial, error) {
-	get := func(k string) string {
-		if v, ok := s.Data[k]; ok {
-			return string(v)
-		}
-		return s.StringData[k]
-	}
-	m := &credentialMaterial{
-		adminPw:    get("admin_password"),
-		replPw:     get("repl_password"),
-		exporterPw: get("exporter_password"),
-		tls: &TLSBundle{
-			CACertPEM:     get("ca_cert"),
-			CAKeyPEM:      get("ca_key"),
-			ServerCertPEM: get("server_cert"),
-			ServerKeyPEM:  get("server_key"),
-		},
-	}
-	if m.adminPw == "" || m.tls.CACertPEM == "" || m.tls.ServerCertPEM == "" || m.tls.ServerKeyPEM == "" {
-		return nil, fmt.Errorf("credentials secret %s/%s is missing required keys", ns, name)
-	}
-	return m, nil
+	return []metav1.OwnerReference{*ref}
 }
 
 func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error) {
@@ -332,14 +198,54 @@ func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (V
 // To align behavior with kubevirt v1.1.1, we set runStrategy to Halted when stopping a VM.
 // see harvester/pkg/api/vm/handler.go 142 for harvester version 1.7.1
 func (c *TypedClient) StopVM(ctx context.Context, ns, vmName string) error {
+	return c.updateVM(ctx, ns, vmName, func(vm *kubevirtv1.VirtualMachine) bool {
+		runStrategy := kubevirtv1.RunStrategyHalted
+		vm.Spec.RunStrategy = &runStrategy
+		vm.Spec.Running = nil
+		return true
+	})
+}
+
+// StopVMForCrashLoop atomically halts the VM and records which VMI triggered
+// the safety halt. The marker survives a controller crash before DBInstance
+// status is persisted.
+func (c *TypedClient) StopVMForCrashLoop(ctx context.Context, ns, vmName, haltedVMIUID string) error {
+	if haltedVMIUID == "" {
+		return fmt.Errorf("halted VMI UID must not be empty")
+	}
+	return c.updateVM(ctx, ns, vmName, func(vm *kubevirtv1.VirtualMachine) bool {
+		runStrategy := kubevirtv1.RunStrategyHalted
+		vm.Spec.RunStrategy = &runStrategy
+		vm.Spec.Running = nil
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID] = haltedVMIUID
+		return true
+	})
+}
+
+// ClearCrashLoopHalt removes only the durable crash-loop marker. Recovery has
+// already been initiated out-of-band, so this does not change VM power state.
+func (c *TypedClient) ClearCrashLoopHalt(ctx context.Context, ns, vmName string) error {
+	return c.updateVM(ctx, ns, vmName, func(vm *kubevirtv1.VirtualMachine) bool {
+		if _, ok := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; !ok {
+			return false
+		}
+		delete(vm.Annotations, dbaasv1.AnnotationCrashLoopHaltedVMIUID)
+		return true
+	})
+}
+
+func (c *TypedClient) updateVM(ctx context.Context, ns, vmName string, mutate func(*kubevirtv1.VirtualMachine) bool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		runStrategy := kubevirtv1.RunStrategyHalted
-		vm.Spec.RunStrategy = &runStrategy
-		vm.Spec.Running = nil
+		if !mutate(vm) {
+			return nil
+		}
 		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 		return err
 	})
@@ -373,131 +279,7 @@ func (c *TypedClient) ResizeVM(ctx context.Context, ns, vmName string, cpuCores,
 	})
 }
 
-func (c *TypedClient) DeleteSecret(ctx context.Context, ns, name string) error {
-	err := c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, name, metav1.DeleteOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-func (c *TypedClient) RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-
-		var disks []kubevirtv1.Disk
-		for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
-			if d.Name != "cloudinit" {
-				disks = append(disks, d)
-			}
-		}
-		var volumes []kubevirtv1.Volume
-		for _, v := range vm.Spec.Template.Spec.Volumes {
-			if v.Name != "cloudinit" {
-				volumes = append(volumes, v)
-			}
-		}
-		vm.Spec.Template.Spec.Domain.Devices.Disks = disks
-		vm.Spec.Template.Spec.Volumes = volumes
-
-		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-		return err
-	})
-}
-
-func (c *TypedClient) PrepareCloudInitForRepave(ctx context.Context, p VMCreateParams, vmName, credSecretName, cloudInitSecretName string) error {
-	secret, err := c.KubeClient.CoreV1().Secrets(p.Namespace).Get(ctx, credSecretName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get credentials Secret %s/%s for repave cloud-init: %w", p.Namespace, credSecretName, err)
-	}
-	m, err := materialFromSecret(secret, p.Namespace, credSecretName)
-	if err != nil {
-		return err
-	}
-	if err := c.ensureCloudInitSecret(ctx, p, cloudInitSecretName, m); err != nil {
-		return fmt.Errorf("ensure cloud-init Secret %s/%s for repave: %w", p.Namespace, cloudInitSecretName, err)
-	}
-	return c.attachCloudInitDisk(ctx, p.Namespace, vmName, cloudInitSecretName)
-}
-
-func (c *TypedClient) attachCloudInitDisk(ctx context.Context, ns, vmName, cloudInitSecretName string) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-
-		hasDisk := false
-		for _, disk := range vm.Spec.Template.Spec.Domain.Devices.Disks {
-			if disk.Name == "cloudinit" {
-				hasDisk = true
-				break
-			}
-		}
-		if !hasDisk {
-			vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, kubevirtv1.Disk{
-				Name: "cloudinit",
-				DiskDevice: kubevirtv1.DiskDevice{
-					Disk: &kubevirtv1.DiskTarget{Bus: kubevirtv1.DiskBusVirtio},
-				},
-			})
-		}
-
-		hasVolume := false
-		for i := range vm.Spec.Template.Spec.Volumes {
-			if vm.Spec.Template.Spec.Volumes[i].Name != "cloudinit" {
-				continue
-			}
-			hasVolume = true
-			vm.Spec.Template.Spec.Volumes[i].VolumeSource.CloudInitNoCloud = cloudInitNoCloudSource(cloudInitSecretName)
-			break
-		}
-		if !hasVolume {
-			vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, kubevirtv1.Volume{
-				Name: "cloudinit",
-				VolumeSource: kubevirtv1.VolumeSource{
-					CloudInitNoCloud: cloudInitNoCloudSource(cloudInitSecretName),
-				},
-			})
-		}
-
-		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-		return err
-	})
-}
-
-func cloudInitNoCloudSource(secretName string) *kubevirtv1.CloudInitNoCloudSource {
-	ref := &corev1.LocalObjectReference{Name: secretName}
-	return &kubevirtv1.CloudInitNoCloudSource{
-		UserDataSecretRef:    ref,
-		NetworkDataSecretRef: ref,
-	}
-}
-
 // Deploy the prometheus monitoring stack. Discussion : Harvester already have Prometheus operator, what to do ?
-func (c *TypedClient) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error) {
-	smName = fmt.Sprintf("pg-%s-monitor", id)
-	svcName = fmt.Sprintf("pg-%s-metrics", id)
-	grafanaURL = fmt.Sprintf("%s/d/dbaas-%s/postgresql-%s", c.GrafanaURL, id, id)
-	promTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, ns)
-	if vmIP == "" {
-		err = fmt.Errorf("monitoring endpoint IP is required")
-		return svcName, smName, grafanaURL, promTarget, err
-	}
-
-	if err = c.createOrUpdateService(ctx, id, ns, svcName); err != nil {
-		return svcName, smName, grafanaURL, promTarget, err
-	}
-	if err = c.createOrUpdateEndpoints(ctx, id, ns, svcName, vmIP); err != nil {
-		return svcName, smName, grafanaURL, promTarget, err
-	}
-	err = c.createOrUpdateServiceMonitor(ctx, id, ns, smName)
-	return svcName, smName, grafanaURL, promTarget, err
-}
-
 func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error {
 	// Disk PVCs are created by Harvester from the VM's volumeClaimTemplates
 	// annotation with no ownerReferences, so deleting the VM does NOT delete
@@ -525,8 +307,11 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 		{"virtualmachines", refs.VMName, func() error {
 			return c.Clientset.KubevirtV1().VirtualMachines(ns).Delete(ctx, refs.VMName, metav1.DeleteOptions{})
 		}},
-		{"secrets", refs.SecretName, func() error {
-			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.SecretName, metav1.DeleteOptions{})
+		{"secrets", refs.AdminCredentialsSecretName, func() error {
+			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.AdminCredentialsSecretName, metav1.DeleteOptions{})
+		}},
+		{"secrets", refs.ConnectionSecretName, func() error {
+			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.ConnectionSecretName, metav1.DeleteOptions{})
 		}},
 		{"secrets", refs.CloudInitSecretName, func() error {
 			return c.KubeClient.CoreV1().Secrets(ns).Delete(ctx, refs.CloudInitSecretName, metav1.DeleteOptions{})
@@ -575,245 +360,11 @@ func (c *TypedClient) TeardownAll(ctx context.Context, id, ns string, refs dbaas
 	return nil
 }
 
-// collectDiskPVCNames returns every disk PVC name belonging to this instance,
-// deduplicated, in priority order:
-//
-//  1. The live VM's volumeClaimTemplates annotation — authoritative and
-//     exact, covers revision-suffixed repave names. Used whenever the VM
-//     still exists.
-//  2. refs.OSDiskPVCName / refs.DataVolumeName — the names the controller
-//     itself recorded in status.resources at provision/repave time. Exact,
-//     no guessing, used when the VM is already gone (a retried teardown
-//     after partial failure) but the fields are populated.
-//  3. Naming-convention fallback (pg-<id>-data, pg-<id>-os) plus a
-//     namespace-wide prefix scan for revision-suffixed pg-<id>-os-<rev>
-//     names — ONLY for instances that predate both #1 and #2, i.e. were
-//     torn down mid-teardown before this field ever got a chance to be set.
-//     This scan is deliberately a last resort: matching by string prefix is
-//     ambiguous whenever one instance's name is itself a prefix of
-//     another's (e.g. "orders" and "orders-os" both exist — "orders"'s
-//     prefix "pg-orders-os" is also a prefix of "orders-os"'s own disk
-//     "pg-orders-os-os"). #1 and #2 are exact and carry no such risk; only
-//     reach this branch for genuinely pre-fix orphans, which is a shrinking,
-//     bounded population, not an ongoing exposure.
-func (c *TypedClient) collectDiskPVCNames(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) []string {
-	seen := map[string]bool{}
-	sawVM := false
-	if refs.VMName != "" {
-		if vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, refs.VMName, metav1.GetOptions{}); err == nil {
-			if pvcs, err := typedVolumeClaimTemplates(vm); err == nil {
-				sawVM = true
-				for _, p := range pvcs {
-					seen[p.Name] = true
-				}
-			}
-		}
-	}
-	if refs.DataVolumeName != "" {
-		seen[refs.DataVolumeName] = true
-	}
-	if sawVM {
-		return mapKeys(seen)
-	}
-
-	// VM already gone: prefer the exact names recorded in status over guessing.
-	if refs.OSDiskPVCName != "" {
-		seen[refs.OSDiskPVCName] = true
-	}
-	if refs.DataVolumeName == "" {
-		seen[fmt.Sprintf("pg-%s-data", id)] = true
-	}
-	if refs.OSDiskPVCName != "" {
-		return mapKeys(seen)
-	}
-
-	// Both status field and live VM are unavailable — pre-fix orphan. Fall
-	// back to the naming convention and a bounded prefix scan.
-	osPVCPrefix := fmt.Sprintf("pg-%s-os", id)
-	seen[osPVCPrefix] = true
-	if list, err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{}); err == nil {
-		for i := range list.Items {
-			if isOSDiskName(list.Items[i].Name, osPVCPrefix) {
-				seen[list.Items[i].Name] = true
-			}
-		}
-	}
-	return mapKeys(seen)
-}
-
-func mapKeys(m map[string]bool) []string {
-	names := make([]string, 0, len(m))
-	for name := range m {
-		names = append(names, name)
-	}
-	return names
-}
-
-func (c *TypedClient) ClearDataVolumeOwnerRef(ctx context.Context, ns, dvName string) error {
-	patch := []byte(`{"metadata":{"ownerReferences":[]}}`)
-	_, err := c.CdiClientset.CdiV1beta1().DataVolumes(ns).Patch(
-		ctx, dvName, types.MergePatchType, patch, metav1.PatchOptions{},
-	)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-func (c *TypedClient) DeleteDataVolume(ctx context.Context, ns, dvName string) error {
-	err := c.CdiClientset.CdiV1beta1().DataVolumes(ns).Delete(ctx, dvName, metav1.DeleteOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-// SwapVMOSDisk points the VM's OS disk at a fresh PVC provisioned from the
-// image referenced by imgRef. Returns the name of the PVC it replaced (empty
-// when the VM is already on the target disk) and the name it's now on
-// (always set) — the caller should persist the latter to
-// status.resources.osDiskPVCName as the authoritative current disk name,
-// rather than ever re-deriving it by pattern-matching PVC names later.
-//
-// The typed client builds VMs Harvester-style: disks are plain PVCs declared
-// in the harvesterhci.io/volumeClaimTemplates VM annotation and created —
-// ownerless — by Harvester's VM controller (createPVCsFromAnnotation). There
-// are no dataVolumeTemplates to patch. Reusing the old PVC name is impossible
-// without a race (Harvester recreates any annotation entry whose PVC goes
-// missing), so each repave target gets a revision-suffixed name
-// (pg-<id>-os-v20260615): Harvester provisions the new PVC from the new
-// image's storageClass, and the old PVC is deleted by the caller afterwards.
-// Distinct names mean creation and deletion can never fight over the same
-// object — this is what makes the swap race-free.
-func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, imgRef string) (string, string, error) {
-	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, imgRef)
-	if err != nil {
-		return "", "", fmt.Errorf("SwapVMOSDisk: resolve image %q: %w", imgRef, err)
-	}
-	osPVCPrefix := fmt.Sprintf("pg-%s-os", instID)
-	newPVCName := osDiskNameForImage(instID, imgName)
-
-	oldPVCName := ""
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		pvcs, err := typedVolumeClaimTemplates(vm)
-		if err != nil {
-			return err
-		}
-
-		found := false
-		for i := range pvcs {
-			if !isOSDiskName(pvcs[i].Name, osPVCPrefix) {
-				continue
-			}
-			found = true
-			if pvcs[i].Name == newPVCName {
-				// Already swapped (re-entered after a crash or requeue): nothing
-				// to replace, nothing for the caller to delete.
-				oldPVCName = ""
-				return nil
-			}
-			oldPVCName = pvcs[i].Name
-			if pvcs[i].Annotations == nil {
-				pvcs[i].Annotations = map[string]string{}
-			}
-			pvcs[i].Name = newPVCName
-			pvcs[i].Annotations[harvesterbuilder.AnnotationKeyImageID] = fmt.Sprintf("%s/%s", imgNs, imgName)
-			pvcs[i].Spec.StorageClassName = &imgSC
-			break
-		}
-		if !found {
-			return fmt.Errorf("SwapVMOSDisk: no OS disk entry (prefix %s) in %s annotation of VM %s/%s",
-				osPVCPrefix, util.AnnotationVolumeClaimTemplates, ns, vmName)
-		}
-
-		data, err := json.Marshal(pvcs)
-		if err != nil {
-			return fmt.Errorf("SwapVMOSDisk: marshal %s: %w", util.AnnotationVolumeClaimTemplates, err)
-		}
-		if vm.Annotations == nil {
-			vm.Annotations = map[string]string{}
-		}
-		vm.Annotations[util.AnnotationVolumeClaimTemplates] = string(data)
-
-		// Repoint the os-disk volume at the new PVC. The annotation edit above
-		// is what Harvester actually provisions from, but the VM only boots
-		// from whatever this volume's claimName says — if no volume matches,
-		// the annotation change alone would silently leave the VM booting the
-		// old disk while reporting success. Fail instead of proceeding to Update.
-		volumeUpdated := false
-		for i := range vm.Spec.Template.Spec.Volumes {
-			v := &vm.Spec.Template.Spec.Volumes[i]
-			if v.PersistentVolumeClaim != nil && isOSDiskName(v.PersistentVolumeClaim.ClaimName, osPVCPrefix) {
-				v.PersistentVolumeClaim.ClaimName = newPVCName
-				volumeUpdated = true
-			}
-		}
-		if !volumeUpdated {
-			return fmt.Errorf("SwapVMOSDisk: no os-disk volume (prefix %s) in spec.template.spec.volumes of VM %s/%s — refusing to update annotation without repointing the actual boot volume",
-				osPVCPrefix, ns, vmName)
-		}
-
-		// Drop dataVolumeTemplates left behind by the earlier (DVT-based) repave
-		// implementation — nothing references them, and the stray DataVolumes
-		// they spawn adopt whatever PVC holds the OS disk name.
-		if len(vm.Spec.DataVolumeTemplates) > 0 {
-			kept := vm.Spec.DataVolumeTemplates[:0]
-			for i := range vm.Spec.DataVolumeTemplates {
-				if !isOSDiskName(vm.Spec.DataVolumeTemplates[i].Name, osPVCPrefix) {
-					kept = append(kept, vm.Spec.DataVolumeTemplates[i])
-				}
-			}
-			vm.Spec.DataVolumeTemplates = kept
-		}
-
-		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-		return err
-	})
-	if err != nil {
-		return "", "", err
-	}
-	return oldPVCName, newPVCName, nil
-}
-
-// DeletePVC deletes a PersistentVolumeClaim by name. NotFound is success:
-// disk PVCs are created ownerless by Harvester from the volumeClaimTemplates
-// annotation, so explicit deletion is the only way they ever go away.
-func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
-	err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-// osDiskNameForImage derives the revision-suffixed OS disk name for a repave
-// target image, e.g. ("orders", "ubuntu-2204-postgres-v20260615") →
-// "pg-orders-os-v20260615". Deterministic, so a repave re-entered after a
-// crash resolves to the same name and becomes a no-op instead of another swap.
-func osDiskNameForImage(instID, imgName string) string {
-	rev := imgName
-	if i := strings.LastIndex(imgName, "-"); i >= 0 && i < len(imgName)-1 {
-		rev = imgName[i+1:]
-	}
-	return fmt.Sprintf("pg-%s-os-%s", instID, rev)
-}
-
-// isOSDiskName reports whether name is this instance's OS disk: the original
-// fixed name (pg-<id>-os) or a revision-suffixed repave name
-// (pg-<id>-os-<rev>). The exact-or-separator check keeps instance "orders"
-// from matching the disks of an instance named "orders-os".
-func isOSDiskName(name, osPVCPrefix string) bool {
-	return name == osPVCPrefix || strings.HasPrefix(name, osPVCPrefix+"-")
-}
-
-// Helpers
-func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name, sc string, err error) {
+// ResolveVMImage resolves a name or display name and verifies that the image is
+// imported and has the storage class required to clone it.
+func (c *TypedClient) ResolveVMImage(ctx context.Context, ref string) (ResolvedVMImage, error) {
 	if ref == "" {
-		return ns, name, sc, fmt.Errorf("empty image reference")
+		return ResolvedVMImage{}, fmt.Errorf("%w: reference is empty", ErrVMImageReferenceInvalid)
 	}
 
 	ns, spec := "default", ref
@@ -821,7 +372,7 @@ func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name,
 		ns, spec = ref[:i], ref[i+1:]
 	}
 	if spec == "" {
-		return ns, name, sc, fmt.Errorf("empty image name in reference %q", ref)
+		return ResolvedVMImage{}, fmt.Errorf("%w: empty image name in reference %q", ErrVMImageReferenceInvalid, ref)
 	}
 
 	img, e := c.Clientset.HarvesterhciV1beta1().VirtualMachineImages(ns).Get(ctx, spec, metav1.GetOptions{})
@@ -829,13 +380,13 @@ func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name,
 		return readyVMImageFields(ns, spec, img)
 	}
 	if !apierrors.IsNotFound(e) {
-		return ns, name, sc, e
+		return ResolvedVMImage{}, e
 	}
 
 	// fallback: search by displayName
 	list, e := c.Clientset.HarvesterhciV1beta1().VirtualMachineImages(ns).List(ctx, metav1.ListOptions{})
 	if e != nil {
-		return ns, name, sc, e
+		return ResolvedVMImage{}, e
 	}
 
 	var matched []harvesterhciov1beta1.VirtualMachineImage
@@ -847,24 +398,23 @@ func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name,
 
 	switch len(matched) {
 	case 0:
-		return ns, name, sc, fmt.Errorf("no VirtualMachineImage in namespace %q matching name or displayName %q", ns, spec)
+		return ResolvedVMImage{}, fmt.Errorf("%w: no VirtualMachineImage in namespace %q matching name or displayName %q", ErrVMImageNotFound, ns, spec)
 	case 1:
-		name = matched[0].Name
-		return readyVMImageFields(ns, name, &matched[0])
+		return readyVMImageFields(ns, matched[0].Name, &matched[0])
 	default:
-		return ns, name, sc, fmt.Errorf("ambiguous: %d VirtualMachineImages in namespace %q share displayName %q", len(matched), ns, spec)
+		return ResolvedVMImage{}, fmt.Errorf("%w: %d VirtualMachineImages in namespace %q share displayName %q", ErrVMImageAmbiguous, len(matched), ns, spec)
 	}
 }
 
-func readyVMImageFields(ns, name string, img *harvesterhciov1beta1.VirtualMachineImage) (string, string, string, error) {
+func readyVMImageFields(ns, name string, img *harvesterhciov1beta1.VirtualMachineImage) (ResolvedVMImage, error) {
 	if !isVMImageImported(img) {
-		return ns, name, "", fmt.Errorf("VirtualMachineImage %s/%s is not imported yet (status.conditions missing ImageImported=True)", ns, name)
+		return ResolvedVMImage{}, fmt.Errorf("%w: VirtualMachineImage %s/%s is not imported yet (status.conditions missing ImageImported=True)", ErrVMImageNotReady, ns, name)
 	}
 	sc, err := resolveImageStorageClassName(img)
 	if err != nil {
-		return ns, name, sc, err
+		return ResolvedVMImage{}, err
 	}
-	return ns, name, sc, nil
+	return ResolvedVMImage{Namespace: ns, Name: name, StorageClassName: sc}, nil
 }
 
 func isVMImageImported(image *harvesterhciov1beta1.VirtualMachineImage) bool {
@@ -881,8 +431,21 @@ func resolveImageStorageClassName(image *harvesterhciov1beta1.VirtualMachineImag
 	if image.Status.StorageClassName != "" {
 		return image.Status.StorageClassName, nil
 	}
-	return "", fmt.Errorf("VM image %s/%s does not have a StorageClass yet (not initialized)",
-		image.Namespace, image.Name)
+	return "", fmt.Errorf("%w: VM image %s/%s does not have a StorageClass yet (not initialized)",
+		ErrVMImageNotReady, image.Namespace, image.Name)
+}
+
+// VMName is the deterministic name of a DBInstance's VirtualMachine.
+func VMName(id string) string {
+	return fmt.Sprintf("pg-%s", id)
+}
+
+// DataVolumeName is the deterministic name of a DBInstance's data-disk PVC.
+// It's a pure naming convention, not a provider call: the PVC itself is
+// created later by Harvester from the VM's harvesterhci.io/volumeClaimTemplates
+// annotation (see buildPostgresVM below), so there's nothing to reserve up front.
+func DataVolumeName(id string) string {
+	return fmt.Sprintf("pg-%s-data", id)
 }
 
 func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretName, imageID, imageSC string, running bool) (*kubevirtv1.VirtualMachine, error) {
@@ -901,7 +464,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	osPVCName := fmt.Sprintf("pg-%s-os", p.ID)
 	dataPVCName := p.DataVolumeRef
 	if dataPVCName == "" {
-		dataPVCName = fmt.Sprintf("pg-%s-data", p.ID)
+		dataPVCName = DataVolumeName(p.ID)
 	}
 	dataSizeGB := p.DataVolumeSizeGB
 	if dataSizeGB <= 0 {
@@ -980,8 +543,8 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 		// FailureThreshold=12 @ PeriodSeconds=10 ≈ 2 min of sustained failure
 		// before Ready flips False. This probe is the single debounce for
 		// database liveness: the controller treats the resulting Ready condition
-		// as authoritative and does no further counting (see phaseAvailable). A
-		// guest-agent disconnect also trips it, since the probe execs pg_isready
+		// as authoritative and does no further counting (see ensureDatabaseHealth).
+		// A guest-agent disconnect also trips it, since the probe execs pg_isready
 		// in-guest via the agent.
 		FailureThreshold: 12,
 	}
@@ -1000,123 +563,6 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	return vm, nil
 }
 
-func (c *TypedClient) createOrUpdateService(ctx context.Context, id, ns, svcName string) error {
-	desired := typedMonitoringService(id, ns, svcName)
-	if _, err := c.KubeClient.CoreV1().Services(ns).Create(ctx, desired, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	existing, err := c.KubeClient.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	existing.Labels = desired.Labels
-	existing.Spec.Type = desired.Spec.Type
-	existing.Spec.ClusterIP = desired.Spec.ClusterIP
-	existing.Spec.Ports = desired.Spec.Ports
-	existing.Spec.Selector = nil
-	_, err = c.KubeClient.CoreV1().Services(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
-}
-
-func (c *TypedClient) createOrUpdateEndpoints(ctx context.Context, id, ns, svcName, vmIP string) error {
-	desired := typedMonitoringEndpoints(id, ns, svcName, vmIP)
-	if _, err := c.KubeClient.CoreV1().Endpoints(ns).Create(ctx, desired, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	existing, err := c.KubeClient.CoreV1().Endpoints(ns).Get(ctx, svcName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	existing.Labels = desired.Labels
-	existing.Subsets = desired.Subsets
-	_, err = c.KubeClient.CoreV1().Endpoints(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
-}
-
-func (c *TypedClient) createOrUpdateServiceMonitor(ctx context.Context, id, ns, smName string) error {
-	desired := typedServiceMonitor(id, ns, smName)
-	if _, err := c.Clientset.MonitoringV1().ServiceMonitors(ns).Create(ctx, desired, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	existing, err := c.Clientset.MonitoringV1().ServiceMonitors(ns).Get(ctx, smName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	existing.Labels = desired.Labels
-	existing.Spec.Selector = desired.Spec.Selector
-	existing.Spec.Endpoints = desired.Spec.Endpoints
-	_, err = c.Clientset.MonitoringV1().ServiceMonitors(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
-}
-
-func typedMonitoringService(id, ns, svcName string) *corev1.Service {
-	// create a headless service for the Postgres exporter metrics endpoint
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      svcName,
-			Namespace: ns,
-			Labels:    map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelMetrics: "true"},
-		},
-		Spec: corev1.ServiceSpec{
-			Type:      corev1.ServiceTypeClusterIP,
-			ClusterIP: corev1.ClusterIPNone,
-			Ports: []corev1.ServicePort{{
-				Name:       "metrics",
-				Port:       9187,
-				TargetPort: intstr.FromInt(9187),
-				Protocol:   corev1.ProtocolTCP,
-			}},
-		},
-	}
-}
-
-func typedMonitoringEndpoints(id, ns, svcName, vmIP string) *corev1.Endpoints {
-	return &corev1.Endpoints{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Endpoints"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      svcName,
-			Namespace: ns,
-			Labels:    map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelMetrics: "true"},
-		},
-		Subsets: []corev1.EndpointSubset{{
-			Addresses: []corev1.EndpointAddress{{IP: vmIP}},
-			Ports: []corev1.EndpointPort{{
-				Name:     "metrics",
-				Port:     9187,
-				Protocol: corev1.ProtocolTCP,
-			}},
-		}},
-	}
-}
-
-func typedServiceMonitor(id, ns, smName string) *monitoringv1.ServiceMonitor {
-	return &monitoringv1.ServiceMonitor{
-		TypeMeta: metav1.TypeMeta{APIVersion: "monitoring.coreos.com/v1", Kind: "ServiceMonitor"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      smName,
-			Namespace: ns,
-			Labels:    map[string]string{dbaasv1.LabelInstance: id, "release": "prometheus"},
-		},
-		Spec: monitoringv1.ServiceMonitorSpec{
-			Selector: metav1.LabelSelector{
-				MatchLabels: map[string]string{dbaasv1.LabelMetrics: "true", dbaasv1.LabelInstance: id},
-			},
-			Endpoints: []monitoringv1.Endpoint{{
-				Port:     "metrics",
-				Interval: monitoringv1.Duration("15s"),
-				Path:     "/metrics",
-			}},
-		},
-	}
-}
-
 func typedVMNetworkName(namespace, nadName string) string {
 	if strings.Contains(nadName, "/") {
 		return nadName
@@ -1124,11 +570,11 @@ func typedVMNetworkName(namespace, nadName string) string {
 	return fmt.Sprintf("%s/%s", namespace, nadName)
 }
 
-// typedVolumeClaimTemplates parses the VM's volumeClaimTemplates annotation
+// VolumeClaimTemplates parses the VM's volumeClaimTemplates annotation
 // into PVC templates. It returns pointers so callers can mutate entries in
 // place, but callers should still index the slice (pvcs[i]) rather than
 // range-copy so the mutation stays correct if this ever returns values.
-func typedVolumeClaimTemplates(vm *kubevirtv1.VirtualMachine) ([]*corev1.PersistentVolumeClaim, error) {
+func VolumeClaimTemplates(vm *kubevirtv1.VirtualMachine) ([]*corev1.PersistentVolumeClaim, error) {
 	raw := vm.Annotations[util.AnnotationVolumeClaimTemplates]
 	if raw == "" {
 		return nil, fmt.Errorf("VM %s/%s has no %s annotation", vm.Namespace, vm.Name, util.AnnotationVolumeClaimTemplates)
@@ -1152,6 +598,14 @@ func mergeStringMap(base map[string]string, overlay map[string]string) map[strin
 		out[k] = v
 	}
 	return out
+}
+
+// ignoreAlreadyExists returns nil if err is an AlreadyExists API error, otherwise err.
+func ignoreAlreadyExists(err error) error {
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
 }
 
 func ptr[T any](v T) *T {

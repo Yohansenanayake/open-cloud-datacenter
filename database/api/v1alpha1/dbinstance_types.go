@@ -33,6 +33,12 @@ import (
 //     backupRetentionPeriod, preferredBackupWindow. These fields exist in
 //     the schema for forward compatibility but the reconciler does not
 //     apply them. See ARCHITECTURE.md for the roadmap.
+//
+// Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
+// vmPassword carry a CEL "self == oldSelf" rule: the other five (osImage,
+// dbName, masterUsername, port, storageType) are compared post-defaulting in
+// immutableDrift(), so a raw CEL rule on them would be stricter than that
+// check — see immutableDrift's doc comment.
 type DBInstanceSpec struct {
 	// DBInstanceClass maps to VM CPU/RAM. e.g. "db.t3.medium", "db.m5.large".
 	// Mutable: changing the class on an Available instance resizes the VM.
@@ -41,12 +47,12 @@ type DBInstanceSpec struct {
 	DBInstanceClass string `json:"dbInstanceClass"`
 
 	// EngineVersion is the PostgreSQL major version, e.g. "16".
-	// Immutable after first reconcile. The default below will be removed once
-	// the DBInstance defaulting webhook is deployed (dbinstance_webhook.go
-	// DBInstanceDefaulter), which will set this dynamically from the
-	// BakedImages catalog instead of a hardcoded value.
+	// NOT YET IMPLEMENTED: cloud-init installs whatever PostgreSQL the OS
+	// image's apt repo provides (Ubuntu 24.04 → PG 16; older → older). The
+	// field is recorded but does not drive package selection.
+	// Immutable after first reconcile.
 	// +optional
-	// +kubebuilder:default="17"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engineVersion is immutable after creation"
 	EngineVersion string `json:"engineVersion,omitempty"`
 
 	// DBName is the initial database to create. Default: the instance name.
@@ -158,6 +164,7 @@ type DBInstanceSpec struct {
 	// Example: "iaas-net/vm-subnet-001".
 	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="networkRef is immutable after creation"
 	NetworkRef string `json:"networkRef"`
 
 	// StaticNetwork, when set, configures the VM's data NIC with a static
@@ -167,6 +174,7 @@ type DBInstanceSpec struct {
 	// Immutable after first reconcile (in-VM netplan reconfiguration is not
 	// implemented).
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="staticNetwork is immutable after creation"
 	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
 
 	// DNSServerIP, when set, pins the VM's resolver via KubeVirt
@@ -184,6 +192,7 @@ type DBInstanceSpec struct {
 	// (ubuntu). For development and debugging only — leave empty in
 	// production. Immutable after first reconcile.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="vmPassword is immutable after creation"
 	VMPassword string `json:"vmPassword,omitempty"`
 
 	// S3BackupConfig for pgBackRest S3 target.
@@ -222,10 +231,12 @@ type NetworkConfig struct {
 	// least one — cloud-init will fail to resolve apt mirrors without DNS.
 	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Pattern=`^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$`
 	Nameservers []string `json:"nameservers"`
 
 	// SearchDomains are DNS search-domain suffixes. Optional.
 	// +optional
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 	SearchDomains []string `json:"searchDomains,omitempty"`
 }
 
@@ -245,10 +256,6 @@ type DBInstanceStatus struct {
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-	// ProvisioningPhase tracks which reconcile step we're on.
-	// +optional
-	ProvisioningPhase string `json:"provisioningPhase,omitempty"`
-
 	// Conditions for each sub-resource.
 	// +listType=map
 	// +listMapKey=type
@@ -259,11 +266,7 @@ type DBInstanceStatus struct {
 	// +optional
 	Endpoint *Endpoint `json:"endpoint,omitempty"`
 
-	// MasterUserSecret references the K8s Secret with credentials.
-	// +optional
-	MasterUserSecret *MasterUserSecretRef `json:"masterUserSecret,omitempty"`
-
-	// Resources tracks every Harvester object created for cleanup and idempotency.
+	// Resources tracks managed resource references used by clients and cleanup.
 	// +optional
 	Resources ResourceRefs `json:"resources,omitempty"`
 
@@ -274,10 +277,6 @@ type DBInstanceStatus struct {
 	// PrometheusTarget is the scrape target for the instance's metrics exporter.
 	// +optional
 	PrometheusTarget string `json:"prometheusTarget,omitempty"`
-
-	// CACertPEM is the generated CA for SSL verification.
-	// +optional
-	CACertPEM string `json:"caCertPem,omitempty"`
 
 	// ReadReplicas tracks child replica identifiers.
 	// +optional
@@ -305,7 +304,7 @@ type DBInstanceStatus struct {
 	RestartCount int `json:"restartCount,omitempty"`
 
 	// LastKnownVMIUID is the UID of the VMI last recorded by the controller.
-	// A UID change during phaseAvailable indicates an unplanned restart.
+	// A UID change while the instance is Available indicates an unplanned restart.
 	// +optional
 	LastKnownVMIUID string `json:"lastKnownVMIUID,omitempty"`
 
@@ -339,12 +338,10 @@ type AppliedSpec struct {
 	Port int `json:"port,omitempty"`
 	// +optional
 	StorageType string `json:"storageType,omitempty"`
-	// ImageRevision is the baked image revision the VM was provisioned or last
-	// repaved with, e.g. "v20260615". Used for drift detection — when this
-	// differs from the current LatestBakedImages revision, OSUpdateAvailable
-	// is set to True.
 	// +optional
-	ImageRevision string `json:"imageRevision,omitempty"`
+	VMPassword string `json:"vmPassword,omitempty"`
+	// +optional
+	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
 }
 
 // Endpoint is the network address clients use to reach the database.
@@ -355,18 +352,7 @@ type Endpoint struct {
 	JDBCURL string `json:"jdbcUrl,omitempty"`
 }
 
-// MasterUserSecretRef references the K8s Secret holding the master credentials.
-type MasterUserSecretRef struct {
-	Name string `json:"name"`
-	// Status is "active" or "impaired".
-	Status string `json:"status"`
-}
-
-// ResourceRefs tracks every Harvester resource the controller created.
-// Each field is populated as the corresponding phase completes. On controller
-// restart, the reconciler reads these to skip completed phases. All resources
-// live in the DBInstance's own namespace — read it via inst.Namespace, not
-// from this struct.
+// ResourceRefs tracks managed resources associated with the DBInstance.
 type ResourceRefs struct {
 	// NADName is the Multus NetworkAttachmentDefinition the VM's data NIC
 	// attaches to. The controller does not create the NAD; this just records
@@ -377,12 +363,14 @@ type ResourceRefs struct {
 	DataVolumeName string `json:"dataVolumeName,omitempty"`
 	// +optional
 	VMName string `json:"vmName,omitempty"`
+	// AdminCredentialsSecretName is the tenant-facing Secret containing the
+	// administrator username and password.
 	// +optional
-	SecretName string `json:"secretName,omitempty"`
+	AdminCredentialsSecretName string `json:"adminCredentialsSecretName,omitempty"`
 	// CloudInitSecretName is the ephemeral Secret that holds cloud-init
-	// userdata and networkdata. It is deleted by the controller as soon as
-	// the VM reaches Available so the installation script and embedded
-	// passwords are not left on-cluster indefinitely.
+	// userdata and networkdata. Once PostgreSQL is ready, the controller scrubs
+	// sensitive userdata but retains the object because the running VMI keeps the
+	// Secret volume mounted.
 	// +optional
 	CloudInitSecretName string `json:"cloudInitSecretName,omitempty"`
 	// +optional
@@ -392,17 +380,23 @@ type ResourceRefs struct {
 	// can delete it (forgetting it leaves orphan Services in the tenant ns).
 	// +optional
 	MetricsServiceName string `json:"metricsServiceName,omitempty"`
-	// OSDiskPVCName is the exact current name of the OS disk PVC: pg-<id>-os
-	// at first provision, or a revision-suffixed pg-<id>-os-<rev> after a
-	// repave. Authoritative — TeardownAll and repave's old-disk cleanup read
-	// this instead of deriving the name by string-prefix matching against a
-	// namespace-wide PVC scan, which is ambiguous whenever one instance's
-	// name is itself a prefix of another's (e.g. "orders" and "orders-os").
-	// Empty on instances provisioned before this field existed; callers fall
-	// back to reading the live VM's own volumeClaimTemplates annotation (see
-	// collectDiskPVCNames), which is exact but requires the VM to still exist.
+	// ConnectionSecretName is the tenant-facing Secret with connection
+	// metadata (host/port/dbname/jdbcUrl/sslmode/ca.crt) and no password
+	// material. Lives in the DBInstance's own namespace.
 	// +optional
-	OSDiskPVCName string `json:"osDiskPVCName,omitempty"`
+	ConnectionSecretName string `json:"connectionSecretName,omitempty"`
+	// InternalSecretRef is "namespace/name" of the controller-private Secret
+	// holding DBaaS-internal credentials (repl_password, exporter_password).
+	// Namespace-qualified because it lives in the operator namespace, not the
+	// DBInstance's own namespace, and so cannot carry an owner reference —
+	// cleanup is finalizer-driven by this ref plus a UID-label sweep backstop.
+	// +optional
+	InternalSecretRef string `json:"internalSecretRef,omitempty"`
+	// PrivateTLSSecretRef is "namespace/name" of the controller-private
+	// Secret holding the CA and server TLS material. Same cross-namespace
+	// cleanup model as InternalSecretRef.
+	// +optional
+	PrivateTLSSecretRef string `json:"privateTLSSecretRef,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -435,50 +429,35 @@ type DBInstanceList struct {
 }
 
 const (
-	// Status.ProvisioningPhase values (internal reconcile steps).
-	PhasePending             = "Pending"
-	PhaseNetworkProvisioned  = "NetworkProvisioned"
-	PhaseStorageProvisioned  = "StorageProvisioned"
-	PhaseVMCreated           = "VMCreated"
-	PhaseWaitingForCloudInit = "WaitingForCloudInit"
-	PhaseDatabaseReady       = "DatabaseReady"
-	PhaseMonitoringDeployed  = "MonitoringDeployed"
-	PhaseAvailable           = "Available"
-	PhaseStopped             = "Stopped"
-	PhaseFailed              = "Failed"
-
 	// Status.Phase values (RDS-compatible lowercase strings).
-	StatusCreating  = "creating"
-	StatusAvailable = "available"
-	StatusStopping  = "stopping"
-	StatusStopped   = "stopped"
-	StatusStarting  = "starting"
-	StatusModifying = "modifying"
-	StatusDeleting  = "deleting"
-	StatusFailed    = "failed"
-
-	// MasterUserSecretRef.Status values.
-	SecretStatusActive   = "active"
-	SecretStatusImpaired = "impaired"
-
-	// Condition type constants for DBInstance liveness monitoring.
-	// These are the Type field of entries in Status.Conditions.
-	ConditionDegraded          = "Degraded"          // readiness probe failing or guest agent disconnected (report-only)
-	ConditionFailed            = "Failed"            // crash-loop give-up, or a fatal provisioning error
-	ConditionOSUpdateAvailable = "OSUpdateAvailable" // VM is running an older image revision; repave available
-	ConditionPGVersionEOL      = "PGVersionEOL"      // VM's engineVersion has reached upstream EOL; customer migration required
-
-	// Condition reason constants (Conditions[].Reason).
-	ReasonPostgresUnreachable    = "PostgresUnreachable"
-	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
-	ReasonVMRestarting           = "VMRestarting"
-	ReasonCrashLoopDetected      = "CrashLoopDetected"
-	ReasonRecovered              = "Recovered"
+	StatusCreating               = "creating"
+	StatusAvailable              = "available"
+	StatusStopping               = "stopping"
+	StatusStopped                = "stopped"
+	StatusStarting               = "starting"
+	StatusModifying              = "modifying"
+	StatusDeleting               = "deleting"
+	StatusFailed                 = "failed"
+	StatusDegraded               = "degraded"                // Report-only — the controller never restarts on degradation.
+	StatusIncompatibleParameters = "incompatible-parameters" // A requested change was rejected; the existing database, if any, is unaffected.
+	StatusCrashLoopHalted        = "crash-loop-halted"
 
 	// Label keys applied to all Harvester resources owned by a DBInstance.
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"
 	LabelRole     = "dbaas.opencloud.wso2.com/role"
 	LabelMetrics  = "dbaas.opencloud.wso2.com/metrics"
+	// LabelDBInstanceUID marks the two controller-private, cross-namespace
+	// Secrets (operator-namespace internal-credentials and TLS Secrets) with
+	// the owning DBInstance's UID. Cross-namespace objects can't carry owner
+	// references, so this label is the backstop cleanup sweep alongside the
+	// recorded ref in status.resources.
+	LabelDBInstanceUID = "dbaas.opencloud.wso2.com/dbinstance-uid"
+
+	// AnnotationCrashLoopHaltedVMIUID is stored on a VM when the controller
+	// halts it after repeated unplanned restarts. The value is the UID of the
+	// VMI being halted, allowing reconciliation to distinguish that VMI tearing
+	// down from a later out-of-band recovery VMI.
+	AnnotationCrashLoopHaltedVMIUID = "dbaas.opencloud.wso2.com/crash-loop-halted-vmi-uid"
 
 	// FinalizerName triggers controller-side teardown of Harvester resources.
 	FinalizerName = "dbaas.opencloud.wso2.com/cleanup"

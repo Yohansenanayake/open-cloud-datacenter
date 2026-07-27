@@ -1,0 +1,323 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	kubevirtv1 "kubevirt.io/api/core/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
+	dbresource "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
+)
+
+// newProvisionInst returns a DBInstance mid-provisioning: valid spec, finalizer
+// already present (Reconcile adds it pre-dispatch in production).
+func newProvisionInst() *dbaasv1.DBInstance {
+	return testutil.NewProvisionInstance()
+}
+
+// newProvisionReconciler wires a reconciler with the dbaas + KubeVirt + core +
+// monitoring schemes so the VM step can observe VirtualMachine objects and the
+// monitoring step can apply its builder-managed children through the fake client.
+func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Object) *DBInstanceReconciler {
+	t.Helper()
+	r := &DBInstanceReconciler{
+		Client:         testutil.NewClient(t, objs...),
+		Harvester:      stub,
+		Recorder:       record.NewFakeRecorder(100),
+		GrafanaBaseURL: "https://grafana.example",
+	}
+	r.EnsureRunner = ensure.NewDefaultRunner(testEnsureDependencies(r))
+	return r
+}
+
+// testVM returns a VirtualMachine shaped the way CreatePostgresVM builds it for
+// newProvisionInst (db.t3.small, 20Gi): runStrategy Always, class cpu/mem in
+// resources.limits, data-disk PVC in the volumeClaimTemplates annotation. The
+// resize and power steps observe this shape.
+func testVM(name, ns string) *kubevirtv1.VirtualMachine {
+	return testutil.VM(name, ns)
+}
+
+// setVMRunStrategy simulates the effect of a StartVM/StopVM provider call on the
+// fake cluster (the stub does not touch the fake client's VM object).
+func setVMRunStrategy(t *testing.T, c client.Client, name, ns string, rs kubevirtv1.VirtualMachineRunStrategy) {
+	t.Helper()
+	var vm kubevirtv1.VirtualMachine
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: name}, &vm); err != nil {
+		t.Fatalf("get vm: %v", err)
+	}
+	vm.Spec.RunStrategy = &rs
+	if err := c.Update(context.Background(), &vm); err != nil {
+		t.Fatalf("update vm: %v", err)
+	}
+}
+
+// --- reconcileInstance outcome-to-Result mapping through real scenarios ---
+
+func TestReconcileInstanceTerminalParks(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Spec.DBInstanceClass = "db.bogus"
+	r := newProvisionReconciler(t, &stubHarvester{}, inst)
+
+	result, err := r.reconcileInstance(context.Background(), inst)
+
+	if err != nil {
+		t.Fatalf("terminal must park without error, got %v", err)
+	}
+	if result != (ctrl.Result{}) {
+		t.Fatalf("terminal must not requeue, got %+v", result)
+	}
+
+	got := &dbaasv1.DBInstance{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(inst), got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Status.IsCurrentConditionFalse(dbaasv1.ConditionAccepted, got.Generation) {
+		t.Fatalf("Accepted=False not persisted: %+v", got.Status.Conditions)
+	}
+	if got.Status.Phase != dbaasv1.StatusIncompatibleParameters {
+		t.Fatalf("Phase = %q, want %q", got.Status.Phase, dbaasv1.StatusIncompatibleParameters)
+	}
+}
+
+func TestReconcileInstanceTransientReturnsError(t *testing.T) {
+	inst := newProvisionInst()
+	boom := errors.New("vmi lookup boom")
+	stub := &stubHarvester{ReadinessErr: boom}
+	// VM object present so the pass reaches the health gate.
+	r := newProvisionReconciler(t, stub, inst, testVM("pg-orders", "tenant-a"))
+	convergeCredentials(t, context.Background(), r, inst)
+
+	_, err := r.reconcileInstance(context.Background(), inst)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the injected transient error", err)
+	}
+}
+
+func TestReconcileInstanceFullWalk(t *testing.T) {
+	ctx := context.Background()
+	inst := newProvisionInst()
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{
+		Running: true,
+		IP:      "192.168.40.50",
+		Ready:   true,
+	}}
+	r := newProvisionReconciler(t, stub, inst)
+	key := client.ObjectKeyFromObject(inst)
+
+	// Pass 1: durable credential Secrets are created and stop the pass.
+	result, err := r.reconcileInstance(ctx, inst)
+	if err != nil || result.RequeueAfter != credentialRequeue {
+		t.Fatalf("pass 1 = (%+v, %v), want credential fallback requeue", result, err)
+	}
+	if stub.CreateVMCalls != 0 {
+		t.Fatalf("CreateVMCalls = %d, want 0 before credential re-observation", stub.CreateVMCalls)
+	}
+	after1 := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, after1); err != nil {
+		t.Fatalf("get after pass 1: %v", err)
+	}
+	// Deterministic credential refs are recorded in the creation pass.
+	if after1.Status.Resources.AdminCredentialsSecretName != "pg-orders-credentials" {
+		t.Fatalf("AdminCredentialsSecretName = %q after pass 1, want pg-orders-credentials", after1.Status.Resources.AdminCredentialsSecretName)
+	}
+	if after1.Status.Resources.InternalSecretRef != "dbaas-system/dbi-orders-uid-internal" {
+		t.Fatalf("InternalSecretRef = %q after pass 1", after1.Status.Resources.InternalSecretRef)
+	}
+	if after1.Status.Resources.PrivateTLSSecretRef != "dbaas-system/dbi-orders-uid-tls" {
+		t.Fatalf("PrivateTLSSecretRef = %q after pass 1", after1.Status.Resources.PrivateTLSSecretRef)
+	}
+	if after1.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+		t.Fatal("Ready must not be True after pass 1")
+	}
+	if cond := after1.Status.GetCondition(dbaasv1.ConditionVMReady); cond != nil {
+		t.Fatalf("VMReady condition = %+v, want absent before the VM step runs", cond)
+	}
+
+	// Pass 2: credentials are observed, then the absent VM is created.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 2: %v", err)
+	}
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 2 = (%+v, %v), want event-driven VM-create Pending", result, err)
+	}
+	if stub.CreateVMCalls != 1 {
+		t.Fatalf("CreateVMCalls = %d, want 1", stub.CreateVMCalls)
+	}
+
+	// KubeVirt "creates" the VM out of band.
+	if err := r.Create(ctx, testVM("pg-orders", "tenant-a")); err != nil {
+		t.Fatalf("create vm: %v", err)
+	}
+
+	// Pass 3: VM and health converge, then the connection Secret is created and
+	// stops the pass before monitoring and generation completion.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch: %v", err)
+	}
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result.RequeueAfter != credentialRequeue {
+		t.Fatalf("pass 3 = (%+v, %v), want connection-secret fallback requeue", result, err)
+	}
+
+	// Pass 4: the connection Secret is observed unchanged; monitoring resources
+	// are created and stop the pass before bootstrap cleanup and completion.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 4: %v", err)
+	}
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result.RequeueAfter != monitoringRequeue {
+		t.Fatalf("pass 4 = (%+v, %v), want monitoring fallback requeue", result, err)
+	}
+	after4 := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, after4); err != nil {
+		t.Fatalf("get after pass 4: %v", err)
+	}
+	if after4.Status.ObservedGeneration == after4.Generation {
+		t.Fatalf("ObservedGeneration advanced during monitoring mutation: %+v", after4.Status)
+	}
+	var unredacted corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &unredacted); err != nil {
+		t.Fatalf("cloud-init secret missing after pass 4: %v", err)
+	}
+	if string(unredacted.Data["userdata"]) == redactedCloudInitUserData {
+		t.Fatal("bootstrap cleanup ran in the monitoring mutation pass")
+	}
+
+	// Pass 5: monitoring is observed unchanged, then bootstrap cleanup redacts
+	// the cloud-init Secret and stops before generation completion.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 5: %v", err)
+	}
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 5 = (%+v, %v), want event-driven bootstrap-cleanup Pending", result, err)
+	}
+	after5 := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, after5); err != nil {
+		t.Fatalf("get after pass 5: %v", err)
+	}
+	if after5.Status.ObservedGeneration == after5.Generation {
+		t.Fatalf("ObservedGeneration advanced during bootstrap cleanup: %+v", after5.Status)
+	}
+	// The cloud-init Secret is redacted, not deleted — the ref stays recorded.
+	if after5.Status.Resources.CloudInitSecretName != "pg-orders-cloudinit" {
+		t.Fatalf("cloud-init ref = %q after pass 5, want kept (pg-orders-cloudinit)", after5.Status.Resources.CloudInitSecretName)
+	}
+	var ciSecret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ciSecret); err != nil {
+		t.Fatalf("cloud-init secret missing: %v", err)
+	}
+	if string(ciSecret.Data["userdata"]) != redactedCloudInitUserData {
+		t.Fatalf("cloud-init userdata = %q, want redacted", ciSecret.Data["userdata"])
+	}
+	if after5.Status.Phase != dbaasv1.StatusAvailable {
+		t.Fatalf("phase after bootstrap mutation = %q, want available", after5.Status.Phase)
+	}
+
+	// Pass 6: the redacted Secret is observed unchanged, so the generation
+	// completion checkpoint advances ObservedGeneration.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatalf("refetch for pass 6: %v", err)
+	}
+	if result, err = r.reconcileInstance(ctx, inst); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("pass 6 = (%+v, %v), want zero Result and nil error", result, err)
+	}
+	got := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, key, got); err != nil {
+		t.Fatalf("get after pass 6: %v", err)
+	}
+	if got.Status.Phase != dbaasv1.StatusAvailable {
+		t.Fatalf("phase = %q, want available", got.Status.Phase)
+	}
+	if got.Status.ObservedGeneration != 3 {
+		t.Fatalf("ObservedGeneration = %d, want 3", got.Status.ObservedGeneration)
+	}
+	for _, c := range []string{dbaasv1.ConditionPreflightReady, dbaasv1.ConditionVMReady, dbaasv1.ConditionDatabaseReady, dbaasv1.ConditionMonitoringReady, dbaasv1.ConditionReady} {
+		if !got.Status.IsConditionTrue(c) {
+			t.Errorf("condition %s not True: %+v", c, got.Status.GetCondition(c))
+		}
+	}
+	if got.Status.Endpoint == nil || got.Status.Endpoint.Address != "192.168.40.50" {
+		t.Fatalf("Endpoint = %+v, want address 192.168.40.50", got.Status.Endpoint)
+	}
+
+	// The builder-managed monitoring trio exists, controller-owned (PR7).
+	for _, check := range []struct {
+		name string
+		obj  client.Object
+	}{
+		{dbresource.MetricsServiceName(got), &corev1.Service{}},
+		{dbresource.MetricsServiceName(got), &corev1.Endpoints{}},
+		{dbresource.ServiceMonitorName(got), &monitoringv1.ServiceMonitor{}},
+	} {
+		if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: check.name}, check.obj); err != nil {
+			t.Fatalf("monitoring child %s (%T) missing: %v", check.name, check.obj, err)
+		}
+		refs := check.obj.GetOwnerReferences()
+		if len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
+			t.Fatalf("monitoring child %s owner refs = %+v, want controller-owned by the DBInstance", check.name, refs)
+		}
+	}
+
+	// PR8: the full credential/TLS secret inventory exists — slim tenant
+	// credentials + connection Secret in the tenant namespace, internal +
+	// TLS Secrets in the operator namespace — and status.caCertPem is gone
+	// (the field no longer exists on DBInstanceStatus at all).
+	if got.Status.Resources.ConnectionSecretName != "pg-orders-connect" {
+		t.Fatalf("ConnectionSecretName = %q, want pg-orders-connect", got.Status.Resources.ConnectionSecretName)
+	}
+
+	var tenantCred corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-credentials"}, &tenantCred); err != nil {
+		t.Fatalf("tenant credentials secret missing: %v", err)
+	}
+	if tenantCred.StringData["admin_password"] == "" {
+		t.Fatal("tenant credentials secret has no admin_password")
+	}
+	if _, hasLegacy := tenantCred.StringData["ca_cert"]; hasLegacy {
+		t.Fatal("tenant credentials secret must not carry TLS keys")
+	}
+
+	var conn corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-connect"}, &conn); err != nil {
+		t.Fatalf("connection secret missing: %v", err)
+	}
+	if string(conn.Data["host"]) != "192.168.40.50" || len(conn.Data["ca.crt"]) == 0 {
+		t.Fatalf("connection secret Data = %+v", conn.Data)
+	}
+
+	for _, name := range []string{"dbi-orders-uid-internal", "dbi-orders-uid-tls"} {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: "dbaas-system", Name: name}, &sec); err != nil {
+			t.Fatalf("operator-namespace secret %s missing: %v", name, err)
+		}
+		if sec.Labels[dbaasv1.LabelDBInstanceUID] != "orders-uid" {
+			t.Fatalf("%s labels = %+v, want dbinstance-uid=orders-uid", name, sec.Labels)
+		}
+	}
+}

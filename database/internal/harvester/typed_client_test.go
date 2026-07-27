@@ -3,13 +3,13 @@ package harvester
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvesterfake "github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
 	harvesterutil "github.com/harvester/harvester/pkg/util"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -23,43 +23,106 @@ import (
 	kvfake "kubevirt.io/client-go/kubevirt/fake"
 )
 
-func TestTypedCreatePostgresVMDoesNotCreateSecretWhenImageResolutionFails(t *testing.T) {
-	ctx := context.Background()
-	client := newTestTypedClient()
+// mgmtNetInterface is the legacy dynamic-client's dial-probe NIC name
+// (removed in PR9 along with DialVMListener) — kept here only so the tests
+// below can assert it never appears on a TypedClient-built VM.
+const mgmtNetInterface = "mgmt-net"
 
-	_, credSecretName, cloudInitSecretName, _, err := client.CreatePostgresVM(ctx, testVMCreateParams())
-	if err == nil {
-		t.Fatalf("CreatePostgresVM returned nil error, want image resolution error")
-	}
-	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("credentials Secret should not exist after image-resolution failure, got: %v", err)
-	}
-	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("cloudinit Secret should not exist after image-resolution failure, got: %v", err)
+func testVMCreateParams() VMCreateParams {
+	return VMCreateParams{
+		ID:                     "orders",
+		Namespace:              "tenant-a",
+		CPUCores:               2,
+		MemoryMB:               4096,
+		OSImage:                "ubuntu-22.04",
+		DataVolumeRef:          "pg-orders-data",
+		DataVolumeSizeGB:       20,
+		DataVolumeStorageClass: "harvester-longhorn",
+		NADName:                "tenant-a/vm-network",
+		MasterUser:             "dbadmin",
+		Port:                   5432,
+		CloudInitSecretName:    "pg-orders-cloudinit",
 	}
 }
 
-func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemplate(t *testing.T) {
+func TestTypedCreatePostgresVMFailsOnImageResolutionFailure(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient()
+
+	vmName, err := client.CreatePostgresVM(ctx, testVMCreateParams())
+	if err == nil {
+		t.Fatalf("CreatePostgresVM returned nil error, want image resolution error")
+	}
+	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("VM should not exist after image-resolution failure, got: %v", err)
+	}
+}
+
+func TestResolveVMImage(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	client := newTestTypedClient(image)
+
+	resolved, err := client.ResolveVMImage(ctx, image.Spec.DisplayName)
+	if err != nil {
+		t.Fatalf("ResolveVMImage returned error: %v", err)
+	}
+	if resolved.Namespace != "default" || resolved.Name != image.Name ||
+		resolved.StorageClassName != image.Status.StorageClassName {
+		t.Fatalf("resolved image = %+v", resolved)
+	}
+}
+
+func TestResolveVMImageClassifiesSemanticFailures(t *testing.T) {
+	ctx := context.Background()
+	notReady := testTypedVMImage()
+	notReady.Status.Conditions = nil
+	first := testTypedVMImage()
+	first.Name = "ubuntu-a"
+	first.Spec.DisplayName = "duplicate"
+	second := first.DeepCopy()
+	second.Name = "ubuntu-b"
+
+	tests := []struct {
+		name   string
+		client *TypedClient
+		ref    string
+		want   error
+	}{
+		{"empty reference", newTestTypedClient(), "", ErrVMImageReferenceInvalid},
+		{"not found", newTestTypedClient(), "missing", ErrVMImageNotFound},
+		{"not ready", newTestTypedClient(notReady), notReady.Name, ErrVMImageNotReady},
+		{"ambiguous display name", newTestTypedClient(first, second), "duplicate", ErrVMImageAmbiguous},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.client.ResolveVMImage(ctx, tt.ref)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("ResolveVMImage error = %v, want errors.Is(%v)", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestDataVolumeNameMatchesPVCTemplateAndResizeUpdatesVMTemplate(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(testTypedVMImage())
 
-	dvName, err := client.CreateDataVolume(ctx, "orders", "tenant-a", 10, "harvester-longhorn")
-	if err != nil {
-		t.Fatalf("CreateDataVolume returned error: %v", err)
-	}
+	dvName := DataVolumeName("orders")
 	if dvName != "pg-orders-data" {
 		t.Fatalf("DataVolume name = %q, want pg-orders-data", dvName)
 	}
 	params := testVMCreateParams()
 	params.DataVolumeRef = dvName
-	if _, _, _, _, err := client.CreatePostgresVM(ctx, params); err != nil {
+	if _, err := client.CreatePostgresVM(ctx, params); err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
 	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get VM: %v", err)
 	}
-	templates, err := typedVolumeClaimTemplates(vm)
+	templates, err := VolumeClaimTemplates(vm)
 	if err != nil {
 		t.Fatalf("volume claim templates: %v", err)
 	}
@@ -79,7 +142,7 @@ func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemp
 	if err != nil {
 		t.Fatalf("get resized VM: %v", err)
 	}
-	templates, err = typedVolumeClaimTemplates(vm)
+	templates, err = VolumeClaimTemplates(vm)
 	if err != nil {
 		t.Fatalf("resized volume claim templates: %v", err)
 	}
@@ -93,84 +156,42 @@ func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemp
 	}
 }
 
-func TestTypedCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
-	ctx := context.Background()
-	client := newTestTypedClient(testTypedVMImage())
-
-	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := client.CreatePostgresVM(ctx, testVMCreateParams())
-	if err != nil {
-		t.Fatalf("CreatePostgresVM returned error: %v", err)
-	}
-	if vmName != "pg-orders" || credSecretName != "pg-orders-credentials" || cloudInitSecretName != "pg-orders-cloudinit" {
-		t.Fatalf("unexpected names: vm=%q cred=%q cloudinit=%q", vmName, credSecretName, cloudInitSecretName)
-	}
-	if caCertPEM == "" {
-		t.Fatalf("CA cert is empty")
-	}
-
-	credSecret, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get credentials Secret: %v", err)
-	}
-	if credSecret.StringData["ca_cert"] != caCertPEM {
-		t.Fatalf("returned CA does not match Secret CA")
-	}
-	cloudInitSecret, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get cloudinit Secret: %v", err)
-	}
-	if cloudInitSecret.StringData["userdata"] == "" {
-		t.Fatalf("cloudinit Secret has no stringData.userdata")
-	}
-	if !strings.Contains(cloudInitSecret.StringData["userdata"], "systemctl enable postgresql") {
-		t.Fatalf("cloudinit userdata does not enable postgresql for reboot survival")
-	}
-	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("get created VM: %v", err)
-	}
-}
-
-// On re-entry, CreatePostgresVM must reuse the existing credentials material
-// rather than regenerating it — otherwise the returned CA and the cloud-init
-// bootstrap would diverge from the credentials Secret (verify-ca failures /
-// wrong password). This covers the asymmetric partial state where the
-// cloud-init Secret was lost but the credentials Secret survived.
-func TestTypedCreatePostgresVMReusesCredentialMaterialOnReentry(t *testing.T) {
+// CreatePostgresVM no longer generates credentials/cloud-init (PR8 — that
+// moved to internal/credentials + internal/resource; the reuse-on-reentry
+// invariant is now tested there). It only builds the VM against an
+// already-provisioned cloud-init Secret name.
+func TestTypedCreatePostgresVMUsesSuppliedCloudInitSecret(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(testTypedVMImage())
 	params := testVMCreateParams()
 
-	_, credName, ciName, ca1, err := client.CreatePostgresVM(ctx, params)
+	vmName, err := client.CreatePostgresVM(ctx, params)
 	if err != nil {
-		t.Fatalf("first CreatePostgresVM: %v", err)
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
-	cred1, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get credentials Secret: %v", err)
-	}
-	pw1 := cred1.StringData["admin_password"]
-
-	// Simulate the asymmetric partial state: cloud-init gone, credentials kept.
-	if err := client.KubeClient.CoreV1().Secrets("tenant-a").Delete(ctx, ciName, metav1.DeleteOptions{}); err != nil {
-		t.Fatalf("delete cloudinit Secret: %v", err)
+	if vmName != "pg-orders" {
+		t.Fatalf("VM name = %q, want pg-orders", vmName)
 	}
 
-	_, _, _, ca2, err := client.CreatePostgresVM(ctx, params)
+	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("second CreatePostgresVM: %v", err)
+		t.Fatalf("get created VM: %v", err)
 	}
-	if ca2 != ca1 {
-		t.Fatalf("returned CA changed across re-entry: was %q now %q", ca1, ca2)
+	found := false
+	for _, v := range vm.Spec.Template.Spec.Volumes {
+		if v.Name != "cloudinit" || v.CloudInitNoCloud == nil {
+			continue
+		}
+		found = true
+		if v.CloudInitNoCloud.UserDataSecretRef == nil || v.CloudInitNoCloud.UserDataSecretRef.Name != params.CloudInitSecretName {
+			t.Fatalf("UserDataSecretRef = %+v, want %q", v.CloudInitNoCloud.UserDataSecretRef, params.CloudInitSecretName)
+		}
+		if v.CloudInitNoCloud.NetworkDataSecretRef == nil || v.CloudInitNoCloud.NetworkDataSecretRef.Name != params.CloudInitSecretName {
+			t.Fatalf("NetworkDataSecretRef = %+v, want %q", v.CloudInitNoCloud.NetworkDataSecretRef, params.CloudInitSecretName)
+		}
 	}
-	cred2, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get credentials Secret after re-entry: %v", err)
-	}
-	if got := cred2.StringData["admin_password"]; got != pw1 {
-		t.Fatalf("admin_password changed across re-entry: was %q now %q", pw1, got)
-	}
-	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, ciName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("cloudinit Secret not recreated on re-entry: %v", err)
+	if !found {
+		t.Fatal("cloudinit volume not found on VM")
 	}
 }
 
@@ -181,10 +202,11 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	params := testVMCreateParams()
 	params.DNSServerIP = "10.96.0.10/32"
 
-	vmName, _, cloudInitSecretName, _, err := client.CreatePostgresVM(ctx, params)
+	vmName, err := client.CreatePostgresVM(ctx, params)
 	if err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
+	cloudInitSecretName := params.CloudInitSecretName
 	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get created VM: %v", err)
@@ -209,7 +231,7 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if got := len(vm.Spec.DataVolumeTemplates); got != 0 {
 		t.Fatalf("dataVolumeTemplates = %d, want 0 for Harvester-native volumeClaimTemplates path", got)
 	}
-	templates, err := typedVolumeClaimTemplates(vm)
+	templates, err := VolumeClaimTemplates(vm)
 	if err != nil {
 		t.Fatalf("volume claim templates: %v", err)
 	}
@@ -394,8 +416,11 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	ctx := context.Background()
 	runStrategy := kubevirtv1.RunStrategyRerunOnFailure
 	client := newTestTypedClient(&kubevirtv1.VirtualMachine{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"},
-		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders", Namespace: "tenant-a"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pg-orders", Namespace: "tenant-a",
+			Annotations: map[string]string{"existing": "preserved"},
+		},
 		Spec: kubevirtv1.VirtualMachineSpec{
 			RunStrategy: &runStrategy,
 			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
@@ -420,6 +445,45 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	if vm.Spec.Running != nil {
 		t.Fatalf("Running after StopVM = %v, want nil", vm.Spec.Running)
 	}
+	if _, ok := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; ok {
+		t.Fatal("plain StopVM must not add the crash-loop marker")
+	}
+
+	// Crash-loop stop records the halted VMI UID in the same VM update.
+	if err := client.StopVMForCrashLoop(ctx, "tenant-a", "pg-orders", "vmi-halted"); err != nil {
+		t.Fatalf("StopVMForCrashLoop returned error: %v", err)
+	}
+	vm, _ = client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
+	if vm.Spec.RunStrategy == nil || *vm.Spec.RunStrategy != kubevirtv1.RunStrategyHalted {
+		t.Fatalf("RunStrategy after StopVMForCrashLoop = %v, want Halted", vm.Spec.RunStrategy)
+	}
+	if got := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; got != "vmi-halted" {
+		t.Fatalf("crash-loop halted VMI UID = %q, want vmi-halted", got)
+	}
+	if vm.Annotations["existing"] != "preserved" {
+		t.Fatal("StopVMForCrashLoop removed an unrelated annotation")
+	}
+
+	// Clearing the marker preserves power state and unrelated annotations.
+	if err := client.ClearCrashLoopHalt(ctx, "tenant-a", "pg-orders"); err != nil {
+		t.Fatalf("ClearCrashLoopHalt returned error: %v", err)
+	}
+	vm, _ = client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
+	if _, ok := vm.Annotations[dbaasv1.AnnotationCrashLoopHaltedVMIUID]; ok {
+		t.Fatal("ClearCrashLoopHalt did not remove the marker")
+	}
+	if vm.Annotations["existing"] != "preserved" {
+		t.Fatal("ClearCrashLoopHalt removed an unrelated annotation")
+	}
+	if vm.Spec.RunStrategy == nil || *vm.Spec.RunStrategy != kubevirtv1.RunStrategyHalted {
+		t.Fatalf("RunStrategy after ClearCrashLoopHalt = %v, want unchanged Halted", vm.Spec.RunStrategy)
+	}
+	if err := client.ClearCrashLoopHalt(ctx, "tenant-a", "pg-orders"); err != nil {
+		t.Fatalf("second ClearCrashLoopHalt should be a no-op: %v", err)
+	}
+	if err := client.StopVMForCrashLoop(ctx, "tenant-a", "pg-orders", ""); err == nil {
+		t.Fatal("StopVMForCrashLoop accepted an empty halted VMI UID")
+	}
 
 	// StartVM: calls the KubeVirt start subresource API (does not mutate spec)
 	if err := client.StartVM(ctx, "tenant-a", "pg-orders"); err != nil {
@@ -438,144 +502,28 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 	}
 }
 
-func TestTypedDeployMonitoringIsIdempotent(t *testing.T) {
+func TestTypedTeardownDeletesConnectionSecretAndIgnoresNotFound(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
-	client.GrafanaURL = "https://grafana.example"
-
-	for i := range 2 {
-		svcName, smName, grafanaURL, promTarget, err := client.DeployMonitoring(ctx, "orders", "tenant-a", "192.168.40.50")
-		if err != nil {
-			t.Fatalf("DeployMonitoring call %d returned error: %v", i+1, err)
-		}
-		if svcName != "pg-orders-metrics" || smName != "pg-orders-monitor" {
-			t.Fatalf("unexpected monitoring names: %q %q", svcName, smName)
-		}
-		if grafanaURL != "https://grafana.example/d/dbaas-orders/postgresql-orders" {
-			t.Fatalf("Grafana URL = %q", grafanaURL)
-		}
-		if promTarget != "pg-orders-metrics.tenant-a.svc:9187" {
-			t.Fatalf("Prometheus target = %q", promTarget)
-		}
-	}
-
-	svc, err := client.KubeClient.CoreV1().Services("tenant-a").Get(ctx, "pg-orders-metrics", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get Service: %v", err)
-	}
-	if len(svc.Spec.Selector) != 0 {
-		t.Fatalf("Service selector = %v, want no selector", svc.Spec.Selector)
-	}
-	if svc.Spec.Ports[0].TargetPort.IntVal != 9187 {
-		t.Fatalf("Service targetPort = %v, want 9187", svc.Spec.Ports[0].TargetPort)
-	}
-	ep, err := client.KubeClient.CoreV1().Endpoints("tenant-a").Get(ctx, "pg-orders-metrics", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get Endpoints: %v", err)
-	}
-	if ep.Subsets[0].Addresses[0].IP != "192.168.40.50" {
-		t.Fatalf("Endpoint IP = %q, want 192.168.40.50", ep.Subsets[0].Addresses[0].IP)
-	}
-	sm, err := client.Clientset.MonitoringV1().ServiceMonitors("tenant-a").Get(ctx, "pg-orders-monitor", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get ServiceMonitor: %v", err)
-	}
-	if sm.Spec.Endpoints[0].Interval != monitoringv1.Duration("15s") {
-		t.Fatalf("ServiceMonitor interval = %q, want 15s", sm.Spec.Endpoints[0].Interval)
-	}
-}
-
-func TestTypedDeleteSecretAndTeardownIgnoreNotFound(t *testing.T) {
-	ctx := context.Background()
-	client := newTestTypedClient()
-	if err := client.DeleteSecret(ctx, "tenant-a", "missing"); err != nil {
-		t.Fatalf("DeleteSecret returned error for missing Secret: %v", err)
+	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-connect", Namespace: "tenant-a"},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create connection Secret: %v", err)
 	}
 	err := client.TeardownAll(ctx, "orders", "tenant-a", dbaasv1.ResourceRefs{
-		VMName:              "pg-orders",
-		DataVolumeName:      "pg-orders-data",
-		SecretName:          "pg-orders-credentials",
-		CloudInitSecretName: "pg-orders-cloudinit",
-		MetricsServiceName:  "pg-orders-metrics",
-		ServiceMonitor:      "pg-orders-monitor",
+		VMName:                     "pg-orders",
+		DataVolumeName:             "pg-orders-data",
+		AdminCredentialsSecretName: "pg-orders-credentials",
+		ConnectionSecretName:       "pg-orders-connect",
+		CloudInitSecretName:        "pg-orders-cloudinit",
+		MetricsServiceName:         "pg-orders-metrics",
+		ServiceMonitor:             "pg-orders-monitor",
 	})
 	if err != nil {
 		t.Fatalf("TeardownAll returned error for missing resources: %v", err)
 	}
-}
-
-func TestTypedRemoveCloudInitDiskStripsEntries(t *testing.T) {
-	ctx := context.Background()
-	vm := &kubevirtv1.VirtualMachine{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"},
-		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders", Namespace: "tenant-a"},
-		Spec: kubevirtv1.VirtualMachineSpec{
-			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{
-						Devices: kubevirtv1.Devices{
-							Disks: []kubevirtv1.Disk{
-								{Name: "os-disk"},
-								{Name: "cloudinit"},
-							},
-						},
-					},
-					Volumes: []kubevirtv1.Volume{
-						{Name: "os-disk"},
-						{Name: "cloudinit", VolumeSource: kubevirtv1.VolumeSource{
-							CloudInitNoCloud: &kubevirtv1.CloudInitNoCloudSource{},
-						}},
-					},
-				},
-			},
-		},
-	}
-	client := newTestTypedClient(vm)
-
-	if err := client.RemoveCloudInitDisk(ctx, "tenant-a", "pg-orders"); err != nil {
-		t.Fatalf("RemoveCloudInitDisk returned error: %v", err)
-	}
-
-	updated, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get updated VM: %v", err)
-	}
-	for _, d := range updated.Spec.Template.Spec.Domain.Devices.Disks {
-		if d.Name == "cloudinit" {
-			t.Fatalf("cloudinit disk still present after RemoveCloudInitDisk")
-		}
-	}
-	for _, v := range updated.Spec.Template.Spec.Volumes {
-		if v.Name == "cloudinit" {
-			t.Fatalf("cloudinit volume still present after RemoveCloudInitDisk")
-		}
-	}
-	if len(updated.Spec.Template.Spec.Domain.Devices.Disks) != 1 || updated.Spec.Template.Spec.Domain.Devices.Disks[0].Name != "os-disk" {
-		t.Fatalf("disks after removal = %v, want only [os-disk]", updated.Spec.Template.Spec.Domain.Devices.Disks)
-	}
-}
-
-func TestTypedRemoveCloudInitDiskIsIdempotent(t *testing.T) {
-	ctx := context.Background()
-	vm := &kubevirtv1.VirtualMachine{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"},
-		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders", Namespace: "tenant-a"},
-		Spec: kubevirtv1.VirtualMachineSpec{
-			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{Devices: kubevirtv1.Devices{
-						Disks: []kubevirtv1.Disk{{Name: "os-disk"}},
-					}},
-					Volumes: []kubevirtv1.Volume{{Name: "os-disk"}},
-				},
-			},
-		},
-	}
-	client := newTestTypedClient(vm)
-
-	// cloudinit disk is already absent — second call must not error
-	if err := client.RemoveCloudInitDisk(ctx, "tenant-a", "pg-orders"); err != nil {
-		t.Fatalf("RemoveCloudInitDisk on already-clean VM returned error: %v", err)
+	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, "pg-orders-connect", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("connection Secret still exists after TeardownAll: %v", err)
 	}
 }
 

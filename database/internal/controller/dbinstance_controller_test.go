@@ -22,15 +22,13 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
-	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
 var _ = Describe("DBInstance Controller", func() {
@@ -41,7 +39,7 @@ var _ = Describe("DBInstance Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		dbinstance := &dbaasv1alpha1.DBInstance{}
 
@@ -62,33 +60,38 @@ var _ = Describe("DBInstance Controller", func() {
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			} else {
+				Expect(err).NotTo(HaveOccurred())
 			}
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &dbaasv1alpha1.DBInstance{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Cleanup the specific resource instance DBInstance")
+			controllerutil.RemoveFinalizer(resource, dbaasv1alpha1.FinalizerName)
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
-		It("should successfully reconcile the resource", func() {
+		It("adds the cleanup finalizer on the first reconcile", func() {
 			By("Reconciling the created resource")
 			// The first reconcile only adds a finalizer (no Harvester calls),
-			// so a fake dynamic client suffices for this smoke test.
+			// so a stub suffices for this smoke test.
 			controllerReconciler := &DBInstanceReconciler{
 				Client:    k8sClient,
-				Harvester: harvester.NewClient(fake.NewSimpleDynamicClient(runtime.NewScheme()), ""),
+				Harvester: &stubHarvester{},
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			reconciled := &dbaasv1alpha1.DBInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, reconciled)).To(Succeed())
+			Expect(reconciled.Finalizers).To(ContainElement(dbaasv1alpha1.FinalizerName))
 		})
 	})
 })

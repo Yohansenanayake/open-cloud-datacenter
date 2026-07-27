@@ -1,0 +1,70 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package resource
+
+import (
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+)
+
+// CloudInitSecretName returns the deterministic cloud-init Secret name
+// KubeVirt's cloudInitNoCloud datasource reads userdata/networkdata from.
+func CloudInitSecretName(inst *dbaasv1.DBInstance) string {
+	return fmt.Sprintf("pg-%s-cloudinit", inst.Name)
+}
+
+// CloudInitSecret is the bootstrap payload. ensureVM applies it before
+// creating the VM; ensureBootstrapCleanup redacts UserData in place once the
+// database is provably up (the object itself is never deleted — a live
+// VMI's mounted volume can't be un-mounted, so deleting it would just make
+// kubelet's periodic Secret-volume resync fail with FailedMount for the rest
+// of that pod's life).
+type CloudInitSecret struct {
+	Instance    *dbaasv1.DBInstance
+	UserData    string
+	NetworkData string
+}
+
+func (b CloudInitSecret) Build() (client.Object, error) {
+	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      CloudInitSecretName(b.Instance),
+		Namespace: b.Instance.Namespace,
+	}}, nil
+}
+
+// Defines the desired state of the Secret.
+func (b CloudInitSecret) Update(obj client.Object) error {
+	sec, ok := obj.(*corev1.Secret)
+	if !ok {
+		return wrongTypeErr("CloudInitSecret", obj)
+	}
+	sec.Labels = map[string]string{dbaasv1.LabelInstance: b.Instance.Name}
+	sec.Type = corev1.SecretTypeOpaque
+	// Data is stable across API round-trips. StringData is write-only and would
+	// force a no-op CreateOrUpdate to report Updated on every reconciliation.
+	sec.StringData = nil
+	sec.Data = map[string][]byte{
+		"userdata":    []byte(b.UserData),
+		"networkdata": []byte(b.NetworkData),
+	}
+	return nil
+}
