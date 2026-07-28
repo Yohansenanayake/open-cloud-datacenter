@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: dbaas
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+        app.kubernetes.io/name: dbaas
+    spec:
+      containers:
+      - name: manager
+        args: []
+        volumeMounts:
+        - mountPath: /etc/dbaas
+          name: operator-config
+          readOnly: true
+      volumes:
+      - configMap:
+          name: dbaas-operator-config
+        name: operator-config

@@ -127,6 +127,31 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestGatewayUsesConfiguredNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := dbaasv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add dbaas scheme: %v", err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	srv := &Server{
+		clientFor: func(token string) (client.Client, error) { return c, nil },
+		namespace: "tenant-configured",
+	}
+
+	body := sampleInstance("orders-configured")
+	body.Namespace = "tenant-from-request"
+	rec := do(t, srv.routes(), http.MethodPost, "/dbinstances", body)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var stored dbaasv1.DBInstance
+	key := types.NamespacedName{Namespace: "tenant-configured", Name: body.Name}
+	if err := c.Get(context.Background(), key, &stored); err != nil {
+		t.Fatalf("get configured-namespace instance: %v", err)
+	}
+}
+
 func TestAuthRequired(t *testing.T) {
 	h, _ := newHandler(t, sampleInstance("orders"))
 

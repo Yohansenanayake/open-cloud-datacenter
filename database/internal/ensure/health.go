@@ -122,7 +122,7 @@ func (r *healthStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 		return res
 	}
 
-	port := specPort(inst.Spec.Port)
+	port := specPortWithDefault(inst.Spec.Port, r.databaseDefaults().Port)
 
 	// Readiness gates booting / change in flight instances; steady state failures are report-only.
 	caughtUp := inst.Status.ObservedGeneration == inst.Generation

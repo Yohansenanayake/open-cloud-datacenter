@@ -67,7 +67,11 @@ func (r *monitoringStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resu
 	builders := []resource.Builder{
 		resource.MetricsService{Instance: inst},
 		resource.MetricsEndpoints{Instance: inst, VMIP: inst.Status.Endpoint.Address},
-		resource.ServiceMonitor{Instance: inst},
+		resource.ServiceMonitor{
+			Instance:       inst,
+			Labels:         r.monitoringConfig().ServiceMonitorLabels,
+			ScrapeInterval: r.monitoringConfig().ScrapeInterval,
+		},
 	}
 	changed := false
 	for _, b := range builders {

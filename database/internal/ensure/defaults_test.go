@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 )
 
 func TestImmutableDriftNormalizesCreateDefaults(t *testing.T) {
@@ -44,7 +45,7 @@ func TestImmutableDriftNormalizesCreateDefaults(t *testing.T) {
 		},
 	}
 
-	if drift := immutableDrift(inst); drift != "" {
+	if drift := immutableDriftWithDefaults(inst, operatorconfig.Default().DatabaseDefaults); drift != "" {
 		t.Fatalf("immutableDrift() = %q, want no drift", drift)
 	}
 }
@@ -70,7 +71,7 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 		},
 	}
 
-	if drift := immutableDrift(inst); drift != "dbName" {
+	if drift := immutableDriftWithDefaults(inst, operatorconfig.Default().DatabaseDefaults); drift != "dbName" {
 		t.Fatalf("immutableDrift() = %q, want dbName", drift)
 	}
 }
@@ -92,7 +93,7 @@ func TestImmutableDriftDetectsVMPasswordChange(t *testing.T) {
 		},
 	}
 
-	if drift := immutableDrift(inst); drift != "vmPassword" {
+	if drift := immutableDriftWithDefaults(inst, operatorconfig.Default().DatabaseDefaults); drift != "vmPassword" {
 		t.Fatalf("immutableDrift() = %q, want vmPassword", drift)
 	}
 }
@@ -118,7 +119,7 @@ func TestImmutableDriftDetectsStaticNetworkChange(t *testing.T) {
 		},
 	}
 
-	if drift := immutableDrift(inst); drift != "staticNetwork" {
+	if drift := immutableDriftWithDefaults(inst, operatorconfig.Default().DatabaseDefaults); drift != "staticNetwork" {
 		t.Fatalf("immutableDrift() = %q, want staticNetwork", drift)
 	}
 }
@@ -146,7 +147,7 @@ func TestImmutableDriftStaticNetworkSameValueDifferentPointerIsNotDrift(t *testi
 		},
 	}
 
-	if drift := immutableDrift(inst); drift != "" {
+	if drift := immutableDriftWithDefaults(inst, operatorconfig.Default().DatabaseDefaults); drift != "" {
 		t.Fatalf("immutableDrift() = %q, want no drift", drift)
 	}
 }

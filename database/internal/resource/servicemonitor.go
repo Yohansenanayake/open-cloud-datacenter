@@ -18,6 +18,8 @@ package resource
 
 import (
 	"fmt"
+	"maps"
+	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +36,9 @@ func ServiceMonitorName(inst *dbaasv1.DBInstance) string {
 // ServiceMonitor points the cluster Prometheus (release=prometheus) at the
 // instance's metrics Service.
 type ServiceMonitor struct {
-	Instance *dbaasv1.DBInstance
+	Instance       *dbaasv1.DBInstance
+	Labels         map[string]string
+	ScrapeInterval time.Duration
 }
 
 func (b ServiceMonitor) Build() (client.Object, error) {
@@ -49,20 +53,25 @@ func (b ServiceMonitor) Update(obj client.Object) error {
 	if !ok {
 		return wrongTypeErr("ServiceMonitor", obj)
 	}
-	sm.Labels = map[string]string{
-		dbaasv1.LabelInstance: b.Instance.Name,
-		// The prometheus-operator instance selects ServiceMonitors by this label.
-		"release": "prometheus",
+	labels := maps.Clone(b.Labels)
+	if len(labels) == 0 {
+		labels = map[string]string{"release": "prometheus"}
 	}
+	labels[dbaasv1.LabelInstance] = b.Instance.Name
+	sm.Labels = labels
 	sm.Spec.Selector = metav1.LabelSelector{
 		MatchLabels: map[string]string{
 			dbaasv1.LabelMetrics:  "true",
 			dbaasv1.LabelInstance: b.Instance.Name,
 		},
 	}
+	interval := b.ScrapeInterval
+	if interval == 0 {
+		interval = 15 * time.Second
+	}
 	sm.Spec.Endpoints = []monitoringv1.Endpoint{{
 		Port:     "metrics",
-		Interval: monitoringv1.Duration("15s"),
+		Interval: monitoringv1.Duration(interval.String()),
 		Path:     "/metrics",
 	}}
 	return nil

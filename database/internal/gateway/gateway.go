@@ -35,7 +35,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -59,19 +58,25 @@ type clientFactory func(token string) (client.Client, error)
 // rather than threading parameters through every function.
 type Server struct {
 	clientFor clientFactory
+	namespace string
 }
 
 // RunGateway starts the HTTP gateway and blocks until the server exits. cfg
 // is the manager's rest.Config; per-request copies replace its bearer token
 // with the caller's. scheme and mapper are reused across requests so we
 // don't pay K8s discovery cost on every call.
-func RunGateway(addr string, cfg *rest.Config, scheme *runtime.Scheme, mapper meta.RESTMapper) error {
-	return http.ListenAndServe(addr, NewHandler(cfg, scheme, mapper))
+func RunGateway(addr, namespace string, cfg *rest.Config, scheme *runtime.Scheme, mapper meta.RESTMapper) error {
+	return http.ListenAndServe(addr, NewHandlerForNamespace(namespace, cfg, scheme, mapper))
 }
 
 // NewHandler builds the gateway's HTTP handler. Separated from RunGateway so
 // tests can exercise the routes without binding a socket.
 func NewHandler(cfg *rest.Config, scheme *runtime.Scheme, mapper meta.RESTMapper) http.Handler {
+	return NewHandlerForNamespace("default", cfg, scheme, mapper)
+}
+
+// NewHandlerForNamespace builds a gateway handler scoped to namespace.
+func NewHandlerForNamespace(namespace string, cfg *rest.Config, scheme *runtime.Scheme, mapper meta.RESTMapper) http.Handler {
 	factory := func(token string) (client.Client, error) {
 		impCfg := rest.CopyConfig(cfg)
 		// Override every credential source — controller-runtime would prefer
@@ -84,7 +89,7 @@ func NewHandler(cfg *rest.Config, scheme *runtime.Scheme, mapper meta.RESTMapper
 		impCfg.ExecProvider = nil
 		return client.New(impCfg, client.Options{Scheme: scheme, Mapper: mapper})
 	}
-	return (&Server{clientFor: factory}).routes()
+	return (&Server{clientFor: factory, namespace: namespace}).routes()
 }
 
 // routes wires the HTTP handlers. Public so tests with a custom clientFor
@@ -167,15 +172,18 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	}
 }
 
-// defaultNamespace returns the namespace DBInstances are read from and
-// written to. RBAC on the caller's token is what really decides whether the
-// operation succeeds — this only picks where to look.
-func defaultNamespace() string {
-	if ns := os.Getenv("DBAAS_DEFAULT_NAMESPACE"); ns != "" {
-		return ns
+// targetNamespace returns the configured namespace DBInstances are read from
+// and written to. RBAC on the caller's token makes the final authorization
+// decision. The fallback keeps directly constructed test Servers useful.
+func (s *Server) targetNamespace() string {
+	if s.namespace != "" {
+		return s.namespace
 	}
 	return "default"
 }
+
+// defaultNamespace is retained as the package test fixture's default.
+func defaultNamespace() string { return "default" }
 
 // handleListInstances handles GET /dbinstances.
 func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +192,7 @@ func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var instances dbaasv1.DBInstanceList
-	if err := c.List(r.Context(), &instances, client.InNamespace(defaultNamespace())); err != nil {
+	if err := c.List(r.Context(), &instances, client.InNamespace(s.targetNamespace())); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -220,7 +228,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	// new CR somewhere this gateway can never see again. The K8s API
 	// server still does the final RBAC check on the caller's identity
 	// for the chosen namespace.
-	instance.Namespace = defaultNamespace()
+	instance.Namespace = s.targetNamespace()
 	if err := c.Create(r.Context(), &instance); err != nil {
 		writeAPIError(w, err)
 		return
@@ -274,7 +282,7 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request, name 
 		return
 	}
 	var instance dbaasv1.DBInstance
-	if err := c.Get(r.Context(), types.NamespacedName{Namespace: defaultNamespace(), Name: name}, &instance); err != nil {
+	if err := c.Get(r.Context(), types.NamespacedName{Namespace: s.targetNamespace(), Name: name}, &instance); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -310,7 +318,7 @@ func (s *Server) handleModifyInstance(w http.ResponseWriter, r *http.Request, na
 	}
 
 	var instance dbaasv1.DBInstance
-	if err := c.Get(r.Context(), types.NamespacedName{Namespace: defaultNamespace(), Name: name}, &instance); err != nil {
+	if err := c.Get(r.Context(), types.NamespacedName{Namespace: s.targetNamespace(), Name: name}, &instance); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -349,7 +357,7 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request, na
 	}
 	instance := &dbaasv1.DBInstance{}
 	instance.Name = name
-	instance.Namespace = defaultNamespace()
+	instance.Namespace = s.targetNamespace()
 	instance.APIVersion = dbaasv1.GroupVersion.String()
 	instance.Kind = "DBInstance"
 
@@ -369,7 +377,7 @@ func (s *Server) handleSetRunning(w http.ResponseWriter, r *http.Request, name s
 		return
 	}
 	var instance dbaasv1.DBInstance
-	if err := c.Get(r.Context(), types.NamespacedName{Namespace: defaultNamespace(), Name: name}, &instance); err != nil {
+	if err := c.Get(r.Context(), types.NamespacedName{Namespace: s.targetNamespace(), Name: name}, &instance); err != nil {
 		writeAPIError(w, err)
 		return
 	}

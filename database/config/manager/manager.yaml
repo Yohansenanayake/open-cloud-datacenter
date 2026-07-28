@@ -61,11 +61,8 @@ spec:
       - command:
         - /manager
         args:
-          - --leader-elect
-          - --health-probe-bind-address=:8081
-          # KubeOVN logical switch for launcher pod mgmt-NIC pinning.
-          # Change to your cluster's management switch name for VPC setups.
-          - --mgmt-logical-switch=ovn-default
+        - --operator.leaderElection.enabled=true
+        - --observability.metrics.bindAddress=:8443
         image: controller:latest
         name: manager
         env:
