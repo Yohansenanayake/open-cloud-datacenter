@@ -38,7 +38,6 @@ type Config struct {
 }
 
 type OperatorConfig struct {
-	Namespace      string               `konf:"namespace"`
 	LeaderElection LeaderElectionConfig `konf:"leaderElection"`
 }
 

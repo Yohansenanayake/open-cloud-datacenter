@@ -1,8 +1,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# This is the single installation namespace for every namespaced resource in
+# this overlay. The namespace must exist before applying the overlay.
+namespace: dbaas-system
+
 resources:
-- ../../default
+- ../../base
 - operator_config.yaml
 
 patches:

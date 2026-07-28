@@ -26,7 +26,6 @@ import (
 func Default() Config {
 	return Config{
 		Operator: OperatorConfig{
-			Namespace: "dbaas-system",
 			LeaderElection: LeaderElectionConfig{
 				Enabled: false,
 				ID:      "734f9ee3.opencloud.wso2.com",

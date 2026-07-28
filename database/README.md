@@ -62,13 +62,36 @@ mounts its `config.json` key inside the controller Pod at
 when the file exists:
 
 ```sh
+kubectl create namespace dbaas-system
 kubectl apply -k config/overlays/operator-config
 ```
 
 Edit
 [`config/overlays/operator-config/operator_config.yaml`](config/overlays/operator-config/operator_config.yaml)
 before applying the overlay. The regular `make deploy` path continues to use
-`config/default` and does not create or mount this ConfigMap.
+`config/default`, creates the standard `dbaas-system` namespace automatically,
+and does not create or mount this ConfigMap.
+
+The installation namespace is Kubernetes deployment metadata, so it is not
+part of `config.json`. It is defined once by `namespace` in
+`config/overlays/operator-config/kustomization.yaml`. For example, to install
+in `dbaas-system-v2`, change that one field, create the namespace, and apply
+the same overlay:
+
+```sh
+kubectl create namespace dbaas-system-v2
+kubectl apply -k config/overlays/operator-config
+```
+
+Kustomize assigns the selected namespace to every namespaced resource,
+including the ConfigMap, Deployment, ServiceAccount, Service, Roles, and
+RoleBindings. The Deployment injects its namespace into `POD_NAMESPACE`
+through the Downward API, and the operator uses that value for its
+controller-private Secrets. Reusable manifests do not create a fixed
+Namespace resource; the target namespace must exist before applying the
+configuration overlay. The separate `config/default` installation wrapper
+does include the standard `dbaas-system` Namespace for a one-command default
+installation.
 
 ## What it provisions
 

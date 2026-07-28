@@ -44,10 +44,6 @@ func load(set *flag.FlagSet, args []string, configFilePath string) (Config, erro
 	}
 
 	defaults := Default()
-	if namespace := os.Getenv("POD_NAMESPACE"); namespace != "" {
-		defaults.Operator.Namespace = namespace
-	}
-
 	bindFlags(set, defaults)
 	if err := set.Parse(args); err != nil {
 		return Config{}, fmt.Errorf("parse configuration flags: %w", err)
@@ -65,6 +61,11 @@ func load(set *flag.FlagSet, args []string, configFilePath string) (Config, erro
 	}
 	if err := store.Load(explicitFlags{set: set}); err != nil {
 		return Config{}, fmt.Errorf("load flag configuration: %w", err)
+	}
+	if store.Exists([]string{"operator", "namespace"}) {
+		return Config{}, errors.New(
+			"operator.namespace is installation metadata; set the Kustomize namespace instead",
+		)
 	}
 
 	resolved := defaults

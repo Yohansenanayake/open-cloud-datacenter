@@ -257,18 +257,15 @@ func (r *DBInstanceReconciler) deleteOperatorSecrets(ctx context.Context, inst *
 // Helpers
 // ============================================================
 
-// operatorNamespace returns the configured operator namespace. The fallback
-// keeps directly constructed reconcilers usable while retaining config.Default
-// as the single source of truth.
 func (r *DBInstanceReconciler) operatorNamespace() string {
-	if r.OperatorNamespace == "" {
-		return operatorconfig.Default().Operator.Namespace
-	}
 	return r.OperatorNamespace
 }
 
 // SetupWithManager registers the reconciler with controller-runtime.
 func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.OperatorNamespace == "" {
+		return fmt.Errorf("operator namespace must not be empty")
+	}
 	r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
 	if r.EnsureRunner == nil {
 		r.EnsureRunner = ensure.NewDefaultRunner(ensure.Dependencies{

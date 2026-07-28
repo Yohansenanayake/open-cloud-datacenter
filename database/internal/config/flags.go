@@ -19,8 +19,6 @@ package config
 import "flag"
 
 func bindFlags(set *flag.FlagSet, defaults Config) {
-	set.String("operator.namespace", defaults.Operator.Namespace,
-		"Namespace for controller-private Secrets.")
 	set.Bool("operator.leaderElection.enabled", defaults.Operator.LeaderElection.Enabled,
 		"Enable controller-manager leader election.")
 	set.String("operator.leaderElection.id", defaults.Operator.LeaderElection.ID,

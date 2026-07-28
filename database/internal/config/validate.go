@@ -28,9 +28,6 @@ import (
 )
 
 func (c Config) Validate() error {
-	if problems := validation.IsDNS1123Label(c.Operator.Namespace); len(problems) > 0 {
-		return fmt.Errorf("operator.namespace %q is invalid: %s", c.Operator.Namespace, strings.Join(problems, ", "))
-	}
 	if c.Operator.LeaderElection.Enabled && strings.TrimSpace(c.Operator.LeaderElection.ID) == "" {
 		return fmt.Errorf("operator.leaderElection.id must not be empty when leader election is enabled")
 	}

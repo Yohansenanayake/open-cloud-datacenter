@@ -160,6 +160,44 @@ func TestConfigFileEnvironmentVariableDoesNotSelectFile(t *testing.T) {
 	}
 }
 
+func TestOperatorNamespaceIsNotRuntimeConfiguration(t *testing.T) {
+	clearConfigurationEnvironment(t)
+
+	tests := []struct {
+		name string
+		path string
+		env  string
+		args []string
+	}{
+		{
+			name: "configuration file",
+			path: writeConfig(t, `{"operator": {"namespace": "another-system"}}`),
+		},
+		{
+			name: "environment",
+			path: filepath.Join(t.TempDir(), "missing.json"),
+			env:  "another-system",
+		},
+		{
+			name: "flag",
+			path: filepath.Join(t.TempDir(), "missing.json"),
+			args: []string{"--operator.namespace=another-system"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("DBAAS_OPERATOR__NAMESPACE", tt.env)
+			}
+			_, err := load(flag.NewFlagSet("test", flag.ContinueOnError), tt.args, tt.path)
+			if err == nil || !strings.Contains(err.Error(), "operator.namespace") {
+				t.Fatalf("load() error = %v, want installation-metadata error", err)
+			}
+		})
+	}
+}
+
 func TestValidationFailureIdentifiesField(t *testing.T) {
 	clearConfigurationEnvironment(t)
 

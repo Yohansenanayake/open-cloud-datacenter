@@ -42,12 +42,16 @@ const (
 )
 
 func testEnsureDependencies(r *DBInstanceReconciler) ensure.Dependencies {
+	operatorNamespace := r.OperatorNamespace
+	if operatorNamespace == "" {
+		operatorNamespace = "dbaas-system"
+	}
 	return ensure.Dependencies{
 		Client:            r.Client,
 		Harvester:         r.Harvester,
 		Recorder:          r.Recorder,
 		GrafanaBaseURL:    r.GrafanaBaseURL,
-		OperatorNamespace: r.operatorNamespace(),
+		OperatorNamespace: operatorNamespace,
 	}
 }
 

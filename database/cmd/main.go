@@ -69,6 +69,11 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "load operator configuration: %v\n", err)
 		os.Exit(1)
 	}
+	operatorNamespace, err := operatorconfig.PodNamespace()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve operator namespace: %v\n", err)
+		os.Exit(1)
+	}
 
 	logOptions, err := buildLogOptions(cfg.Logging)
 	if err != nil {
@@ -141,7 +146,7 @@ func main() {
 		Client:                  mgr.GetClient(),
 		Harvester:               hvClient,
 		GrafanaBaseURL:          cfg.Observability.Grafana.BaseURL,
-		OperatorNamespace:       cfg.Operator.Namespace,
+		OperatorNamespace:       operatorNamespace,
 		MaxConcurrentReconciles: cfg.Controller.MaxConcurrentReconciles,
 		DatabaseDefaults:        cfg.DatabaseDefaults,
 		InstanceClasses:         cfg.InstanceClasses,
