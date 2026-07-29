@@ -47,3 +47,13 @@ func TestValidateBindAddressRejectsNamedPort(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want gateway bind-address field", err)
 	}
 }
+
+func TestValidateRejectsEmptyOSVersion(t *testing.T) {
+	cfg := Default()
+	cfg.DatabaseDefaults.OSVersion = ""
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "databaseDefaults.osVersion") {
+		t.Fatalf("Validate() error = %v, want databaseDefaults.osVersion field", err)
+	}
+}

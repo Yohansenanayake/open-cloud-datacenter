@@ -92,6 +92,7 @@ type DatabaseDefaults struct {
 	StorageClass   string `konf:"storageClass"`
 	MasterUsername string `konf:"masterUsername"`
 	Port           int    `konf:"port"`
+	OSVersion      string `konf:"osVersion"`
 }
 
 type ObservabilityConfig struct {

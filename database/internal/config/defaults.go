@@ -50,6 +50,7 @@ func Default() Config {
 			StorageClass:   "longhorn",
 			MasterUsername: "dbadmin",
 			Port:           5432,
+			OSVersion:      "24.04",
 		},
 		Observability: ObservabilityConfig{
 			Grafana: GrafanaConfig{BaseURL: "https://grafana.monitoring.svc"},

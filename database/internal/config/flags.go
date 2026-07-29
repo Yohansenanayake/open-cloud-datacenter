@@ -55,6 +55,8 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 		"Default PostgreSQL administrator username.")
 	set.Int("databaseDefaults.port", defaults.DatabaseDefaults.Port,
 		"Default PostgreSQL port.")
+	set.String("databaseDefaults.osVersion", defaults.DatabaseDefaults.OSVersion,
+		"Default baked-image OS stream (internal/catalog key) for DBInstance provisioning and repave.")
 
 	set.String("observability.grafana.baseURL", defaults.Observability.Grafana.BaseURL,
 		"Base URL used for per-instance Grafana links.")

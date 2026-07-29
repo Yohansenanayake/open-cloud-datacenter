@@ -61,6 +61,9 @@ func (c Config) Validate() error {
 	if c.DatabaseDefaults.Port < 1 || c.DatabaseDefaults.Port > 65535 {
 		return fmt.Errorf("databaseDefaults.port must be between 1 and 65535")
 	}
+	if c.DatabaseDefaults.OSVersion == "" {
+		return fmt.Errorf("databaseDefaults.osVersion must not be empty")
+	}
 	if c.Observability.Grafana.BaseURL != "" {
 		parsed, err := url.ParseRequestURI(c.Observability.Grafana.BaseURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {

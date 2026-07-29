@@ -66,6 +66,9 @@ func (d Dependencies) databaseDefaults() operatorconfig.DatabaseDefaults {
 	if defaults.Port == 0 {
 		defaults.Port = builtIn.Port
 	}
+	if defaults.OSVersion == "" {
+		defaults.OSVersion = builtIn.OSVersion
+	}
 	return defaults
 }
 
