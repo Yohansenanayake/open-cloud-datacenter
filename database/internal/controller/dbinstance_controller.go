@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	statuspatch "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/patch"
@@ -52,12 +53,10 @@ type DBInstanceReconciler struct {
 	Harvester harvester.ClientInterface
 	Recorder  record.EventRecorder
 	// GrafanaBaseURL is the cluster Grafana base used to render per-instance
-	// dashboard links in status (from the --grafana-url flag).
+	// dashboard links in status.
 	GrafanaBaseURL string
 	// OperatorNamespace holds the two controller-private Secrets (internal DB
-	// credentials, TLS) — outside every tenant namespace. From the
-	// --operator-namespace flag (default POD_NAMESPACE env, fallback
-	// dbaas-system — see operatorNamespace()).
+	// credentials, TLS) — outside every tenant namespace.
 	OperatorNamespace string
 	// EnsureRunner owns the ordered non-deletion convergence workflow.
 	EnsureRunner *ensure.Runner
@@ -65,6 +64,11 @@ type DBInstanceReconciler struct {
 	// Reconciles are serialized per object regardless, so raising this only adds
 	// cross-instance parallelism (safe). <1 is treated as 1.
 	MaxConcurrentReconciles int
+	// DatabaseDefaults, InstanceClasses, and Monitoring are resolved once at
+	// process startup from the centralized operator configuration.
+	DatabaseDefaults operatorconfig.DatabaseDefaults
+	InstanceClasses  map[string]dbaasv1.InstanceClassSpec
+	Monitoring       operatorconfig.MonitoringConfig
 }
 
 // DBInstance CRD permissions.
@@ -253,17 +257,15 @@ func (r *DBInstanceReconciler) deleteOperatorSecrets(ctx context.Context, inst *
 // Helpers
 // ============================================================
 
-// operatorNamespace returns the configured operator namespace, defaulting to
-// "dbaas-system" so tests and any deployment that omits the flag still work.
 func (r *DBInstanceReconciler) operatorNamespace() string {
-	if r.OperatorNamespace == "" {
-		return "dbaas-system"
-	}
 	return r.OperatorNamespace
 }
 
 // SetupWithManager registers the reconciler with controller-runtime.
 func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.OperatorNamespace == "" {
+		return fmt.Errorf("operator namespace must not be empty")
+	}
 	r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
 	if r.EnsureRunner == nil {
 		r.EnsureRunner = ensure.NewDefaultRunner(ensure.Dependencies{
@@ -272,12 +274,15 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			Recorder:          r.Recorder,
 			GrafanaBaseURL:    r.GrafanaBaseURL,
 			OperatorNamespace: r.operatorNamespace(),
+			DatabaseDefaults:  r.DatabaseDefaults,
+			InstanceClasses:   r.InstanceClasses,
+			Monitoring:        r.Monitoring,
 		})
 	}
 
 	maxConcurrent := r.MaxConcurrentReconciles
 	if maxConcurrent < 1 {
-		maxConcurrent = 1
+		maxConcurrent = operatorconfig.Default().Controller.MaxConcurrentReconciles
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

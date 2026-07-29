@@ -19,6 +19,7 @@ package resource
 import (
 	"context"
 	"testing"
+	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -118,6 +119,25 @@ func TestConnectionSecretFormatsIPv6JDBCURL(t *testing.T) {
 	}
 	if got, want := string(secret.Data["jdbcUrl"]), "jdbc:postgresql://[2001:db8::1]:5432/orders?ssl=true&sslmode=verify-ca"; got != want {
 		t.Fatalf("jdbcUrl = %q, want %q", got, want)
+	}
+}
+
+func TestServiceMonitorUsesConfiguredLabelsAndInterval(t *testing.T) {
+	sm := &monitoringv1.ServiceMonitor{}
+	builder := ServiceMonitor{
+		Instance:       testOwner(),
+		Labels:         map[string]string{"team": "platform", "release": "central-prometheus"},
+		ScrapeInterval: 45 * time.Second,
+	}
+
+	if err := builder.Update(sm); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if sm.Labels["team"] != "platform" || sm.Labels["release"] != "central-prometheus" {
+		t.Fatalf("labels = %#v, want configured labels", sm.Labels)
+	}
+	if got := sm.Spec.Endpoints[0].Interval; got != monitoringv1.Duration("45s") {
+		t.Fatalf("interval = %q, want 45s", got)
 	}
 }
 

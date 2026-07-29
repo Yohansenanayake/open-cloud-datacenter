@@ -44,7 +44,7 @@ func (*preflightStep) Name() string { return "preflight" }
 // NAD existence is not yet verified (no NAD type in the manager scheme); RBAC for
 // get/list is already in place, so the check can be added once the scheme is.
 func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
-	if _, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]; !ok {
+	if _, ok := r.instanceClasses()[inst.Spec.DBInstanceClass]; !ok {
 		msg := fmt.Sprintf("unknown dbInstanceClass %q", inst.Spec.DBInstanceClass)
 		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, msg)
 		return Terminal(dbaasv1.ReasonInvalidClass, msg)
@@ -59,7 +59,8 @@ func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resul
 
 	// Reject immutable edits first so an osImage change is reported as immutable
 	// drift rather than an image lookup failure.
-	if drift := immutableDrift(inst); drift != "" {
+	defaults := r.databaseDefaults()
+	if drift := immutableDriftWithDefaults(inst, defaults); drift != "" {
 		msg := fmt.Sprintf("cannot modify immutable field(s) %s after create; revert the change or recreate the DBInstance", drift)
 		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonImmutableFieldChanged, msg)
 		return Terminal(dbaasv1.ReasonImmutableFieldChanged, msg)
@@ -67,7 +68,7 @@ func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resul
 
 	osImage := inst.Spec.OSImage
 	if osImage == "" {
-		osImage = defaultOSImage
+		osImage = defaults.OSImage
 	}
 	if _, err := r.Harvester.ResolveVMImage(ctx, osImage); err != nil {
 		msg := err.Error()

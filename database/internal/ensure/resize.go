@@ -105,7 +105,7 @@ func observeShapeDrift(vm *kubevirtv1.VirtualMachine, inst *dbaasv1.DBInstance, 
 // DatabaseReady=False itself so Ready doesn't stay stale-True for the whole
 // resize window (same reasoning as the crash-loop halt in ensure_health.go).
 func (r *resizeStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
-	class, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
+	class, ok := r.instanceClasses()[inst.Spec.DBInstanceClass]
 	if !ok {
 		// ensurePreflight terminals on this first; defensive.
 		msg := fmt.Sprintf("unknown dbInstanceClass %q", inst.Spec.DBInstanceClass)

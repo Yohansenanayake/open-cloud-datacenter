@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
@@ -81,6 +82,34 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	}
 	if cond.ObservedGeneration != inst.Generation {
 		t.Fatalf("cond ObservedGeneration = %d, want %d", cond.ObservedGeneration, inst.Generation)
+	}
+}
+
+func TestEnsurePreflightUsesConfiguredClassAndOSImageDefault(t *testing.T) {
+	stub := &stubHarvester{}
+	r := &testHarness{Dependencies: Dependencies{
+		Harvester: stub,
+		DatabaseDefaults: operatorconfig.DatabaseDefaults{
+			OSImage:        "custom/image",
+			StorageClass:   "custom-storage",
+			MasterUsername: "platform_admin",
+			Port:           6432,
+		},
+		InstanceClasses: map[string]dbaasv1.InstanceClassSpec{
+			"db.custom": {CPUCores: 3, MemoryMB: 6144, MaxConnections: 250},
+		},
+	}}
+	inst := newProvisionInst()
+	inst.Spec.DBInstanceClass = "db.custom"
+	inst.Spec.OSImage = ""
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("Outcome = %q, want Satisfied: %+v", res.Outcome, res)
+	}
+	if stub.LastVMImageRef != "custom/image" {
+		t.Fatalf("resolved image = %q, want custom/image", stub.LastVMImageRef)
 	}
 }
 

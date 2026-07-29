@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dbaas-operator-config
+data:
+  config.json: |
+    {
+      "operator": {
+        "leaderElection": {
+          "enabled": true
+        }
+      },
+      "infrastructure": {
+        "harvester": {
+          "managementLogicalSwitch": "ovn-default"
+        }
+      },
+      "observability": {
+        "metrics": {
+          "bindAddress": ":8443"
+        }
+      }
+    }

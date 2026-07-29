@@ -111,7 +111,7 @@ func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 // a partial failure or an out-of-band VM delete is safe and reproduces the
 // same VM.
 func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result {
-	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
+	classSpec, ok := r.instanceClasses()[inst.Spec.DBInstanceClass]
 	if !ok {
 		// ensurePreflight validates this first; defensive so ensureVM alone can
 		// never create a VM from an unknown class.
@@ -120,9 +120,10 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		return Terminal(dbaasv1.ReasonInvalidClass, msg)
 	}
 
+	defaults := r.databaseDefaults()
 	masterUser := inst.Spec.MasterUsername
 	if masterUser == "" {
-		masterUser = defaultMasterUser
+		masterUser = defaults.MasterUsername
 	}
 	dbName := inst.Spec.DBName
 	if dbName == "" {
@@ -130,11 +131,11 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	}
 	osImage := inst.Spec.OSImage
 	if osImage == "" {
-		osImage = defaultOSImage
+		osImage = defaults.OSImage
 	} // Do we need this OS Validation?
 	storageType := inst.Spec.StorageType
 	if storageType == "" {
-		storageType = defaultStorageType
+		storageType = defaults.StorageClass
 	}
 
 	dataVolumeName := dataVolumeNameFor(inst)
@@ -153,7 +154,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	userdata, networkdata := credentials.BuildCloudInit(credentials.BootstrapParams{
 		ID:             inst.Name,
 		DBName:         dbName,
-		Port:           specPort(inst.Spec.Port),
+		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
 		MasterUser:     masterUser,
 		MaxConnections: classSpec.MaxConnections,
 		BackupEnabled:  inst.Spec.BackupRetentionPeriod > 0,
@@ -184,7 +185,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		DataVolumeStorageClass: storageType,
 		NADName:                inst.Spec.NetworkRef,
 		MasterUser:             masterUser,
-		Port:                   specPort(inst.Spec.Port),
+		Port:                   specPortWithDefault(inst.Spec.Port, defaults.Port),
 		CloudInitSecretName:    cloudInitName,
 		DNSServerIP:            inst.Spec.DNSServerIP,
 		Owner:                  ownerRefFor(inst),
@@ -207,7 +208,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		DBName:         dbName,
 		MasterUsername: masterUser,
 		EngineVersion:  inst.Spec.EngineVersion, // In Image Baking features, this will be removed
-		Port:           specPort(inst.Spec.Port),
+		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
 		StorageType:    storageType,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork.DeepCopy(),

@@ -32,7 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 )
+
+var testDefaultMasterUser = operatorconfig.Default().DatabaseDefaults.MasterUsername
 
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -57,7 +60,12 @@ func newTestResolver(t *testing.T) *Resolver {
 	t.Helper()
 	scheme := testScheme(t)
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).Build()
-	return &Resolver{Client: c, Scheme: scheme, OperatorNamespace: "dbaas-system"}
+	return &Resolver{
+		Client:            c,
+		Scheme:            scheme,
+		OperatorNamespace: "dbaas-system",
+		DefaultMasterUser: testDefaultMasterUser,
+	}
 }
 
 func TestTenantPasswordGenerationFailureIsReturned(t *testing.T) {
@@ -85,7 +93,7 @@ func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
 		t.Fatal("first Resolve reported Changed=false, want true")
 	}
 	m := result.Material
-	if m.AdminUser != defaultMasterUser || m.AdminPassword == "" {
+	if m.AdminUser != testDefaultMasterUser || m.AdminPassword == "" {
 		t.Fatalf("Material admin fields = %+v", m)
 	}
 	if m.ReplPassword == "" || m.ExporterPassword == "" {
@@ -103,7 +111,7 @@ func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
 	if len(tenant.Data) != 0 {
 		t.Fatalf("tenant secret Data should be empty on create (StringData only), got %v", tenant.Data)
 	}
-	if tenant.StringData["admin_user"] != defaultMasterUser || tenant.StringData["admin_password"] != m.AdminPassword {
+	if tenant.StringData["admin_user"] != testDefaultMasterUser || tenant.StringData["admin_password"] != m.AdminPassword {
 		t.Fatalf("tenant secret contents = %+v", tenant.StringData)
 	}
 	if _, hasLegacy := tenant.StringData["ca_cert"]; hasLegacy {
@@ -219,6 +227,22 @@ func TestResolveHonoursSpecMasterUsername(t *testing.T) {
 	m := result.Material
 	if m.AdminUser != "custom_admin" {
 		t.Fatalf("AdminUser = %q, want custom_admin", m.AdminUser)
+	}
+}
+
+func TestResolveRequiresInjectedDefaultMasterUsername(t *testing.T) {
+	ctx := context.Background()
+	inst := testInst()
+	scheme := testScheme(t)
+	r := &Resolver{
+		Client:            ctrlfake.NewClientBuilder().WithScheme(scheme).Build(),
+		Scheme:            scheme,
+		OperatorNamespace: "dbaas-system",
+	}
+
+	_, err := r.Resolve(ctx, inst)
+	if err == nil || err.Error() != "default master user must not be empty" {
+		t.Fatalf("Resolve() error = %v, want missing default master user error", err)
 	}
 }
 

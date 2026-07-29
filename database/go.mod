@@ -26,6 +26,8 @@ replace (
 )
 
 require (
+	github.com/nil-go/konf v1.4.0
+	github.com/nil-go/konf/provider/file v1.4.0
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.82.0 // effective v0.68.0 via the KubeVirt compatibility replace above

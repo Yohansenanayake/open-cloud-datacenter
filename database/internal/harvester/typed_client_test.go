@@ -57,6 +57,16 @@ func TestTypedCreatePostgresVMFailsOnImageResolutionFailure(t *testing.T) {
 	}
 }
 
+func TestTypedCreatePostgresVMRequiresInjectedStorageClass(t *testing.T) {
+	params := testVMCreateParams()
+	params.DataVolumeStorageClass = ""
+
+	_, err := newTestTypedClient().CreatePostgresVM(context.Background(), params)
+	if err == nil || err.Error() != "data volume storage class must not be empty" {
+		t.Fatalf("CreatePostgresVM() error = %v, want missing storage class error", err)
+	}
+}
+
 func TestResolveVMImage(t *testing.T) {
 	ctx := context.Background()
 	image := testTypedVMImage()

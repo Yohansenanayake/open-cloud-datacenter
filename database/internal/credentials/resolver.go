@@ -32,11 +32,6 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
-// defaultMasterUser mirrors the controller's own default (dbinstance_types.go
-// doc comment: "MasterUsername ... Default 'dbadmin'"). Duplicated as a small
-// stable literal rather than threading it through the Resolve call signature.
-const defaultMasterUser = "dbadmin"
-
 // TenantCredentialsSecretName, InternalSecretName, and TLSSecretName are the
 // deterministic Secret names Resolver reads and creates. All three are
 // recomputable from the live DBInstance (name/UID) — never status-memory.
@@ -65,6 +60,8 @@ type Resolver struct {
 	// OperatorNamespace is where the two controller-private Secrets (internal
 	// DB credentials, TLS) live — outside the tenant namespace.
 	OperatorNamespace string
+	// DefaultMasterUser is used when spec.masterUsername is omitted.
+	DefaultMasterUser string
 }
 
 // ResolveResult reports both the resolved material and whether this call
@@ -121,7 +118,10 @@ func (r *Resolver) getOrCreateTenant(ctx context.Context, inst *dbaasv1.DBInstan
 
 	adminUser = inst.Spec.MasterUsername
 	if adminUser == "" {
-		adminUser = defaultMasterUser
+		adminUser = r.DefaultMasterUser
+	}
+	if adminUser == "" {
+		return "", "", false, fmt.Errorf("default master user must not be empty")
 	}
 	adminPassword, err = randomString(32)
 	if err != nil {

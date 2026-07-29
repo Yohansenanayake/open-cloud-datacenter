@@ -22,23 +22,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 )
 
-const (
-	defaultOSImage     = "ubuntu-22.04-server-cloudimg-amd64.img"
-	defaultStorageType = "longhorn"
-	defaultMasterUser  = "dbadmin"
-	defaultPort        = 5432
-)
-
-func specPort(port int) int {
+func specPortWithDefault(port, configuredDefault int) int {
 	if port == 0 {
-		return defaultPort
+		return configuredDefault
 	}
 	return port
 }
 
-func immutableDrift(inst *dbaasv1.DBInstance) string {
+func immutableDriftWithDefaults(inst *dbaasv1.DBInstance, defaults operatorconfig.DatabaseDefaults) string {
 	applied := inst.Status.AppliedSpec
 	if applied == nil {
 		return ""
@@ -46,7 +40,7 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 
 	osImage := inst.Spec.OSImage
 	if osImage == "" {
-		osImage = defaultOSImage
+		osImage = defaults.OSImage
 	}
 	dbName := inst.Spec.DBName
 	if dbName == "" {
@@ -54,15 +48,15 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 	}
 	masterUser := inst.Spec.MasterUsername
 	if masterUser == "" {
-		masterUser = defaultMasterUser
+		masterUser = defaults.MasterUsername
 	}
 	storageType := inst.Spec.StorageType
 	if storageType == "" {
-		storageType = defaultStorageType
+		storageType = defaults.StorageClass
 	}
 	appliedOSImage := applied.OSImage
 	if appliedOSImage == "" {
-		appliedOSImage = defaultOSImage
+		appliedOSImage = defaults.OSImage
 	}
 	appliedDBName := applied.DBName
 	if appliedDBName == "" {
@@ -70,15 +64,15 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 	}
 	appliedMasterUser := applied.MasterUsername
 	if appliedMasterUser == "" {
-		appliedMasterUser = defaultMasterUser
+		appliedMasterUser = defaults.MasterUsername
 	}
 	appliedPort := applied.Port
 	if appliedPort == 0 {
-		appliedPort = defaultPort
+		appliedPort = defaults.Port
 	}
 	appliedStorageType := applied.StorageType
 	if appliedStorageType == "" {
-		appliedStorageType = defaultStorageType
+		appliedStorageType = defaults.StorageClass
 	}
 
 	var changed []string
@@ -97,7 +91,7 @@ func immutableDrift(inst *dbaasv1.DBInstance) string {
 	if applied.EngineVersion != inst.Spec.EngineVersion {
 		changed = append(changed, "engineVersion")
 	}
-	if appliedPort != specPort(inst.Spec.Port) {
+	if appliedPort != specPortWithDefault(inst.Spec.Port, defaults.Port) {
 		changed = append(changed, "port")
 	}
 	if appliedStorageType != storageType {

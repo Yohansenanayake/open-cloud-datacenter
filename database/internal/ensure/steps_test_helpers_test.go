@@ -25,10 +25,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
 )
 
 type stubHarvester = testutil.StubHarvester
+
+var (
+	defaultOSImage     = operatorconfig.Default().DatabaseDefaults.OSImage
+	defaultStorageType = operatorconfig.Default().DatabaseDefaults.StorageClass
+	defaultMasterUser  = operatorconfig.Default().DatabaseDefaults.MasterUsername
+	defaultPort        = operatorconfig.Default().DatabaseDefaults.Port
+)
 
 type testHarness struct{ Dependencies }
 

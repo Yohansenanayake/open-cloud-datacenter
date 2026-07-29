@@ -134,6 +134,9 @@ func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName s
 
 func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName string, err error) {
 	vmName = VMName(p.ID)
+	if p.DataVolumeStorageClass == "" {
+		return vmName, fmt.Errorf("data volume storage class must not be empty")
+	}
 
 	image, err := c.ResolveVMImage(ctx, p.OSImage)
 	if err != nil {
@@ -442,11 +445,6 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	if dataSizeGB <= 0 {
 		dataSizeGB = 1
 	}
-	dataStorageClass := p.DataVolumeStorageClass
-	if dataStorageClass == "" {
-		dataStorageClass = "longhorn"
-	}
-
 	osPVCOption := &harvesterbuilder.PersistentVolumeClaimOption{
 		ImageID:          imageID,
 		VolumeMode:       corev1.PersistentVolumeBlock,
@@ -456,7 +454,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	dataPVCOption := &harvesterbuilder.PersistentVolumeClaimOption{
 		VolumeMode:       corev1.PersistentVolumeBlock,
 		AccessMode:       corev1.ReadWriteMany, // to allow live migration all disks should be ReadWriteMany
-		StorageClassName: &dataStorageClass,
+		StorageClassName: &p.DataVolumeStorageClass,
 	}
 
 	vmBuilder := harvesterbuilder.NewVMBuilder("dbaas-operator").
