@@ -49,11 +49,13 @@ func TestValidateBindAddressRejectsNamedPort(t *testing.T) {
 }
 
 func TestValidateRejectsEmptyOSVersion(t *testing.T) {
-	cfg := Default()
-	cfg.DatabaseDefaults.OSVersion = ""
+	for _, value := range []string{"", "   ", "\t"} {
+		cfg := Default()
+		cfg.DatabaseDefaults.OSVersion = value
 
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "databaseDefaults.osVersion") {
-		t.Fatalf("Validate() error = %v, want databaseDefaults.osVersion field", err)
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "databaseDefaults.osVersion") {
+			t.Fatalf("Validate() with OSVersion = %q error = %v, want databaseDefaults.osVersion field", value, err)
+		}
 	}
 }
