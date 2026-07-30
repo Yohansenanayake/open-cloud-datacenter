@@ -55,6 +55,18 @@ const (
 	// to serve, but readiness or guest-agent attribution says it is unhealthy.
 	ConditionDegraded        = "Degraded"
 	ConditionDeletionBlocked = "DeletionBlocked"
+	// ConditionImageDrift is report-only: True whenever the instance's
+	// applied image revision differs from the catalog's current revision
+	// for its stream. Reason distinguishes a safe update
+	// (ReasonOSUpdateAvailable) from one blocked by an EOL'd engineVersion
+	// (ReasonEngineVersionEOL) — one condition type, not two, since the two
+	// causes are mutually exclusive facets of the same "image drift" axis.
+	ConditionImageDrift = "ImageDrift"
+	// ConditionRepaveInProgress is an activity condition, same shape as
+	// ConditionResizeInProgress — an independent axis from ConditionImageDrift
+	// (is a repave happening right now, unrelated to whether drift is safe
+	// or blocked).
+	ConditionRepaveInProgress = "RepaveInProgress"
 )
 
 // Find a condition witg more reasons
@@ -111,6 +123,18 @@ const (
 	ReasonTeardownFailed              ConditionReason = "TeardownFailed"
 	ReasonOperatorSecretCleanupFailed ConditionReason = "OperatorSecretCleanupFailed"
 	ReasonDeletionProgressing         ConditionReason = "DeletionProgressing"
+
+	// ConditionImageDrift reasons.
+	ReasonOSUpdateAvailable ConditionReason = "OSUpdateAvailable"
+	ReasonEngineVersionEOL  ConditionReason = "EngineVersionEOL"
+
+	// Repave dispatch reasons.
+	ReasonRepaveNotAvailable       ConditionReason = "RepaveNotAvailable"
+	ReasonRepaveBlockedEOL         ConditionReason = "RepaveBlockedEOL"
+	ReasonRepaveInvalidStream      ConditionReason = "RepaveInvalidStream"
+	ReasonRepaveStopping           ConditionReason = "RepaveStopping"
+	ReasonRepaveWaitingForTeardown ConditionReason = "RepaveWaitingForTeardown"
+	ReasonRepaveApplied            ConditionReason = "RepaveApplied"
 )
 
 var knownConditionReasons = map[string]ConditionReason{
@@ -165,6 +189,14 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonTeardownFailed):              ReasonTeardownFailed,
 	string(ReasonOperatorSecretCleanupFailed): ReasonOperatorSecretCleanupFailed,
 	string(ReasonDeletionProgressing):         ReasonDeletionProgressing,
+	string(ReasonOSUpdateAvailable):           ReasonOSUpdateAvailable,
+	string(ReasonEngineVersionEOL):            ReasonEngineVersionEOL,
+	string(ReasonRepaveNotAvailable):          ReasonRepaveNotAvailable,
+	string(ReasonRepaveBlockedEOL):            ReasonRepaveBlockedEOL,
+	string(ReasonRepaveInvalidStream):         ReasonRepaveInvalidStream,
+	string(ReasonRepaveStopping):              ReasonRepaveStopping,
+	string(ReasonRepaveWaitingForTeardown):    ReasonRepaveWaitingForTeardown,
+	string(ReasonRepaveApplied):               ReasonRepaveApplied,
 }
 
 // ParseConditionReason validates a reason already serialized in status.
@@ -289,6 +321,8 @@ func DerivePhaseSummary(inst *DBInstance) PhaseSummary {
 		return PhaseSummary{StatusDegraded, conditionMessage(s, ConditionDegraded, "Database instance is degraded")}
 	case s.IsConditionTrue(ConditionResizeInProgress):
 		return PhaseSummary{StatusModifying, conditionMessage(s, ConditionResizeInProgress, "Applying database instance resize")}
+	case s.IsConditionTrue(ConditionRepaveInProgress):
+		return PhaseSummary{StatusModifying, conditionMessage(s, ConditionRepaveInProgress, "Applying baked-image repave")}
 	case s.ObservedGeneration > 0 && inst.Spec.WantRunning() &&
 		s.IsConditionTrue(ConditionDatabaseReady) &&
 		s.IsCurrentConditionFalse(ConditionMonitoringReady, inst.Generation) &&

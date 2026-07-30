@@ -259,7 +259,11 @@ type S3BackupConfig struct {
 
 // DBInstanceStatus defines the observed state of a DBInstance.
 type DBInstanceStatus struct {
-	// Phase matches RDS DBInstanceStatus strings.
+	// Phase matches RDS DBInstanceStatus strings for API compatibility.
+	// It is always derived from Conditions by DerivePhaseSummary and must
+	// never be maintained as an independent controller state machine —
+	// Kubernetes API conventions deprecate standalone phase fields in favor
+	// of Conditions; this field is retained solely for RDS compatibility.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -351,6 +355,12 @@ type AppliedSpec struct {
 	VMPassword string `json:"vmPassword,omitempty"`
 	// +optional
 	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
+	// ImageRevision is the baked image revision the VM was provisioned or
+	// last repaved with, e.g. "ubuntu-2404-postgres-v20260701". Used for
+	// drift detection — when this differs from the current
+	// LatestBakedImages revision, ConditionImageDrift is set to True.
+	// +optional
+	ImageRevision string `json:"imageRevision,omitempty"`
 }
 
 // Endpoint is the network address clients use to reach the database.
@@ -370,6 +380,13 @@ type ResourceRefs struct {
 	NADName string `json:"nadName,omitempty"`
 	// +optional
 	DataVolumeName string `json:"dataVolumeName,omitempty"`
+	// OSDiskPVCName is the exact current name of the OS disk PVC:
+	// pg-<id>-os at first provision, or a revision-suffixed
+	// pg-<id>-os-<rev> after a repave. Authoritative — TeardownAll and
+	// repave's old-disk cleanup read this instead of deriving the name by
+	// string-prefix matching.
+	// +optional
+	OSDiskPVCName string `json:"osDiskPVCName,omitempty"`
 	// +optional
 	VMName string `json:"vmName,omitempty"`
 	// AdminCredentialsSecretName is the tenant-facing Secret containing the
@@ -414,6 +431,8 @@ type ResourceRefs struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Class",type=string,JSONPath=`.spec.dbInstanceClass`
 // +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint.address`
+// +kubebuilder:printcolumn:name="ImageDrift",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].status`
+// +kubebuilder:printcolumn:name="ImageDriftReason",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].reason`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DBInstance represents a managed PostgreSQL database on Harvester HCI.
@@ -467,6 +486,12 @@ const (
 	// VMI being halted, allowing reconciliation to distinguish that VMI tearing
 	// down from a later out-of-band recovery VMI.
 	AnnotationCrashLoopHaltedVMIUID = "dbaas.opencloud.wso2.com/crash-loop-halted-vmi-uid"
+
+	// AnnotationRepaveTrigger, when set to "now", triggers a repave —
+	// swapping the VM's OS disk onto the catalog's current validated
+	// revision for its stream. The controller clears the annotation once
+	// the trigger has been processed (accepted, rejected, or applied).
+	AnnotationRepaveTrigger = "dbaas.opencloud.wso2.com/repave-trigger"
 
 	// FinalizerName triggers controller-side teardown of Harvester resources.
 	FinalizerName = "dbaas.opencloud.wso2.com/cleanup"
