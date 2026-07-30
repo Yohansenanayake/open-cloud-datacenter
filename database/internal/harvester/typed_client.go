@@ -578,6 +578,118 @@ func ignoreAlreadyExists(err error) error {
 	return err
 }
 
+// ignoreNotFound returns nil if err is a NotFound API error, otherwise err.
+func ignoreNotFound(err error) error {
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// osDiskVolumeName is the VM disk name buildPostgresVM assigns the OS-disk
+// PVC template to (see buildPostgresVM's PVCDisk("os-disk", ...) call).
+const osDiskVolumeName = "os-disk"
+
+// SwapVMOSDisk repoints the "os-disk" volumeClaimTemplates entry to a new
+// revision-suffixed PVC backed by newImageRef's StorageClass, and repoints
+// the "os-disk" volume's claimName to match. Mirrors ResizeDataVolume's
+// read-modify-write idiom over the harvesterhci.io/volumeClaimTemplates
+// annotation, under the same RetryOnConflict.
+func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, newImageRef string) (oldPVCName, newPVCName string, err error) {
+	image, err := c.ResolveVMImage(ctx, newImageRef)
+	if err != nil {
+		return "", "", err
+	}
+	imageID := fmt.Sprintf("%s/%s", image.Namespace, image.Name)
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		oldPVCName, newPVCName = "", ""
+
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		volIdx := -1
+		for i := range vm.Spec.Template.Spec.Volumes {
+			if vm.Spec.Template.Spec.Volumes[i].Name == osDiskVolumeName {
+				volIdx = i
+				break
+			}
+		}
+		// Hard-fail rather than silently skip: updating the annotation without
+		// repointing the actual boot volume would leave the VM booting from a
+		// PVC the annotation no longer describes.
+		if volIdx == -1 {
+			return fmt.Errorf("VM %s/%s has no %q volume; refusing to update %s without repointing the boot volume",
+				ns, vmName, osDiskVolumeName, util.AnnotationVolumeClaimTemplates)
+		}
+		currentPVCName := vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName
+
+		pvcs, err := VolumeClaimTemplates(vm)
+		if err != nil {
+			return err
+		}
+		pvcIdx := -1
+		for i := range pvcs {
+			if pvcs[i].Name == currentPVCName {
+				pvcIdx = i
+				break
+			}
+		}
+		if pvcIdx == -1 {
+			return fmt.Errorf("%s on VM %s/%s has no entry named %q",
+				util.AnnotationVolumeClaimTemplates, ns, vmName, currentPVCName)
+		}
+		current := pvcs[pvcIdx]
+
+		// Idempotent no-op: already on the target StorageClass.
+		if current.Spec.StorageClassName != nil && *current.Spec.StorageClassName == image.StorageClassName {
+			newPVCName = currentPVCName
+			return nil
+		}
+
+		newPVCName = fmt.Sprintf("pg-%s-os-%s", instID, image.Name)
+		pvcs[pvcIdx] = &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        newPVCName,
+				Annotations: map[string]string{harvesterbuilder.AnnotationKeyImageID: imageID},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes:      current.Spec.AccessModes,
+				Resources:        current.Spec.Resources,
+				VolumeMode:       current.Spec.VolumeMode,
+				StorageClassName: &image.StorageClassName,
+			},
+		}
+
+		data, err := json.Marshal(pvcs)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", util.AnnotationVolumeClaimTemplates, err)
+		}
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[util.AnnotationVolumeClaimTemplates] = string(data)
+		vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName = newPVCName
+
+		if _, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		oldPVCName = currentPVCName
+		return nil
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return oldPVCName, newPVCName, nil
+}
+
+// DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
+func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
+	return ignoreNotFound(c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{}))
+}
+
 func ptr[T any](v T) *T {
 	return &v
 }

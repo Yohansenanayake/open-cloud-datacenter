@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
+	harvesterbuilder "github.com/harvester/harvester/pkg/builder"
 	harvesterfake "github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
 	harvesterutil "github.com/harvester/harvester/pkg/util"
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -162,6 +163,152 @@ func TestDataVolumeNameMatchesPVCTemplateAndResizeUpdatesVMTemplate(t *testing.T
 	storage = dataTemplate.Spec.Resources.Requests[corev1.ResourceStorage]
 	if got := storage.String(); got != "30Gi" {
 		t.Fatalf("Data PVC template storage after resize = %q, want 30Gi", got)
+	}
+}
+
+func TestSwapVMOSDiskProducesRevisionSuffixedPVCAndRepointsVolume(t *testing.T) {
+	ctx := context.Background()
+	oldImage := testTypedVMImage()
+	newImage := testTypedVMImage()
+	newImage.Name = "ubuntu-24.04"
+	newImage.Status.StorageClassName = "longhorn-image-ubuntu2404"
+	client := newTestTypedClient(oldImage, newImage)
+
+	if _, err := client.CreatePostgresVM(ctx, testVMCreateParams()); err != nil {
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
+	}
+
+	oldPVCName, newPVCName, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-orders", "orders", newImage.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk returned error: %v", err)
+	}
+	if oldPVCName != "pg-orders-os" {
+		t.Fatalf("oldPVCName = %q, want pg-orders-os", oldPVCName)
+	}
+	if want := "pg-orders-os-" + newImage.Name; newPVCName != want {
+		t.Fatalf("newPVCName = %q, want %q", newPVCName, want)
+	}
+
+	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	if !vmVolumeUsesPVC(vm, osDiskVolumeName, newPVCName) {
+		t.Fatalf("os-disk volume does not point at %s", newPVCName)
+	}
+	templates, err := VolumeClaimTemplates(vm)
+	if err != nil {
+		t.Fatalf("volume claim templates: %v", err)
+	}
+	if findPVCTemplate(templates, oldPVCName) != nil {
+		t.Fatalf("old PVC template %s still present after swap", oldPVCName)
+	}
+	newTemplate := findPVCTemplate(templates, newPVCName)
+	if newTemplate == nil {
+		t.Fatalf("new PVC template %s not found", newPVCName)
+	}
+	if newTemplate.Spec.StorageClassName == nil || *newTemplate.Spec.StorageClassName != newImage.Status.StorageClassName {
+		t.Fatalf("new PVC template StorageClassName = %v, want %s", newTemplate.Spec.StorageClassName, newImage.Status.StorageClassName)
+	}
+	wantImageID := "default/" + newImage.Name
+	if got := newTemplate.Annotations[harvesterbuilder.AnnotationKeyImageID]; got != wantImageID {
+		t.Fatalf("new PVC template imageId annotation = %q, want %q", got, wantImageID)
+	}
+}
+
+func TestSwapVMOSDiskIsIdempotentWhenAlreadyOnTargetStorageClass(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	client := newTestTypedClient(image)
+
+	if _, err := client.CreatePostgresVM(ctx, testVMCreateParams()); err != nil {
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
+	}
+
+	// Same image the VM was already created with — no drift, should no-op.
+	oldPVCName, newPVCName, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-orders", "orders", image.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk returned error: %v", err)
+	}
+	if oldPVCName != "" {
+		t.Fatalf("oldPVCName = %q, want empty (idempotent no-op)", oldPVCName)
+	}
+	if newPVCName != "pg-orders-os" {
+		t.Fatalf("newPVCName = %q, want pg-orders-os (unchanged)", newPVCName)
+	}
+}
+
+func TestSwapVMOSDiskHardFailsWhenNoOSDiskVolume(t *testing.T) {
+	ctx := context.Background()
+	newImage := testTypedVMImage()
+	newImage.Name = "ubuntu-24.04"
+	client := newTestTypedClient(testTypedVMImage(), newImage)
+
+	bareVM := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-bare", Namespace: "tenant-a"},
+		Spec: kubevirtv1.VirtualMachineSpec{
+			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{},
+		},
+	}
+	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Create(ctx, bareVM, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create bare VM: %v", err)
+	}
+
+	if _, _, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-bare", "bare", newImage.Name); err == nil {
+		t.Fatal("SwapVMOSDisk returned nil error, want a hard failure for a VM with no os-disk volume")
+	}
+}
+
+func TestSwapVMOSDiskDoesNotCollideAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	newImage := testTypedVMImage()
+	newImage.Name = "ubuntu-24.04"
+	client := newTestTypedClient(testTypedVMImage(), newImage)
+
+	firstParams := testVMCreateParams()
+	secondParams := testVMCreateParams()
+	secondParams.ID = "billing"
+	secondParams.DataVolumeRef = "pg-billing-data"
+	secondParams.CloudInitSecretName = "pg-billing-cloudinit"
+	if _, err := client.CreatePostgresVM(ctx, firstParams); err != nil {
+		t.Fatalf("CreatePostgresVM(orders) returned error: %v", err)
+	}
+	if _, err := client.CreatePostgresVM(ctx, secondParams); err != nil {
+		t.Fatalf("CreatePostgresVM(billing) returned error: %v", err)
+	}
+
+	_, firstNewPVC, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-orders", "orders", newImage.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk(orders) returned error: %v", err)
+	}
+	_, secondNewPVC, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-billing", "billing", newImage.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk(billing) returned error: %v", err)
+	}
+	if firstNewPVC == secondNewPVC {
+		t.Fatalf("both instances swapped to the same PVC name %q", firstNewPVC)
+	}
+}
+
+func TestDeletePVCIgnoresNotFound(t *testing.T) {
+	if err := newTestTypedClient().DeletePVC(context.Background(), "tenant-a", "does-not-exist"); err != nil {
+		t.Fatalf("DeletePVC returned error for a missing PVC: %v", err)
+	}
+}
+
+func TestDeletePVCDeletesExisting(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient()
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-os", Namespace: "tenant-a"}}
+	if _, err := client.KubeClient.CoreV1().PersistentVolumeClaims("tenant-a").Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed PVC: %v", err)
+	}
+
+	if err := client.DeletePVC(ctx, "tenant-a", "pg-orders-os"); err != nil {
+		t.Fatalf("DeletePVC returned error: %v", err)
+	}
+	if _, err := client.KubeClient.CoreV1().PersistentVolumeClaims("tenant-a").Get(ctx, "pg-orders-os", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("PVC should be gone after DeletePVC, got: %v", err)
 	}
 }
 

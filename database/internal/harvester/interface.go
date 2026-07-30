@@ -50,6 +50,16 @@ type ClientInterface interface {
 	// method. TeardownAll still deletes them by ref as the finalizer's
 	// authoritative cleanup; owner-ref GC is the backup.
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error
+
+	// SwapVMOSDisk repoints the "os-disk" volumeClaimTemplates entry to a new
+	// revision-suffixed PVC backed by newImageRef's StorageClass, and repoints
+	// the "os-disk" volume's claimName to match. Returns (oldPVCName,
+	// newPVCName, err); oldPVCName is "" if the VM was already on the target
+	// disk (idempotent re-entry).
+	SwapVMOSDisk(ctx context.Context, ns, vmName, instID, newImageRef string) (oldPVCName, newPVCName string, err error)
+
+	// DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
+	DeletePVC(ctx context.Context, ns, name string) error
 }
 
 // ResolvedVMImage contains the provider-neutral image fields needed to build a
