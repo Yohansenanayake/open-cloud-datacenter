@@ -60,10 +60,18 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	if a == nil {
 		t.Fatal("AppliedSpec not snapshotted")
 	}
-	if a.MasterUsername != defaultMasterUser || a.OSImage != defaultOSImage ||
+	if a.MasterUsername != defaultMasterUser ||
 		a.Port != defaultPort || a.StorageType != defaultStorageType ||
 		a.DBName != "orders" || a.NetworkRef != "tenant-a/data-net" {
 		t.Fatalf("AppliedSpec = %+v, want defaulted snapshot", a)
+	}
+	// CurrentImageRevision/OSDiskPVCName live outside AppliedSpec — they're
+	// expected to change on every repave, unlike everything checked above.
+	if inst.Status.CurrentImageRevision != defaultBakedImageName {
+		t.Fatalf("CurrentImageRevision = %q, want %q", inst.Status.CurrentImageRevision, defaultBakedImageName)
+	}
+	if inst.Status.Resources.OSDiskPVCName != "pg-orders-os" {
+		t.Fatalf("OSDiskPVCName = %q, want pg-orders-os", inst.Status.Resources.OSDiskPVCName)
 	}
 
 	cond := inst.Status.GetCondition(dbaasv1.ConditionVMReady)

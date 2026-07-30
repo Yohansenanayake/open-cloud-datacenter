@@ -54,9 +54,6 @@ func (d Dependencies) operatorNamespace() string { return d.OperatorNamespace }
 func (d Dependencies) databaseDefaults() operatorconfig.DatabaseDefaults {
 	defaults := d.DatabaseDefaults
 	builtIn := operatorconfig.Default().DatabaseDefaults
-	if defaults.OSImage == "" {
-		defaults.OSImage = builtIn.OSImage
-	}
 	if defaults.StorageClass == "" {
 		defaults.StorageClass = builtIn.StorageClass
 	}

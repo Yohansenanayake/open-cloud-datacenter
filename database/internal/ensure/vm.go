@@ -129,10 +129,17 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	if dbName == "" {
 		dbName = inst.Name
 	}
-	osImage := inst.Spec.OSImage
-	if osImage == "" {
-		osImage = defaults.OSImage
-	} // Do we need this OS Validation?
+	// Recomputed here rather than passed forward from preflight — ensureVM
+	// doesn't trust state from other steps, matching how every other input
+	// above is re-derived independently.
+	entry, stream, ok := resolveBakedImage(defaults)
+	if !ok {
+		// ensurePreflight validates this first; defensive so ensureVM alone
+		// can never create a VM against an unresolvable catalog stream.
+		msg := fmt.Sprintf("OS stream %q is not available or not validated", defaults.OSVersion)
+		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, msg)
+		return Terminal(dbaasv1.ReasonOSImageInvalid, msg)
+	}
 	storageType := inst.Spec.StorageType
 	if storageType == "" {
 		storageType = defaults.StorageClass
@@ -179,7 +186,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		Namespace:              inst.Namespace,
 		CPUCores:               classSpec.CPUCores,
 		MemoryMB:               classSpec.MemoryMB,
-		OSImage:                osImage,
+		OSImage:                entry.ImageName,
 		DataVolumeRef:          dataVolumeName,
 		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
 		DataVolumeStorageClass: storageType,
@@ -201,18 +208,21 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	}
 
 	// Snapshot the immutable fields as applied; immutableDrift refuses later spec
-	// changes that drift from this snapshot.
+	// changes that drift from this snapshot. The baked image itself is tracked
+	// separately below (CurrentImageRevision), not here — it's expected to
+	// change on every repave, unlike everything in AppliedSpec.
 	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{
 		NetworkRef:     inst.Spec.NetworkRef,
-		OSImage:        osImage,
 		DBName:         dbName,
 		MasterUsername: masterUser,
-		EngineVersion:  inst.Spec.EngineVersion, // In Image Baking features, this will be removed
+		EngineVersion:  inst.Spec.EngineVersion,
 		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
 		StorageType:    storageType,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork.DeepCopy(),
 	}
+	inst.Status.CurrentImageRevision = stream.Revision
+	inst.Status.Resources.OSDiskPVCName = fmt.Sprintf("pg-%s-os", inst.Name)
 	inst.SetCurrentCondition(dbaasv1.ConditionVMReady, metav1.ConditionFalse,
 		dbaasv1.ReasonVMCreated, "created virtualmachine, waiting for it to register")
 

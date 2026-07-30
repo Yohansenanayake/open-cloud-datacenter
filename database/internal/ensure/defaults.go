@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
 	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 )
 
@@ -32,16 +33,24 @@ func specPortWithDefault(port, configuredDefault int) int {
 	return port
 }
 
+// resolveBakedImage looks up the current validated revision for
+// defaults.OSVersion and its catalog entry. ok is false when the stream is
+// unknown or not yet Validated — callers treat that as "nothing to resolve
+// against yet" (preflight/vm Terminal-reject; repave no-ops).
+func resolveBakedImage(defaults operatorconfig.DatabaseDefaults) (entry catalog.BakedImageEntry, stream catalog.BakedImageStream, ok bool) {
+	stream, ok = catalog.LatestBakedImages[defaults.OSVersion]
+	if !ok || stream.ValidationState != catalog.ValidationValidated {
+		return catalog.BakedImageEntry{}, catalog.BakedImageStream{}, false
+	}
+	return catalog.BakedImages[stream.Revision], stream, true
+}
+
 func immutableDriftWithDefaults(inst *dbaasv1.DBInstance, defaults operatorconfig.DatabaseDefaults) string {
 	applied := inst.Status.AppliedSpec
 	if applied == nil {
 		return ""
 	}
 
-	osImage := inst.Spec.OSImage
-	if osImage == "" {
-		osImage = defaults.OSImage
-	}
 	dbName := inst.Spec.DBName
 	if dbName == "" {
 		dbName = inst.Name
@@ -53,10 +62,6 @@ func immutableDriftWithDefaults(inst *dbaasv1.DBInstance, defaults operatorconfi
 	storageType := inst.Spec.StorageType
 	if storageType == "" {
 		storageType = defaults.StorageClass
-	}
-	appliedOSImage := applied.OSImage
-	if appliedOSImage == "" {
-		appliedOSImage = defaults.OSImage
 	}
 	appliedDBName := applied.DBName
 	if appliedDBName == "" {
@@ -78,9 +83,6 @@ func immutableDriftWithDefaults(inst *dbaasv1.DBInstance, defaults operatorconfi
 	var changed []string
 	if applied.NetworkRef != inst.Spec.NetworkRef {
 		changed = append(changed, "networkRef")
-	}
-	if appliedOSImage != osImage {
-		changed = append(changed, "osImage")
 	}
 	if appliedDBName != dbName {
 		changed = append(changed, "dbName")

@@ -26,7 +26,7 @@ import (
 //   - implemented mutable post-create: dbInstanceClass, allocatedStorage,
 //     running, deletionProtection
 //   - implemented immutable post-create (modify is refused): networkRef,
-//     osImage, dbName, masterUsername, port, storageType, staticNetwork,
+//     dbName, masterUsername, port, storageType, staticNetwork,
 //     vmPassword, engineVersion
 //   - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
 //     multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
@@ -35,8 +35,8 @@ import (
 //     apply them. See ARCHITECTURE.md for the roadmap.
 //
 // Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
-// vmPassword carry a CEL "self == oldSelf" rule: the other five (osImage,
-// dbName, masterUsername, port, storageType) are compared post-defaulting in
+// vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
+// masterUsername, port, storageType) are compared post-defaulting in
 // immutableDrift(), so a raw CEL rule on them would be stricter than that
 // check — see immutableDrift's doc comment.
 type DBInstanceSpec struct {
@@ -153,13 +153,6 @@ type DBInstanceSpec struct {
 	// +kubebuilder:default=true
 	// +optional
 	Running *bool `json:"running,omitempty"`
-
-	// OSImage is the Harvester VirtualMachineImage to clone for the VM's
-	// OS disk. Either "<ns>/<name>" or just "<name>" (resolved in the
-	// "default" namespace), or the image's spec.displayName.
-	// Immutable after first reconcile.
-	// +optional
-	OSImage string `json:"osImage,omitempty"`
 
 	// NetworkRef is a Harvester NAD reference (namespace/name) for the VLAN
 	// network the database VM attaches to. This is the VM's only network
@@ -347,8 +340,6 @@ type DBInstanceStatus struct {
 type AppliedSpec struct {
 	// +optional
 	NetworkRef string `json:"networkRef,omitempty"`
-	// +optional
-	OSImage string `json:"osImage,omitempty"`
 	// +optional
 	DBName string `json:"dbName,omitempty"`
 	// +optional

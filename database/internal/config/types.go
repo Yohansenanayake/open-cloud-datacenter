@@ -88,11 +88,11 @@ type HarvesterConfig struct {
 }
 
 type DatabaseDefaults struct {
-	OSImage        string `konf:"osImage"`
 	StorageClass   string `konf:"storageClass"`
 	MasterUsername string `konf:"masterUsername"`
 	Port           int    `konf:"port"`
-	OSVersion      string `konf:"osVersion"`
+	// OSVersion is the internal/catalog stream key (e.g. "24.04"); platform-wide, with no per-instance override.
+	OSVersion string `konf:"osVersion"`
 }
 
 type ObservabilityConfig struct {

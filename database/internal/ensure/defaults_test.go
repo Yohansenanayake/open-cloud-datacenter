@@ -32,7 +32,6 @@ func TestImmutableDriftNormalizesCreateDefaults(t *testing.T) {
 			DBInstanceClass:  "db.t3.medium",
 			AllocatedStorage: 50,
 			NetworkRef:       "default/vm-network",
-			OSImage:          "ubuntu-22.04-server-cloudimg-amd64.img",
 			DBName:           "orders",
 			MasterUsername:   "dbadmin",
 			Port:             5432,
@@ -62,7 +61,6 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 		Status: dbaasv1.DBInstanceStatus{
 			AppliedSpec: &dbaasv1.AppliedSpec{
 				NetworkRef:     "default/vm-network",
-				OSImage:        "ubuntu-22.04-server-cloudimg-amd64.img",
 				DBName:         "orders",
 				MasterUsername: "dbadmin",
 				Port:           5432,

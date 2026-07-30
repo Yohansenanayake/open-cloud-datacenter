@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
 	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
@@ -73,8 +74,8 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	if inst.Status.Resources.NADName != "tenant-a/data-net" {
 		t.Fatalf("NADName = %q, want tenant-a/data-net", inst.Status.Resources.NADName)
 	}
-	if stub.LastVMImageRef != defaultOSImage {
-		t.Fatalf("resolved image = %q, want default %q", stub.LastVMImageRef, defaultOSImage)
+	if stub.LastVMImageRef != defaultBakedImageName {
+		t.Fatalf("resolved image = %q, want default %q", stub.LastVMImageRef, defaultBakedImageName)
 	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
@@ -85,12 +86,24 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	}
 }
 
-func TestEnsurePreflightUsesConfiguredClassAndOSImageDefault(t *testing.T) {
+func TestEnsurePreflightUsesConfiguredClassAndOSVersionDefault(t *testing.T) {
+	const customOSVersion = "test-custom-version"
+	const customImageName = "test-custom-image"
+	catalog.BakedImages[customImageName] = catalog.BakedImageEntry{
+		ImageName:               customImageName,
+		OSVersion:               customOSVersion,
+		SupportedEngineVersions: []string{"16"},
+	}
+	catalog.LatestBakedImages[customOSVersion] = catalog.BakedImageStream{
+		Revision:        customImageName,
+		ValidationState: catalog.ValidationValidated,
+	}
+
 	stub := &stubHarvester{}
 	r := &testHarness{Dependencies: Dependencies{
 		Harvester: stub,
 		DatabaseDefaults: operatorconfig.DatabaseDefaults{
-			OSImage:        "custom/image",
+			OSVersion:      customOSVersion,
 			StorageClass:   "custom-storage",
 			MasterUsername: "platform_admin",
 			Port:           6432,
@@ -101,15 +114,14 @@ func TestEnsurePreflightUsesConfiguredClassAndOSImageDefault(t *testing.T) {
 	}}
 	inst := newProvisionInst()
 	inst.Spec.DBInstanceClass = "db.custom"
-	inst.Spec.OSImage = ""
 
 	res := r.ensurePreflight(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("Outcome = %q, want Satisfied: %+v", res.Outcome, res)
 	}
-	if stub.LastVMImageRef != "custom/image" {
-		t.Fatalf("resolved image = %q, want custom/image", stub.LastVMImageRef)
+	if stub.LastVMImageRef != customImageName {
+		t.Fatalf("resolved image = %q, want %q", stub.LastVMImageRef, customImageName)
 	}
 }
 

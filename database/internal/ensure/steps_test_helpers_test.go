@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
 	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
 )
@@ -32,11 +33,32 @@ import (
 type stubHarvester = testutil.StubHarvester
 
 var (
-	defaultOSImage     = operatorconfig.Default().DatabaseDefaults.OSImage
 	defaultStorageType = operatorconfig.Default().DatabaseDefaults.StorageClass
 	defaultMasterUser  = operatorconfig.Default().DatabaseDefaults.MasterUsername
 	defaultPort        = operatorconfig.Default().DatabaseDefaults.Port
 )
+
+var (
+	defaultOSVersion = operatorconfig.Default().DatabaseDefaults.OSVersion
+	// defaultBakedImageName is the catalog-resolved image name every test in
+	// this package sees for defaultOSVersion, once init() below overrides the
+	// real (Pending) seed entry for that stream. This override only affects
+	// this test binary — internal/catalog's own tests and every other
+	// package run as separate binaries and never see it.
+	defaultBakedImageName = "test-" + defaultOSVersion + "-postgres"
+)
+
+func init() {
+	catalog.BakedImages[defaultBakedImageName] = catalog.BakedImageEntry{
+		ImageName:               defaultBakedImageName,
+		OSVersion:               defaultOSVersion,
+		SupportedEngineVersions: []string{"16", "17"},
+	}
+	catalog.LatestBakedImages[defaultOSVersion] = catalog.BakedImageStream{
+		Revision:        defaultBakedImageName,
+		ValidationState: catalog.ValidationValidated,
+	}
+}
 
 type testHarness struct{ Dependencies }
 

@@ -46,7 +46,6 @@ func Default() Config {
 			Harvester: HarvesterConfig{ManagementLogicalSwitch: "ovn-default"},
 		},
 		DatabaseDefaults: DatabaseDefaults{
-			OSImage:        "ubuntu-22.04-server-cloudimg-amd64.img",
 			StorageClass:   "longhorn",
 			MasterUsername: "dbadmin",
 			Port:           5432,

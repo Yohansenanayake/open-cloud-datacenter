@@ -47,8 +47,6 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 		defaults.Infrastructure.Harvester.ManagementLogicalSwitch,
 		"Kube-OVN logical switch used for VM launcher management networking.")
 
-	set.String("databaseDefaults.osImage", defaults.DatabaseDefaults.OSImage,
-		"Default Harvester VM image for DBInstances.")
 	set.String("databaseDefaults.storageClass", defaults.DatabaseDefaults.StorageClass,
 		"Default storage class for DBInstances.")
 	set.String("databaseDefaults.masterUsername", defaults.DatabaseDefaults.MasterUsername,

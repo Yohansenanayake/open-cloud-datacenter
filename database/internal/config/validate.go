@@ -49,9 +49,6 @@ func (c Config) Validate() error {
 	if err := validateTLSFiles("server.webhook.tls", c.Server.Webhook.TLS); err != nil {
 		return err
 	}
-	if c.DatabaseDefaults.OSImage == "" {
-		return fmt.Errorf("databaseDefaults.osImage must not be empty")
-	}
 	if c.DatabaseDefaults.StorageClass == "" {
 		return fmt.Errorf("databaseDefaults.storageClass must not be empty")
 	}

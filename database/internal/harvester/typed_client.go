@@ -624,6 +624,10 @@ func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, newI
 			return fmt.Errorf("VM %s/%s has no %q volume; refusing to update %s without repointing the boot volume",
 				ns, vmName, osDiskVolumeName, util.AnnotationVolumeClaimTemplates)
 		}
+		if vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim == nil {
+			return fmt.Errorf("VM %s/%s %q volume is not PVC-backed; refusing to swap its OS disk",
+				ns, vmName, osDiskVolumeName)
+		}
 		currentPVCName := vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName
 
 		pvcs, err := VolumeClaimTemplates(vm)
