@@ -26,6 +26,13 @@ spec:
     - jsonPath: .status.endpoint.address
       name: Endpoint
       type: string
+    - jsonPath: .status.conditions[?(@.type=='ImageDrift')].status
+      name: ImageDrift
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='ImageDrift')].reason
+      name: ImageDriftReason
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -442,6 +449,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              currentImageRevision:
+                description: |-
+                  CurrentImageRevision is the baked image revision (internal/catalog
+                  key) the VM is currently running, updated after each successful
+                  repave. Used for drift detection — when this differs from the
+                  catalog's current revision for the instance's stream,
+                  ConditionImageDrift is set to True.
+                type: string
               endpoint:
                 description: Endpoint is populated when the database is reachable.
                 properties:
@@ -479,7 +494,12 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: Phase matches RDS DBInstanceStatus strings.
+                description: |-
+                  Phase matches RDS DBInstanceStatus strings for API compatibility.
+                  It is always derived from Conditions by DerivePhaseSummary and must
+                  never be maintained as an independent controller state machine —
+                  Kubernetes API conventions deprecate standalone phase fields in favor
+                  of Conditions; this field is retained solely for RDS compatibility.
                 type: string
               prometheusTarget:
                 description: PrometheusTarget is the scrape target for the instance's
@@ -541,6 +561,14 @@ spec:
                       NADName is the Multus NetworkAttachmentDefinition the VM's data NIC
                       attaches to. The controller does not create the NAD; this just records
                       the reference from spec.networkRef so callers can see it on the CR.
+                    type: string
+                  osDiskPVCName:
+                    description: |-
+                      OSDiskPVCName is the exact current name of the OS disk PVC:
+                      pg-<id>-os at first provision, or a revision-suffixed
+                      pg-<id>-os-<rev> after a repave. Authoritative — TeardownAll and
+                      repave's old-disk cleanup read this instead of deriving the name by
+                      string-prefix matching.
                     type: string
                   privateTLSSecretRef:
                     description: |-

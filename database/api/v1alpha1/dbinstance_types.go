@@ -309,6 +309,14 @@ type DBInstanceStatus struct {
 	// +optional
 	AppliedSpec *AppliedSpec `json:"appliedSpec,omitempty"`
 
+	// CurrentImageRevision is the baked image revision (internal/catalog
+	// key) the VM is currently running, updated after each successful
+	// repave. Used for drift detection — when this differs from the
+	// catalog's current revision for the instance's stream,
+	// ConditionImageDrift is set to True.
+	// +optional
+	CurrentImageRevision string `json:"currentImageRevision,omitempty"`
+
 	// RestartCount is the cumulative number of VM restarts detected or
 	// initiated by the controller liveness loop (both planned and unplanned).
 	// +optional
@@ -355,12 +363,6 @@ type AppliedSpec struct {
 	VMPassword string `json:"vmPassword,omitempty"`
 	// +optional
 	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
-	// ImageRevision is the baked image revision the VM was provisioned or
-	// last repaved with, e.g. "ubuntu-2404-postgres-v20260701". Used for
-	// drift detection — when this differs from the current
-	// LatestBakedImages revision, ConditionImageDrift is set to True.
-	// +optional
-	ImageRevision string `json:"imageRevision,omitempty"`
 }
 
 // Endpoint is the network address clients use to reach the database.
