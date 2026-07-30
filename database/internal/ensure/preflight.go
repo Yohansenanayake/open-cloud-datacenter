@@ -41,8 +41,10 @@ func (*preflightStep) Name() string { return "preflight" }
 // user's behalf: the instance class must exist in InstanceClasses,
 // spec.networkRef must be set, and the OS image resolved from the baked-image
 // catalog (internal/catalog, keyed by databaseDefaults.osVersion — there is no
-// per-instance spec field) must exist and be ready. Invalid references are
-// Terminal; an image that is still importing is Pending.
+// per-instance spec field) must exist and be ready. An unresolved catalog
+// entry is Terminal (see the comment at that check for why); once resolved,
+// an image still importing in Harvester itself is Pending, since that state
+// can change without an operator restart.
 //
 // NAD existence is not yet verified (no NAD type in the manager scheme); RBAC for
 // get/list is already in place, so the check can be added once the scheme is.
@@ -69,6 +71,12 @@ func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resul
 		return Terminal(dbaasv1.ReasonImmutableFieldChanged, msg)
 	}
 
+	// Catalog entries are compiled into the binary, so ValidationState can
+	// only ever change via a rebuild+redeploy — and that redeploy's initial
+	// cache sync already re-reconciles every instance regardless of its
+	// prior condition. A retry timer here would just re-check the same
+	// unchanged answer until the next restart, so an unresolved stream
+	// (unknown, or simply not yet validated) is Terminal, not Pending.
 	entry, stream, ok := resolveBakedImage(defaults)
 	if !ok {
 		msg := fmt.Sprintf("OS stream %q is not available or not validated", defaults.OSVersion)

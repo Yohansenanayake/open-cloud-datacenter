@@ -35,14 +35,23 @@ func specPortWithDefault(port, configuredDefault int) int {
 
 // resolveBakedImage looks up the current validated revision for
 // defaults.OSVersion and its catalog entry. ok is false when the stream is
-// unknown or not yet Validated — callers treat that as "nothing to resolve
-// against yet" (preflight/vm Terminal-reject; repave no-ops).
+// unknown, not yet Validated, or points at a revision missing from
+// BakedImages (the two maps are hand-maintained together; this guards
+// against them drifting out of sync) — callers treat that as "nothing to
+// resolve against yet" and reject Terminal (preflight/vm) or no-op (repave).
+// Catalog data is compiled into the binary, so this can only ever change via
+// a rebuild+redeploy; there's no live state a caller could usefully wait out,
+// so ok collapses every non-Validated case into one signal.
 func resolveBakedImage(defaults operatorconfig.DatabaseDefaults) (entry catalog.BakedImageEntry, stream catalog.BakedImageStream, ok bool) {
-	stream, ok = catalog.LatestBakedImages[defaults.OSVersion]
-	if !ok || stream.ValidationState != catalog.ValidationValidated {
+	stream, found := catalog.LatestBakedImages[defaults.OSVersion]
+	if !found || stream.ValidationState != catalog.ValidationValidated {
 		return catalog.BakedImageEntry{}, catalog.BakedImageStream{}, false
 	}
-	return catalog.BakedImages[stream.Revision], stream, true
+	entry, found = catalog.BakedImages[stream.Revision]
+	if !found {
+		return catalog.BakedImageEntry{}, catalog.BakedImageStream{}, false
+	}
+	return entry, stream, true
 }
 
 func immutableDriftWithDefaults(inst *dbaasv1.DBInstance, defaults operatorconfig.DatabaseDefaults) string {

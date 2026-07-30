@@ -125,6 +125,56 @@ func TestEnsurePreflightUsesConfiguredClassAndOSVersionDefault(t *testing.T) {
 	}
 }
 
+// A stream that is a genuinely unknown OS version (never registered in the
+// catalog at all) cannot self-resolve — no amount of waiting fixes a typo in
+// databaseDefaults.osVersion — so it stays Terminal.
+func TestEnsurePreflightUnknownOSVersionIsTerminal(t *testing.T) {
+	r := &testHarness{Dependencies: Dependencies{
+		Harvester:        &stubHarvester{},
+		DatabaseDefaults: operatorconfig.DatabaseDefaults{OSVersion: "nonexistent-version"},
+	}}
+	inst := newProvisionInst()
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonOSImageInvalid) {
+		t.Fatalf("PreflightReady = %+v, want False/OSImageInvalid", cond)
+	}
+}
+
+// A stream that IS registered but still ValidationPending (image built, not
+// yet marked Validated — e.g. before Task 10 registers the real image) is
+// also Terminal: catalog data can only change via a rebuild+redeploy, which
+// already re-reconciles every instance on its own, so there is nothing a
+// retry timer would gain over waiting for that redeploy.
+func TestEnsurePreflightPendingCatalogStreamIsTerminal(t *testing.T) {
+	const pendingOSVersion = "test-pending-version"
+	catalog.LatestBakedImages[pendingOSVersion] = catalog.BakedImageStream{
+		Revision:        "unused-revision",
+		ValidationState: catalog.ValidationPending,
+	}
+
+	r := &testHarness{Dependencies: Dependencies{
+		Harvester:        &stubHarvester{},
+		DatabaseDefaults: operatorconfig.DatabaseDefaults{OSVersion: pendingOSVersion},
+	}}
+	inst := newProvisionInst()
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonOSImageInvalid) {
+		t.Fatalf("PreflightReady = %+v, want False/OSImageInvalid", cond)
+	}
+}
+
 // An edit to an immutable field (vs the create-time AppliedSpec snapshot) is
 // refused loudly — the guard that sat on the legacy stop/start/modify paths now
 // covers every runner entry.

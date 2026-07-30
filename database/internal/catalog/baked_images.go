@@ -43,16 +43,15 @@ type BakedImageStream struct {
 }
 
 // ValidationState is the smoke-test state of a BakedImageStream's current
-// revision. Only "Validated" streams are ever resolved by preflight/repave
-// — "Pending" and "Failed" are both treated as "not yet safe to use," but
-// kept distinguishable so a failed build doesn't sit indistinguishable from
-// one that's simply still being tested.
+// revision. Only "Validated" streams are ever resolved by preflight/repave;
+// "Pending" covers everything else not yet safe to use, including a build
+// that failed testing — a failed build is removed from the catalog rather
+// than marked, so there's nothing to distinguish it from "not tested yet".
 type ValidationState string
 
 const (
 	ValidationPending   ValidationState = "Pending"
 	ValidationValidated ValidationState = "Validated"
-	ValidationFailed    ValidationState = "Failed"
 )
 
 // BakedImages is the registry of every known image revision, keyed by
