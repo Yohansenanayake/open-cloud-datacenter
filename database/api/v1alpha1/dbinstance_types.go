@@ -261,9 +261,9 @@ type S3BackupConfig struct {
 type DBInstanceStatus struct {
 	// Phase matches RDS DBInstanceStatus strings for API compatibility.
 	// It is always derived from Conditions by DerivePhaseSummary and must
-	// never be maintained as an independent controller state machine —
-	// Kubernetes API conventions deprecate standalone phase fields in favor
-	// of Conditions; this field is retained solely for RDS compatibility.
+	// never be maintained as an independent controller state machine — a
+	// projection retained solely for RDS compatibility, not a second
+	// source of truth alongside Conditions.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
