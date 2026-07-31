@@ -380,6 +380,14 @@ type ResourceRefs struct {
 	// string-prefix matching.
 	// +optional
 	OSDiskPVCName string `json:"osDiskPVCName,omitempty"`
+	// PendingDeleteOSDiskPVCName is set by repave the moment SwapVMOSDisk
+	// succeeds, before DeletePVC is attempted, and cleared only once DeletePVC
+	// actually succeeds. Recorded durably so a reconcile interrupted between
+	// those two calls (anything short of a hard process kill) can retry the
+	// delete directly next pass, instead of relying on SwapVMOSDisk's
+	// idempotent no-op to (incorrectly) imply there's nothing left to clean up.
+	// +optional
+	PendingDeleteOSDiskPVCName string `json:"pendingDeleteOSDiskPVCName,omitempty"`
 	// +optional
 	VMName string `json:"vmName,omitempty"`
 	// AdminCredentialsSecretName is the tenant-facing Secret containing the

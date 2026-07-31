@@ -561,6 +561,15 @@ spec:
                       repave's old-disk cleanup read this instead of deriving the name by
                       string-prefix matching.
                     type: string
+                  pendingDeleteOSDiskPVCName:
+                    description: |-
+                      PendingDeleteOSDiskPVCName is set by repave the moment SwapVMOSDisk
+                      succeeds, before DeletePVC is attempted, and cleared only once DeletePVC
+                      actually succeeds. Recorded durably so a reconcile interrupted between
+                      those two calls (anything short of a hard process kill) can retry the
+                      delete directly next pass, instead of relying on SwapVMOSDisk's
+                      idempotent no-op to (incorrectly) imply there's nothing left to clean up.
+                    type: string
                   privateTLSSecretRef:
                     description: |-
                       PrivateTLSSecretRef is "namespace/name" of the controller-private

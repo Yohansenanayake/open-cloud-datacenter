@@ -17,6 +17,7 @@ limitations under the License.
 package ensure
 
 import (
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -31,6 +32,16 @@ func specPortWithDefault(port, configuredDefault int) int {
 		return configuredDefault
 	}
 	return port
+}
+
+// engineVersionSupported reports whether specEngineVersion is compatible with
+// entry. specEngineVersion is +optional and, pre-catalog, was never enforced
+// (recorded but didn't drive package selection) — an unset value is always
+// treated as supported so existing instances that never set it don't
+// suddenly get rejected by preflight or blocked from repaving. Shared by
+// preflight and repave so the two can't drift on this rule independently.
+func engineVersionSupported(specEngineVersion string, entry catalog.BakedImageEntry) bool {
+	return specEngineVersion == "" || slices.Contains(entry.SupportedEngineVersions, specEngineVersion)
 }
 
 // resolveBakedImage looks up the current validated revision for

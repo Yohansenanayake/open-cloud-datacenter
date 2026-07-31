@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -83,12 +82,7 @@ func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resul
 		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, msg)
 		return Terminal(dbaasv1.ReasonOSImageInvalid, msg)
 	}
-	// engineVersion is +optional and, pre-catalog, was never enforced (recorded
-	// but didn't drive package selection). Keep that behavior for an unset
-	// value rather than suddenly rejecting every instance that doesn't set
-	// it — only check compatibility once the tenant has actually opted in to
-	// a specific engine version.
-	if inst.Spec.EngineVersion != "" && !slices.Contains(entry.SupportedEngineVersions, inst.Spec.EngineVersion) {
+	if !engineVersionSupported(inst.Spec.EngineVersion, entry) {
 		msg := fmt.Sprintf("engineVersion %q is not available in image revision %q (supported: %v)",
 			inst.Spec.EngineVersion, stream.Revision, entry.SupportedEngineVersions)
 		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, msg)

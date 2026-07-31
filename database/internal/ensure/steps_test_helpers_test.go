@@ -103,6 +103,10 @@ func (r *testHarness) ensureResize(ctx context.Context, inst *dbaasv1.DBInstance
 	return newResizeStep(r.Dependencies).Run(ctx, inst)
 }
 
+func (r *testHarness) ensureRepave(ctx context.Context, inst *dbaasv1.DBInstance) Result {
+	return newRepaveStep(r.Dependencies).Run(ctx, inst)
+}
+
 func (r *testHarness) ensurePowerState(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	return newPowerStep(r.Dependencies).Run(ctx, inst)
 }

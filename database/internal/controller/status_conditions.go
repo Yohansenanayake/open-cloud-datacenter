@@ -98,6 +98,32 @@ func (r *DBInstanceReconciler) syncResizeInProgressCondition(inst *dbaasv1.DBIns
 	}
 }
 
+// syncRepaveInProgressCondition clears RepaveInProgress only once the drift
+// it was addressing is gone and the instance has settled: Ready when
+// running, or PowerStateReady when stopped. Mirrors
+// syncResizeInProgressCondition's pattern — ConditionImageDrift's ABSENCE is
+// the positive "converged" signal here, the role ConditionStorageReady=True
+// plays for resize (ImageDrift has no explicit False state; it's either True
+// or removed entirely).
+func (r *DBInstanceReconciler) syncRepaveInProgressCondition(inst *dbaasv1.DBInstance) {
+	if !inst.Status.IsConditionTrue(dbaasv1.ConditionRepaveInProgress) ||
+		inst.Status.GetCondition(dbaasv1.ConditionImageDrift) != nil {
+		return
+	}
+
+	if inst.Spec.WantRunning() {
+		if inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionReady, inst.Generation) {
+			inst.Status.RemoveCondition(dbaasv1.ConditionRepaveInProgress)
+		}
+		return
+	}
+
+	// A user-stopped instance can also be repaved.
+	if inst.Status.IsCurrentConditionTrue(dbaasv1.ConditionPowerStateReady, inst.Generation) {
+		inst.Status.RemoveCondition(dbaasv1.ConditionRepaveInProgress)
+	}
+}
+
 func conditionMessage(inst *dbaasv1.DBInstance, typ, fallback string) string {
 	if c := inst.Status.GetCondition(typ); c != nil && c.Message != "" {
 		return c.Message
@@ -109,6 +135,7 @@ func (r *DBInstanceReconciler) finalizeStatus(inst *dbaasv1.DBInstance) {
 	r.syncAcceptedCondition(inst)
 	r.syncReadyCondition(inst)
 	r.syncResizeInProgressCondition(inst)     // aggregate resize lifecycle into a single condition
+	r.syncRepaveInProgressCondition(inst)     // aggregate repave lifecycle into a single condition
 	r.syncInterventionRequiredCondition(inst) // aggregation of crash-loop halt and other intervention-required conditions
 	summary := dbaasv1.DerivePhaseSummary(inst)
 	inst.Status.Phase = summary.Phase
