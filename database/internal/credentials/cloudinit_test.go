@@ -100,6 +100,28 @@ func TestBuildCloudInitVMPasswordBlock(t *testing.T) {
 	}
 }
 
+// A baked image has every catalog-supported PostgreSQL major version's
+// binaries pre-installed side by side — bootstrap.sh must drop whatever
+// clusters were auto-created at package-install time and create exactly one,
+// for the tenant's requested EngineVersion, rather than installing anything
+// live over the network (the whole point of baking).
+func TestBuildCloudInitActivatesRequestedEngineVersion(t *testing.T) {
+	p := testBootstrapParams()
+	p.EngineVersion = "17"
+	userdata, _ := BuildCloudInit(p, testMaterial())
+
+	for _, want := range []string{
+		"ENGINE_VERSION=17",
+		`pg_dropcluster --stop "$ver" main`,
+		`pg_createcluster --start "${ENGINE_VERSION}" main`,
+		`PG_VER="${ENGINE_VERSION}"`,
+	} {
+		if !strings.Contains(userdata, want) {
+			t.Errorf("userdata missing %q", want)
+		}
+	}
+}
+
 func TestBuildCloudInitBackupConfig(t *testing.T) {
 	p := testBootstrapParams()
 	p.BackupEnabled = true

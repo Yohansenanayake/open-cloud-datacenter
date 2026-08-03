@@ -77,7 +77,7 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// (decision #9) — a safe update (ReasonOSUpdateAvailable) vs one blocked
 	// by an EOL'd engineVersion (ReasonEngineVersionEOL).
 	if inst.Status.AppliedSpec != nil && inst.Status.CurrentImageRevision != stream.Revision {
-		if engineVersionSupported(inst.Spec.EngineVersion, entry) {
+		if _, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry); ok {
 			inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionTrue,
 				dbaasv1.ReasonOSUpdateAvailable,
 				fmt.Sprintf("VM is on image revision %q; revision %q available — annotate with %s=now to repave",
@@ -115,7 +115,8 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// Re-check engineVersion compatibility independently of the drift
 	// condition's cached Reason above — defense-in-depth, validate again
 	// immediately before any destructive operation (§7 ordering safety).
-	if !engineVersionSupported(inst.Spec.EngineVersion, entry) {
+	engineVersion, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry)
+	if !ok {
 		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
 			return Transient(err)
 		}
@@ -183,7 +184,7 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	inst.Status.CurrentImageRevision = stream.Revision
 	inst.Status.RemoveCondition(dbaasv1.ConditionImageDrift) // drift resolved by the swap
 
-	if res, stop := r.regenerateCloudInit(ctx, inst); stop {
+	if res, stop := r.regenerateCloudInit(ctx, inst, engineVersion); stop {
 		return res
 	}
 
@@ -230,9 +231,11 @@ func (r *repaveStep) clearTriggerAnnotation(ctx context.Context, inst *dbaasv1.D
 // MasterUsername/Port/etc. are all immutable (AppliedSpec), so reusing the
 // same BuildCloudInit/resource.Apply sequence keeps a repave's cloud-init in
 // lockstep with creation rather than risking a second, divergent renderer.
-// Returns (Result, true) when Run should return that Result immediately —
-// mirrors trackRestarts's (Result, bool) idiom in health.go.
-func (r *repaveStep) regenerateCloudInit(ctx context.Context, inst *dbaasv1.DBInstance) (Result, bool) {
+// engineVersion is the caller's already-resolved effectiveEngineVersion —
+// bootstrap.sh activates exactly this version against the freshly swapped
+// image. Returns (Result, true) when Run should return that Result
+// immediately — mirrors trackRestarts's (Result, bool) idiom in health.go.
+func (r *repaveStep) regenerateCloudInit(ctx context.Context, inst *dbaasv1.DBInstance, engineVersion string) (Result, bool) {
 	classSpec, ok := r.instanceClasses()[inst.Spec.DBInstanceClass]
 	if !ok {
 		// ensurePreflight/ensureResize validate this first; defensive.
@@ -268,6 +271,7 @@ func (r *repaveStep) regenerateCloudInit(ctx context.Context, inst *dbaasv1.DBIn
 		S3Config:       inst.Spec.S3BackupConfig,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork,
+		EngineVersion:  engineVersion,
 	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)

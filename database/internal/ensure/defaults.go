@@ -34,14 +34,26 @@ func specPortWithDefault(port, configuredDefault int) int {
 	return port
 }
 
-// engineVersionSupported reports whether specEngineVersion is compatible with
-// entry. specEngineVersion is +optional and, pre-catalog, was never enforced
-// (recorded but didn't drive package selection) — an unset value is always
-// treated as supported so existing instances that never set it don't
-// suddenly get rejected by preflight or blocked from repaving. Shared by
-// preflight and repave so the two can't drift on this rule independently.
-func engineVersionSupported(specEngineVersion string, entry catalog.BakedImageEntry) bool {
-	return specEngineVersion == "" || slices.Contains(entry.SupportedEngineVersions, specEngineVersion)
+// effectiveEngineVersion resolves inst.Spec.EngineVersion to the concrete
+// version that will actually be used to create a PostgreSQL cluster at boot
+// (internal/credentials's bootstrap.sh needs a real, non-empty version — it
+// runs `pg_createcluster --start <version> main`). spec.engineVersion is
+// +optional and, pre-catalog, was never enforced; rather than hard-rejecting
+// every instance that never set it (matching the source project's stricter
+// M1 behavior would do exactly that), an unset value defaults to the image's
+// highest supported version — SupportedEngineVersions' last entry. ok is
+// false only when there's truly nothing to pick: an explicit version not in
+// entry's list, or (a catalog data bug) an entry with no supported versions
+// at all. Shared by preflight/vm/repave so they can't drift on this
+// resolution independently.
+func effectiveEngineVersion(specEngineVersion string, entry catalog.BakedImageEntry) (version string, ok bool) {
+	if specEngineVersion != "" {
+		return specEngineVersion, slices.Contains(entry.SupportedEngineVersions, specEngineVersion)
+	}
+	if len(entry.SupportedEngineVersions) == 0 {
+		return "", false
+	}
+	return entry.SupportedEngineVersions[len(entry.SupportedEngineVersions)-1], true
 }
 
 // resolveBakedImage looks up the current validated revision for

@@ -19,6 +19,7 @@ package ensure
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -103,6 +104,12 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 	if len(ci.Data["userdata"]) == 0 || len(ci.Data["networkdata"]) == 0 {
 		t.Fatalf("cloud-init secret has empty userdata/networkdata: %+v", ci.Data)
+	}
+	// inst.Spec.EngineVersion is unset — effectiveEngineVersion must default
+	// to defaultBakedImageName's highest supported version ("17") rather
+	// than leaving bootstrap.sh's ENGINE_VERSION empty.
+	if !strings.Contains(string(ci.Data["userdata"]), "ENGINE_VERSION=17") {
+		t.Fatalf("cloud-init userdata missing defaulted ENGINE_VERSION=17: %s", ci.Data["userdata"])
 	}
 	if refs := ci.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 		t.Fatalf("cloud-init secret owner refs = %+v, want controller-owned", refs)

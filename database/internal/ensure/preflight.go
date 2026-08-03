@@ -82,7 +82,7 @@ func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resul
 		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, msg)
 		return Terminal(dbaasv1.ReasonOSImageInvalid, msg)
 	}
-	if !engineVersionSupported(inst.Spec.EngineVersion, entry) {
+	if _, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry); !ok {
 		msg := fmt.Sprintf("engineVersion %q is not available in image revision %q (supported: %v)",
 			inst.Spec.EngineVersion, stream.Revision, entry.SupportedEngineVersions)
 		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, msg)

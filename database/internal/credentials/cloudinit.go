@@ -43,6 +43,12 @@ type BootstrapParams struct {
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
 	// server.
 	StaticNetwork *dbaasv1.NetworkConfig
+	// EngineVersion is the concrete PostgreSQL major version
+	// (internal/ensure's effectiveEngineVersion — never empty) bootstrap.sh
+	// activates: a baked image has every catalog-supported version's
+	// binaries pre-installed side by side, and bootstrap.sh drops every
+	// pre-baked cluster and creates exactly one, for this version, at boot.
+	EngineVersion string
 }
 
 // BuildCloudInit renders the cloud-init userdata and networkdata that
@@ -176,6 +182,7 @@ ssh_pwauth: true
       REPL_PASSWORD=%s
       EXPORTER_PASSWORD=%s
       MAX_CONNECTIONS=%d
+      ENGINE_VERSION=%s
       %s
   - path: /etc/ssl/certs/pg-ca.crt
     encoding: b64
@@ -196,15 +203,20 @@ ssh_pwauth: true
       set -euo pipefail
       source /etc/dbaas/bootstrap.env
 
-      # 1. Install PostgreSQL + helpers. Done here, not via cloud-init's
-      #    "packages:" directive, so it works on minimal cloud images
-      #    that don't load the package module.
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y postgresql postgresql-contrib jq qemu-guest-agent prometheus-postgres-exporter
+      # 1. Activate the requested PostgreSQL version. Every catalog-supported
+      #    version's binaries are pre-installed in the baked image
+      #    (database/images/packer/scripts/provision.sh) — drop whatever
+      #    clusters were auto-created at package-install time and create
+      #    only the one this tenant actually asked for, so boot has no
+      #    dependency on reaching apt repos over the network (the whole
+      #    point of baking) and each instance gets a guaranteed-fresh
+      #    cluster regardless of image history.
       systemctl enable --now qemu-guest-agent
-
-      PG_VER=$(pg_lsclusters -h | awk '{print $1}' | head -1)
+      for ver in $(pg_lsclusters -h | awk '{print $1}' | sort -u); do
+        pg_dropcluster --stop "$ver" main 2>/dev/null || true
+      done
+      pg_createcluster --start "${ENGINE_VERSION}" main
+      PG_VER="${ENGINE_VERSION}"
       PG_CONF="/etc/postgresql/${PG_VER}/main"
 
       # Move PostgreSQL data onto the dedicated pgdata disk before applying
@@ -313,6 +325,7 @@ final_message: "DBaaS bootstrap complete for %s"
 		m.ReplPassword,
 		m.ExporterPassword,
 		p.MaxConnections,
+		p.EngineVersion,
 		backupConfig,
 		caCertB64,
 		serverCertB64,

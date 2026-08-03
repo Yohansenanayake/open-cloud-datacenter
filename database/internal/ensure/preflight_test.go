@@ -86,6 +86,25 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	}
 }
 
+// An explicit, unsupported engineVersion is still rejected Terminal — only
+// an *unset* engineVersion gets the lenient default-to-highest treatment.
+func TestEnsurePreflightUnsupportedEngineVersionIsTerminal(t *testing.T) {
+	stub := &stubHarvester{}
+	r := &testHarness{Dependencies: Dependencies{Harvester: stub}}
+	inst := newProvisionInst()
+	inst.Spec.EngineVersion = "15" // not in defaultBakedImageName's ["16","17"]
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonOSImageInvalid) {
+		t.Fatalf("PreflightReady = %+v, want False/OSImageInvalid", cond)
+	}
+}
+
 func TestEnsurePreflightUsesConfiguredClassAndOSVersionDefault(t *testing.T) {
 	const customOSVersion = "test-custom-version"
 	const customImageName = "test-custom-image"

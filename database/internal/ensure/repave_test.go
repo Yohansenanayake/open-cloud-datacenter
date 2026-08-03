@@ -19,8 +19,10 @@ package ensure
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kubevirtv1 "kubevirt.io/api/core/v1"
@@ -319,9 +321,19 @@ func TestEnsureRepaveTriggerAppliesSwapWhenDown(t *testing.T) {
 	if inst.Status.IsConditionTrue(dbaasv1.ConditionDatabaseReady) {
 		t.Fatal("DatabaseReady must go False once repave is applied — power hasn't restarted the VM yet")
 	}
-	// The cloud-init Secret is rebuilt as part of applying the repave.
+	// The cloud-init Secret is rebuilt as part of applying the repave —
+	// inst.Spec.EngineVersion is unset, so its content must reflect
+	// effectiveEngineVersion's default (defaultBakedImageName's highest
+	// supported version, "17"), not an empty ENGINE_VERSION.
 	if inst.Status.Resources.CloudInitSecretName == "" {
 		t.Fatal("CloudInitSecretName should be (re)recorded after regenerating cloud-init")
+	}
+	var ci corev1.Secret
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "tenant-a", Name: inst.Status.Resources.CloudInitSecretName}, &ci); err != nil {
+		t.Fatalf("cloud-init secret missing: %v", err)
+	}
+	if !strings.Contains(string(ci.Data["userdata"]), "ENGINE_VERSION=17") {
+		t.Fatalf("cloud-init userdata missing defaulted ENGINE_VERSION=17: %s", ci.Data["userdata"])
 	}
 }
 
