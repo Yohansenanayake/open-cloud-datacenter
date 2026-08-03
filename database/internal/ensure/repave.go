@@ -97,7 +97,16 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 		return Satisfied()
 	}
 
-	if inst.Status.Phase != dbaasv1.StatusAvailable {
+	// An in-flight repave (RepaveInProgress=True) already halted the VM and
+	// therefore already moved Phase off Available by the time this step runs
+	// again — only gate the true entry point, not a phase change this step
+	// caused itself. Without this, a repave that gets as far as stopping the
+	// VM can never finish: the next pass sees its own RepaveInProgress=True
+	// having flipped Phase to Modifying, Terminal-aborts on that self-caused
+	// change, clears the trigger, and leaves the VM halted on the old image
+	// with no automatic retry .
+	if inst.Status.Phase != dbaasv1.StatusAvailable &&
+		!inst.Status.IsConditionTrue(dbaasv1.ConditionRepaveInProgress) {
 		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
 			return Transient(err)
 		}

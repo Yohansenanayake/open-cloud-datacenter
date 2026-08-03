@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -402,5 +403,58 @@ func TestEnsureRepaveRecoversPendingDeleteBeforeAnythingElse(t *testing.T) {
 	}
 	if inst.Status.Resources.PendingDeleteOSDiskPVCName != "" {
 		t.Fatal("PendingDeleteOSDiskPVCName should be cleared once the recovery delete succeeds")
+	}
+}
+
+// Stopping the VM sets RepaveInProgress=True, which flips Phase away from
+// Available on the next status derivation — the Phase gate must not mistake
+// that self-caused change for the instance having become unavailable and
+// abort the repave it's in the middle of applying.
+func TestEnsureRepaveContinuesAfterOwnPhaseChange(t *testing.T) {
+	ctx := context.Background()
+	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	convergeCredentials(t, ctx, r, inst) // regenerateCloudInit (pass 2) needs stable Material
+	triggerRepave(inst)
+
+	// Pass 1: VM running -> stop it.
+	res := r.ensureRepave(ctx, inst)
+	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonRepaveStopping {
+		t.Fatalf("pass 1 = %+v, want Pending/RepaveStopping", res)
+	}
+	if stub.StopVMCalls != 1 {
+		t.Fatalf("StopVMCalls = %d, want 1", stub.StopVMCalls)
+	}
+
+	// Simulate finalizeStatus deriving Phase from the conditions pass 1 just
+	// set — this is the exact mechanism that flips Phase to Modifying.
+	inst.Status.Phase = dbaasv1.DerivePhaseSummary(inst).Phase
+	if inst.Status.Phase != dbaasv1.StatusModifying {
+		t.Fatalf("test setup: Phase = %q, want %q after RepaveInProgress=True", inst.Status.Phase, dbaasv1.StatusModifying)
+	}
+
+	// Simulate Harvester having actually stopped the VM and torn down its
+	// VMI by now.
+	var vm kubevirtv1.VirtualMachine
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders"}, &vm); err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	halted := kubevirtv1.RunStrategyHalted
+	vm.Spec.RunStrategy = &halted
+	if err := r.Update(ctx, &vm); err != nil {
+		t.Fatalf("update VM: %v", err)
+	}
+	stub.Readiness = harvester.VMIReadiness{}
+
+	// Pass 2: trigger annotation is still set, Phase is now Modifying
+	// (self-caused) — must proceed to the swap, not Terminal-abort.
+	res = r.ensureRepave(ctx, inst)
+	if res.Outcome != OutcomePending || res.Reason != dbaasv1.ReasonRepaveApplied {
+		t.Fatalf("pass 2 = %+v, want Pending/RepaveApplied — repave must continue past its own Phase gate", res)
+	}
+	if stub.SwapVMOSDiskCalls != 1 {
+		t.Fatalf("SwapVMOSDiskCalls = %d, want 1", stub.SwapVMOSDiskCalls)
+	}
+	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; ok {
+		t.Fatal("trigger annotation should be cleared once applied")
 	}
 }
