@@ -83,6 +83,45 @@ func TestResolveVMImage(t *testing.T) {
 	}
 }
 
+// A bare ref (no "ns/name" prefix) resolves against DefaultImageNamespace
+// when set, not the hardcoded "default" — lets an operator point
+// internal/catalog's namespace-less image names at a dedicated namespace
+// via config (infrastructure.harvester.imageNamespace) instead of baking a
+// namespace prefix into every catalog entry.
+func TestResolveVMImageUsesConfiguredDefaultNamespace(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	image.Namespace = "harvester-public"
+	client := newTestTypedClient(image)
+	client.DefaultImageNamespace = "harvester-public"
+
+	resolved, err := client.ResolveVMImage(ctx, image.Spec.DisplayName)
+	if err != nil {
+		t.Fatalf("ResolveVMImage returned error: %v", err)
+	}
+	if resolved.Namespace != "harvester-public" || resolved.Name != image.Name {
+		t.Fatalf("resolved image = %+v, want namespace=harvester-public", resolved)
+	}
+}
+
+// An explicit "ns/name" prefix in the ref still overrides
+// DefaultImageNamespace — per-entry opt-out stays available even when a
+// non-default namespace is configured globally.
+func TestResolveVMImageExplicitNamespacePrefixOverridesConfiguredDefault(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage() // lives in "default"
+	client := newTestTypedClient(image)
+	client.DefaultImageNamespace = "harvester-public"
+
+	resolved, err := client.ResolveVMImage(ctx, "default/"+image.Name)
+	if err != nil {
+		t.Fatalf("ResolveVMImage returned error: %v", err)
+	}
+	if resolved.Namespace != "default" || resolved.Name != image.Name {
+		t.Fatalf("resolved image = %+v, want namespace=default (explicit prefix)", resolved)
+	}
+}
+
 func TestResolveVMImageClassifiesSemanticFailures(t *testing.T) {
 	ctx := context.Background()
 	notReady := testTypedVMImage()

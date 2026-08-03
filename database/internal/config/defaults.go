@@ -43,13 +43,16 @@ func Default() Config {
 			Webhook: TLSConfig{TLS: defaultTLSFiles()},
 		},
 		Infrastructure: InfrastructureConfig{
-			Harvester: HarvesterConfig{ManagementLogicalSwitch: "ovn-default"},
+			Harvester: HarvesterConfig{
+				ManagementLogicalSwitch: "ovn-default",
+				ImageNamespace:          "default",
+			},
 		},
 		DatabaseDefaults: DatabaseDefaults{
 			StorageClass:   "longhorn",
 			MasterUsername: "dbadmin",
 			Port:           5432,
-			OSVersion:      "24.04",
+			OSVersion:      "22.04",
 		},
 		Observability: ObservabilityConfig{
 			Grafana: GrafanaConfig{BaseURL: "https://grafana.monitoring.svc"},

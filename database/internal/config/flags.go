@@ -46,6 +46,9 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 	set.String("infrastructure.harvester.managementLogicalSwitch",
 		defaults.Infrastructure.Harvester.ManagementLogicalSwitch,
 		"Kube-OVN logical switch used for VM launcher management networking.")
+	set.String("infrastructure.harvester.imageNamespace",
+		defaults.Infrastructure.Harvester.ImageNamespace,
+		"Harvester namespace baked-image names resolve against when they carry no explicit ns/name prefix.")
 
 	set.String("databaseDefaults.storageClass", defaults.DatabaseDefaults.StorageClass,
 		"Default storage class for DBInstances.")

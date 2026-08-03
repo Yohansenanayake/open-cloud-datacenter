@@ -57,6 +57,11 @@ type TypedClient struct {
 	KvClientset       kvclientset.Interface
 	GrafanaURL        string
 	MgmtLogicalSwitch string
+	// DefaultImageNamespace is the Harvester namespace ResolveVMImage looks
+	// in when its ref carries no explicit "ns/name" prefix. Empty means
+	// "default" (the zero value keeps existing behavior for callers that
+	// construct a TypedClient directly, e.g. in tests, without setting it).
+	DefaultImageNamespace string
 }
 
 var _ ClientInterface = (*TypedClient)(nil)
@@ -342,7 +347,11 @@ func (c *TypedClient) ResolveVMImage(ctx context.Context, ref string) (ResolvedV
 		return ResolvedVMImage{}, fmt.Errorf("%w: reference is empty", ErrVMImageReferenceInvalid)
 	}
 
-	ns, spec := "default", ref
+	ns := c.DefaultImageNamespace
+	if ns == "" {
+		ns = "default"
+	}
+	spec := ref
 	if i := strings.Index(ref, "/"); i > 0 {
 		ns, spec = ref[:i], ref[i+1:]
 	}
