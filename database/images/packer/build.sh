@@ -44,16 +44,12 @@ fi
 # Validate OS version and read ISO details from images.yaml
 OS_EOL=$(yq ".os_streams.\"${OS_VERSION}\".eol" "$IMAGES_YAML")
 if [[ "$OS_EOL" == "null" || -z "$OS_EOL" ]]; then
-ISO_URL=$(yq ".os_streams.\"${OS_VERSION}\".iso_url" "$IMAGES_YAML")
-ISO_CHECKSUM=$(yq ".os_streams.\"${OS_VERSION}\".checksum_url" "$IMAGES_YAML")
-if [[ "$ISO_URL" == "null" || -z "$ISO_URL" ]]; then
-  echo "ERROR: OS '${OS_VERSION}' has no iso_url in images.yaml"
+  echo "ERROR: OS '${OS_VERSION}' not found in images.yaml — add it before building"
   exit 1
 fi
-if [[ "$ISO_CHECKSUM" == "null" || -z "$ISO_CHECKSUM" ]]; then
-  echo "ERROR: OS '${OS_VERSION}' has no checksum_url in images.yaml — refusing to build without base-image integrity verification"
-  exit 1
-fi
+TODAY=$(date +%Y-%m-%d)
+if [[ "$TODAY" > "$OS_EOL" ]]; then
+  echo "ERROR: Ubuntu ${OS_VERSION} reached EOL on ${OS_EOL} — do not build new images for this stream"
   exit 1
 fi
 echo "==> OS: Ubuntu ${OS_VERSION} (EOL: ${OS_EOL}) — OK"
