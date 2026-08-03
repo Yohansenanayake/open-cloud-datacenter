@@ -212,10 +212,18 @@ ssh_pwauth: true
       #    point of baking) and each instance gets a guaranteed-fresh
       #    cluster regardless of image history.
       systemctl enable --now qemu-guest-agent
-      for ver in $(pg_lsclusters -h | awk '{print $1}' | sort -u); do
-        pg_dropcluster --stop "$ver" main 2>/dev/null || true
-      done
-      pg_createcluster --start "${ENGINE_VERSION}" main
+      # Never drop clusters once /var/lib/postgresql is the mounted,
+      # persistent pgdata disk — that would delete live tenant data. Only
+      # reset the throwaway clusters apt created on a fresh OS disk: true
+      # on a genuine first boot, and right after a repave's disk swap
+      # (which resets fstab), since in both cases this path is still the
+      # OS disk itself at this point in the script.
+      if ! findmnt -n /var/lib/postgresql >/dev/null 2>&1; then
+        for ver in $(pg_lsclusters -h | awk '{print $1}' | sort -u); do
+          pg_dropcluster --stop "$ver" main 2>/dev/null || true
+        done
+        pg_createcluster --start "${ENGINE_VERSION}" main
+      fi
       PG_VER="${ENGINE_VERSION}"
       PG_CONF="/etc/postgresql/${PG_VER}/main"
 

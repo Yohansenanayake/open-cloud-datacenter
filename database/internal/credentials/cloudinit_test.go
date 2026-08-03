@@ -122,6 +122,25 @@ func TestBuildCloudInitActivatesRequestedEngineVersion(t *testing.T) {
 	}
 }
 
+// Regression guard: the cluster-reset block must never run
+// once /var/lib/postgresql is already the mounted, persistent pgdata disk —
+// dropping "main" there would delete live tenant data. Only reset the
+// throwaway clusters apt created on a still-OS-disk-backed path.
+func TestBuildCloudInitGuardsClusterResetAgainstMountedPgdata(t *testing.T) {
+	userdata, _ := BuildCloudInit(testBootstrapParams(), testMaterial())
+
+	if !strings.Contains(userdata, "if ! findmnt -n /var/lib/postgresql") {
+		t.Error("userdata missing the findmnt guard before the cluster-reset block")
+	}
+	// The guard must wrap the destructive drop/create pair, not just precede
+	// it — assert drop appears strictly after the guard opens.
+	guardIdx := strings.Index(userdata, "if ! findmnt -n /var/lib/postgresql")
+	dropIdx := strings.Index(userdata, "pg_dropcluster")
+	if guardIdx == -1 || dropIdx == -1 || dropIdx < guardIdx {
+		t.Fatalf("pg_dropcluster must appear after the findmnt guard, got guardIdx=%d dropIdx=%d", guardIdx, dropIdx)
+	}
+}
+
 func TestBuildCloudInitBackupConfig(t *testing.T) {
 	p := testBootstrapParams()
 	p.BackupEnabled = true
