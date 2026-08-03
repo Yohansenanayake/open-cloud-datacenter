@@ -1,6 +1,6 @@
 # build.sh reads this — add new versions here only, nothing else needs changing.
 # Update this images.yaml file and then run ./build.sh <build_date> [pg_versions] [os_version] command to build images.
-# eg: ./build.sh 20260615 "14 15" "20.04"
+# eg: ./build.sh 20260615 "16 17" "24.04"
 
 os_streams:
   "22.04":

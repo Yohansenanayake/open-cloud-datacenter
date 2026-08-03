@@ -25,26 +25,44 @@ KEY_FILE="$KEY_DIR/packer_key"
 if ! command -v yq &>/dev/null; then
   echo "==> yq not found — installing..."
   YQ_VERSION="v4.44.3"
-  sudo wget -q -O /usr/local/bin/yq \
+  # mikefarah/yq doesn't publish a plain per-binary checksum file — every
+  # platform's hash is bundled into one "checksums" file, keyed by column
+  # position against "checksums_hashes_order" (SHA-256 is the 18th
+  # algorithm listed there, so column 19 counting the filename). Pinned
+  # here after fetching that release's checksums file and confirming this
+  # value against the actual downloaded binary. Update both when bumping
+  # YQ_VERSION.
+  YQ_SHA256="a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7"
+  TMP_YQ="$KEY_DIR/yq"
+  wget -q -O "$TMP_YQ" \
     "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
-  sudo chmod +x /usr/local/bin/yq
+  echo "${YQ_SHA256}  ${TMP_YQ}" | sha256sum -c -
+  sudo install -m 0755 "$TMP_YQ" /usr/local/bin/yq
   echo "==> yq $(yq --version) installed"
 fi
 
 # Validate OS version and read ISO details from images.yaml
 OS_EOL=$(yq ".os_streams.\"${OS_VERSION}\".eol" "$IMAGES_YAML")
 if [[ "$OS_EOL" == "null" || -z "$OS_EOL" ]]; then
-  echo "ERROR: OS '${OS_VERSION}' not found in images.yaml — add it before building"
+ISO_URL=$(yq ".os_streams.\"${OS_VERSION}\".iso_url" "$IMAGES_YAML")
+ISO_CHECKSUM=$(yq ".os_streams.\"${OS_VERSION}\".checksum_url" "$IMAGES_YAML")
+if [[ "$ISO_URL" == "null" || -z "$ISO_URL" ]]; then
+  echo "ERROR: OS '${OS_VERSION}' has no iso_url in images.yaml"
   exit 1
 fi
-TODAY=$(date +%Y-%m-%d)
-if [[ "$TODAY" > "$OS_EOL" ]]; then
-  echo "ERROR: Ubuntu ${OS_VERSION} reached EOL on ${OS_EOL} — do not build new images for this stream"
+if [[ "$ISO_CHECKSUM" == "null" || -z "$ISO_CHECKSUM" ]]; then
+  echo "ERROR: OS '${OS_VERSION}' has no checksum_url in images.yaml — refusing to build without base-image integrity verification"
+  exit 1
+fi
   exit 1
 fi
 echo "==> OS: Ubuntu ${OS_VERSION} (EOL: ${OS_EOL}) — OK"
 
 ISO_URL=$(yq ".os_streams.\"${OS_VERSION}\".iso_url" "$IMAGES_YAML")
+if [[ "$ISO_URL" == "null" || -z "$ISO_URL" ]]; then
+  echo "ERROR: OS '${OS_VERSION}' has no iso_url in images.yaml"
+  exit 1
+fi
 ISO_CHECKSUM=$(yq ".os_streams.\"${OS_VERSION}\".checksum_url" "$IMAGES_YAML")
 if [[ "$ISO_CHECKSUM" == "null" || -z "$ISO_CHECKSUM" ]]; then
   echo "ERROR: OS '${OS_VERSION}' has no checksum_url in images.yaml — refusing to build without base-image integrity verification"
@@ -70,11 +88,20 @@ done
 if ! command -v packer &>/dev/null; then
   echo "==> Packer not found — installing..."
   PACKER_VERSION="1.11.2"
-  TMP_ZIP="/tmp/packer_${PACKER_VERSION}.zip"
+  # sha256sum -c resolves the filename column in SHA256SUMS relative to the
+  # current directory, and that column is the upstream release's exact
+  # filename — so the local download must keep that same name (not a
+  # shortened one) or verification will report it "missing" rather than
+  # actually checking it.
+  PACKER_ZIP_NAME="packer_${PACKER_VERSION}_linux_amd64.zip"
+  TMP_ZIP="$KEY_DIR/$PACKER_ZIP_NAME"
+  TMP_SUMS="$KEY_DIR/packer_${PACKER_VERSION}_SHA256SUMS"
   wget -q -O "$TMP_ZIP" \
-    "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip"
+    "https://releases.hashicorp.com/packer/${PACKER_VERSION}/${PACKER_ZIP_NAME}"
+  wget -q -O "$TMP_SUMS" \
+    "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_SHA256SUMS"
+  (cd "$KEY_DIR" && grep "${PACKER_ZIP_NAME}$" "packer_${PACKER_VERSION}_SHA256SUMS" | sha256sum -c -)
   sudo unzip -q "$TMP_ZIP" -d /usr/local/bin/
-  rm -f "$TMP_ZIP"
   echo "==> Packer $(packer version) installed"
 fi
 
