@@ -187,6 +187,13 @@ func TestEnsureRepaveTriggerNotAvailableIsTerminal(t *testing.T) {
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not touch the VM when the instance isn't Available")
 	}
+	// Regression guard: Result.Reason/Message are otherwise dropped entirely
+	// (reconcileInstance only reads ControllerResult/Err) — without a
+	// condition, a blocked repave leaves no observable trace at all.
+	cond := inst.Status.GetCondition(dbaasv1.ConditionRepaveInProgress)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonRepaveNotAvailable) {
+		t.Fatalf("RepaveInProgress = %+v, want False/RepaveNotAvailable", cond)
+	}
 }
 
 // Regression guard for M1's Bug-2-class ordering: engineVersion must be
@@ -206,6 +213,10 @@ func TestEnsureRepaveTriggerEngineVersionEOLBlockedIsTerminal(t *testing.T) {
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not stop the VM for a repave that's blocked before any destructive step")
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionRepaveInProgress)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonRepaveBlockedEOL) {
+		t.Fatalf("RepaveInProgress = %+v, want False/RepaveBlockedEOL", cond)
 	}
 }
 

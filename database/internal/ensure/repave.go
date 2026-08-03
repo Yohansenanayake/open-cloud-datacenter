@@ -107,22 +107,30 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// with no automatic retry .
 	if inst.Status.Phase != dbaasv1.StatusAvailable &&
 		!inst.Status.IsConditionTrue(dbaasv1.ConditionRepaveInProgress) {
+		msg := "repave requires the instance to be Available"
 		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
 			return Transient(err)
 		}
-		return Terminal(dbaasv1.ReasonRepaveNotAvailable, "repave requires the instance to be Available")
+		// Every other Terminal branch in this package sets a condition
+		// before returning — Result.Reason/Message are otherwise dropped
+		// entirely (reconcileInstance only reads ControllerResult/Err), so
+		// without this a blocked repave leaves no observable trace beyond
+		// the trigger annotation silently disappearing.
+		inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionFalse, dbaasv1.ReasonRepaveNotAvailable, msg)
+		return Terminal(dbaasv1.ReasonRepaveNotAvailable, msg)
 	}
 	// Re-check engineVersion compatibility independently of the drift
 	// condition's cached Reason above — defense-in-depth, validate again
 	// immediately before any destructive operation (§7 ordering safety).
 	engineVersion, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry)
 	if !ok {
+		msg := fmt.Sprintf("engineVersion %q is not available in revision %q; migrate data before repaving",
+			inst.Spec.EngineVersion, stream.Revision)
 		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
 			return Transient(err)
 		}
-		return Terminal(dbaasv1.ReasonRepaveBlockedEOL,
-			fmt.Sprintf("engineVersion %q is not available in revision %q; migrate data before repaving",
-				inst.Spec.EngineVersion, stream.Revision))
+		inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionFalse, dbaasv1.ReasonRepaveBlockedEOL, msg)
+		return Terminal(dbaasv1.ReasonRepaveBlockedEOL, msg)
 	}
 	if inst.Status.CurrentImageRevision == stream.Revision {
 		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
