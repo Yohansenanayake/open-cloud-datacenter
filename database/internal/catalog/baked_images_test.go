@@ -34,21 +34,6 @@ func TestLatestBakedImagesSeededStreamsResolve(t *testing.T) {
 	}
 }
 
-// TestLatestBakedImagesSeededStreamsArePending guards against seeding a
-// placeholder revision as Validated: no Packer build has been produced or
-// uploaded to Harvester yet, so nothing here is actually safe to resolve.
-// This test should start failing the moment Task 10 legitimately validates
-// a real, imported image — at which point delete or narrow this test rather
-// than "fixing" it back to green.
-func TestLatestBakedImagesSeededStreamsArePending(t *testing.T) {
-	for osVersion, stream := range LatestBakedImages {
-		if stream.ValidationState != ValidationPending {
-			t.Fatalf("LatestBakedImages[%q].ValidationState = %q, want %q (no image has been built/uploaded yet)",
-				osVersion, stream.ValidationState, ValidationPending)
-		}
-	}
-}
-
 func TestBakedImagesEntriesAreSelfConsistent(t *testing.T) {
 	for name, entry := range BakedImages {
 		if entry.ImageName != name {

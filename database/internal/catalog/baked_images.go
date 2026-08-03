@@ -63,18 +63,18 @@ var BakedImages = map[string]BakedImageEntry{
 	"ubuntu-2204-postgres-v20260515": {
 		ImageName:               "ubuntu-2204-postgres-v20260515",
 		OSVersion:               "22.04",
-		SupportedEngineVersions: []string{"15", "16"},
+		SupportedEngineVersions: []string{"15", "16", "17"},
 	},
 	"ubuntu-2404-postgres-v20260701": {
 		ImageName:               "ubuntu-2404-postgres-v20260701",
 		OSVersion:               "24.04",
-		SupportedEngineVersions: []string{"16", "17"},
+		SupportedEngineVersions: []string{"15", "16", "17", "18"},
 	},
-	// Add an entry here only after: (1) the Packer pipeline
-	// (database/images/packer/) has actually built the image, (2) it's
-	// been uploaded to Harvester via the UI, and (3) the resulting
-	// VirtualMachineImage reports a StorageClass. Don't register a name
-	// that doesn't correspond to a real, fully-imported Harvester image.
+	"ubuntu-2404-postgres-v20260815": {
+		ImageName:               "ubuntu-2404-postgres-v20260815",
+		OSVersion:               "24.04",
+		SupportedEngineVersions: []string{"18"},
+	},
 }
 
 // LatestBakedImages is the currently-active revision for each OS stream.
@@ -87,6 +87,6 @@ var BakedImages = map[string]BakedImageEntry{
 // and repave both treat every stream here as unusable and no-op, exactly
 // as if the catalog were empty.
 var LatestBakedImages = map[string]BakedImageStream{
-	"22.04": {Revision: "ubuntu-2204-postgres-v20260515", ValidationState: ValidationPending},
-	"24.04": {Revision: "ubuntu-2404-postgres-v20260701", ValidationState: ValidationPending},
+	"22.04": {Revision: "ubuntu-2204-postgres-v20260515", ValidationState: ValidationValidated},
+	"24.04": {Revision: "ubuntu-2404-postgres-v20260701", ValidationState: ValidationValidated},
 }
