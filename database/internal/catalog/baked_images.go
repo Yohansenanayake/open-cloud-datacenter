@@ -90,3 +90,14 @@ var LatestBakedImages = map[string]BakedImageStream{
 	"22.04": {Revision: "ubuntu-2204-postgres-v20260515", ValidationState: ValidationValidated},
 	"24.04": {Revision: "ubuntu-2404-postgres-v20260701", ValidationState: ValidationValidated},
 }
+
+// RevisionForImageName reverse-looks-up the BakedImages revision key whose
+// ImageName matches an observed Harvester VirtualMachineImage name.
+func RevisionForImageName(imageName string) (revision string, ok bool) {
+	for rev, entry := range BakedImages {
+		if entry.ImageName == imageName {
+			return rev, true
+		}
+	}
+	return "", false
+}

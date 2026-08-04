@@ -118,6 +118,51 @@ func TestEnsureRepaveOnLatestRevisionNoDrift(t *testing.T) {
 	}
 }
 
+// TestEnsureRepaveSelfHealsCurrentImageRevisionFromVMReality covers the gap
+// found in a real deployment: a repave's swap succeeds for real (Harvester
+// stamps the new OS-disk PVC with its ImageID), but the status patch that
+// would have recorded CurrentImageRevision to match is lost to a conflict —
+// and nothing else would ever retry that specific write, since every other
+// writer is gated behind the one-shot repave-trigger annotation. The next
+// pass must notice the mismatch against the VM's actual OS-disk PVC and
+// correct it on its own, with no provider mutation and no trigger needed.
+func TestEnsureRepaveSelfHealsCurrentImageRevisionFromVMReality(t *testing.T) {
+	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	// inst.Status.CurrentImageRevision is "old-revision" from the fixture —
+	// stale relative to what the VM's OS-disk PVC actually says.
+	stub.OSDiskImageID = "default/" + defaultBakedImageName
+
+	res := r.ensureRepave(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied", res)
+	}
+	if inst.Status.CurrentImageRevision != defaultBakedImageName {
+		t.Fatalf("CurrentImageRevision = %q, want self-healed to %q", inst.Status.CurrentImageRevision, defaultBakedImageName)
+	}
+	if inst.Status.GetCondition(dbaasv1.ConditionImageDrift) != nil {
+		t.Fatal("ImageDrift should be absent once CurrentImageRevision self-heals to match the latest revision")
+	}
+	if !noProviderCalls(stub) {
+		t.Fatal("self-heal must not perform any VM/disk operation — it only corrects a status field")
+	}
+}
+
+// TestEnsureRepaveSelfHealIgnoresUnresolvableImageID guards against a false
+// correction: an ImageID that doesn't map to any registered catalog entry
+// (or is empty, e.g. VM not created yet) must leave CurrentImageRevision
+// untouched rather than zeroing/misreporting it.
+func TestEnsureRepaveSelfHealIgnoresUnresolvableImageID(t *testing.T) {
+	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	stub.OSDiskImageID = "default/some-image-not-in-the-catalog"
+
+	_ = r.ensureRepave(context.Background(), inst)
+
+	if inst.Status.CurrentImageRevision != "old-revision" {
+		t.Fatalf("CurrentImageRevision = %q, want unchanged when the observed ImageID is unresolvable", inst.Status.CurrentImageRevision)
+	}
+}
+
 func TestEnsureRepaveDriftEngineVersionSupportedReportsOSUpdateAvailable(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	inst.Spec.EngineVersion = "16" // in defaultBakedImageName's SupportedEngineVersions

@@ -60,6 +60,13 @@ type ClientInterface interface {
 
 	// DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
 	DeletePVC(ctx context.Context, ns, name string) error
+
+	// GetVMOSDiskImageID returns the Harvester ImageID ("namespace/name")
+	// recorded on the VM's current OS-disk PVC — ground truth for which
+	// baked image is actually running, used to self-heal
+	// DBInstance.Status.CurrentImageRevision independent of whether a prior
+	// status write persisted. Returns ("", nil) if not yet determinable.
+	GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error)
 }
 
 // ResolvedVMImage contains the provider-neutral image fields needed to build a

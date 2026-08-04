@@ -41,6 +41,7 @@ type StubHarvester struct {
 	TeardownErr           error
 	SwapVMOSDiskErr       error
 	DeletePVCErr          error
+	OSDiskImageIDErr      error
 
 	StopVMCalls             int
 	StopVMForCrashLoopCalls int
@@ -69,6 +70,12 @@ type StubHarvester struct {
 	// LastVMCreateParams captures the most recent CreatePostgresVM input so
 	// tests can assert what the controller asked for (e.g. the owner ref).
 	LastVMCreateParams *harvester.VMCreateParams
+
+	// OSDiskImageID is returned verbatim by GetVMOSDiskImageID — set it to
+	// the "namespace/name" a test wants repave's self-heal check to observe
+	// on the VM's current OS-disk PVC. Empty (the zero value) mirrors "VM
+	// not created yet / nothing to reconcile against".
+	OSDiskImageID string
 }
 
 func (s *StubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
@@ -135,4 +142,7 @@ func (s *StubHarvester) DeletePVC(_ context.Context, _, name string) error {
 	s.DeletePVCCalls++
 	s.LastDeletedPVCName = name
 	return s.DeletePVCErr
+}
+func (s *StubHarvester) GetVMOSDiskImageID(_ context.Context, _, _ string) (string, error) {
+	return s.OSDiskImageID, s.OSDiskImageIDErr
 }

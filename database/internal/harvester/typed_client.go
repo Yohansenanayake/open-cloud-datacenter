@@ -599,6 +599,44 @@ func ignoreNotFound(err error) error {
 // PVC template to (see buildPostgresVM's PVCDisk("os-disk", ...) call).
 const osDiskVolumeName = "os-disk"
 
+// GetVMOSDiskImageID returns the harvesterhci.io/imageId annotation
+// ("namespace/name") Harvester stamps on the VM's current OS-disk PVC —
+// ground truth for the running image, independent of any DBInstance status
+// field. Returns ("", nil), not an error, if it can't be determined yet
+// (e.g. VM not created).
+func (c *TypedClient) GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error) {
+	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	volIdx := -1
+	for i := range vm.Spec.Template.Spec.Volumes {
+		if vm.Spec.Template.Spec.Volumes[i].Name == osDiskVolumeName {
+			volIdx = i
+			break
+		}
+	}
+	if volIdx == -1 || vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim == nil {
+		return "", nil
+	}
+	currentPVCName := vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName
+
+	pvcs, err := VolumeClaimTemplates(vm)
+	if err != nil {
+		return "", err
+	}
+	for _, pvc := range pvcs {
+		if pvc.Name == currentPVCName {
+			return pvc.Annotations[harvesterbuilder.AnnotationKeyImageID], nil
+		}
+	}
+	return "", nil
+}
+
 // SwapVMOSDisk repoints the "os-disk" volumeClaimTemplates entry to a new
 // revision-suffixed PVC backed by newImageRef's StorageClass, and repoints
 // the "os-disk" volume's claimName to match. Mirrors ResizeDataVolume's

@@ -19,6 +19,7 @@ package ensure
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
@@ -49,6 +51,20 @@ func (*repaveStep) Name() string { return "repave" }
 // entirely: no drift is reported and a trigger annotation is left untouched
 // for the next pass to reconsider once the catalog is validated.
 func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
+	// Self-heal CurrentImageRevision from the VM's actual OS-disk PVC: a
+	// status write here can be lost to a conflicted patch with nothing else
+	// to ever retry it (every other writer is gated behind the one-shot
+	// repave-trigger annotation).
+	if inst.Status.AppliedSpec != nil {
+		if imageID, err := r.Harvester.GetVMOSDiskImageID(ctx, inst.Namespace, vmNameFor(inst)); err == nil && imageID != "" {
+			if _, imageName, found := strings.Cut(imageID, "/"); found {
+				if rev, ok := catalog.RevisionForImageName(imageName); ok && rev != inst.Status.CurrentImageRevision {
+					inst.Status.CurrentImageRevision = rev
+				}
+			}
+		}
+	}
+
 	// Decision #16 — crash-safety recovery. Runs first, unconditionally,
 	// regardless of catalog state: if a prior pass recorded a pending delete
 	// and was interrupted before DeletePVC succeeded, retry it here rather
