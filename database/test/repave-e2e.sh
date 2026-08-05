@@ -189,6 +189,41 @@ db_exec() { # db_exec <sql>  (uses current endpoint + secret)
   PGPASSWORD="$pw" PGSSLMODE=require psql -h "$ep" -U "${PGUSER:-$user}" -d "$dbname" -tAc "$1" 2>&1
 }
 
+db_wait_ready() { # db_wait_ready [timeout] — block until a real login succeeds
+  # phase=available means the KubeVirt readiness probe passed. That probe now
+  # gates on cloud-init's bootstrap-complete marker as well as pg_isready
+  # (internal/harvester/typed_client.go), so the master role is guaranteed to
+  # exist by the time we get here — but only against a controller new enough
+  # to set that probe. Against an older controller, or a VM created before the
+  # probe change, pg_isready alone flips Ready while bootstrap.sh is still
+  # short of its CREATE ROLE, and every login in that window fails with
+  # "password authentication failed" (PostgreSQL's answer for a role that does
+  # not exist yet).
+  #
+  # So: retry briefly rather than assert on the first attempt. A few seconds of
+  # boot skew must not read as a hard failure — but keep the window short, so a
+  # genuinely broken bootstrap (dbadmin never created, wrong password baked in)
+  # still fails the run instead of hanging it.
+  local t="${1:-90}" start now out
+  start=$(date +%s)
+  while true; do
+    out=$(db_exec "SELECT 1;")
+    [ "$out" = "1" ] && return 0
+    now=$(date +%s)
+    if [ $((now - start)) -ge "$t" ]; then
+      fail "no usable login as the master user within ${t}s of phase=available — last psql output: $out"
+      echo "      (if this says 'password authentication failed', check in-guest:" >&2
+      echo "       cloud-init status --long; sudo -u postgres psql -c '\\du'" >&2
+      echo "       — an absent role means bootstrap.sh died before its CREATE ROLE;" >&2
+      echo "       a present role means the password diverged, e.g. a data PVC or" >&2
+      echo "       credentials Secret left over from an earlier run of this test.)" >&2
+      return 1
+    fi
+    printf '\r   waiting: master login not accepted yet (%ss)' "$((now - start))"
+    sleep 5
+  done
+}
+
 server_major_version() {
   # Verifies decision #18's engine-version wiring actually took effect
   # against a real, booted VM — not just that the operator resolved a
@@ -306,6 +341,12 @@ stage1() {
 
   if [ "${SKIP_DB:-0}" != "1" ]; then
     say "T1 (cont.): PostgreSQL version matches the (possibly defaulted) engineVersion"
+    # Gate every psql assertion below on one real login. Without this the
+    # version and seed checks each report their own failure for what is really
+    # a single cause, and boot skew is indistinguishable from a broken
+    # bootstrap.
+    db_wait_ready || die "baseline instance never accepted a master login"
+    echo
     # No apt-get should have run at boot for a baked image (§9/decision #18) —
     # this script has no VM console access to grep cloud-init logs directly;
     # spot-check via `virtctl console` manually if you want to confirm that
@@ -327,14 +368,35 @@ stage1() {
     echo "(SKIP_DB=1: skipping version/seed checks)"
   fi
 
-  say "T11: printcolumns / describe surface the image-drift condition"
+  say "T11a: printcolumns exist, and no drift is reported on a just-provisioned instance"
   kubectl get dbinstance "$ID" -n "$NS" --no-headers 2>/dev/null | grep -q "$ID" \
     && pass "default 'kubectl get dbinstance' output includes $ID (ImageDrift column present, no reason leaking without -o wide)" \
     || fail "kubectl get dbinstance $ID produced no row"
   kubectl get dbinstance "$ID" -n "$NS" -o wide 2>/dev/null | head -1 | grep -qi "imagedriftreason" \
     && pass "'-o wide' header includes IMAGEDRIFTREASON" || fail "'-o wide' header missing IMAGEDRIFTREASON column"
+  # ConditionImageDrift is always written (repave.go: "Always written, never
+  # removed"), so 'describe' shows it at baseline too, same as once drift
+  # exists — unlike M1's two condition types, there's no absent-until-drifted
+  # state to wait for.
   kubectl describe dbinstance "$ID" -n "$NS" 2>/dev/null | grep -q "ImageDrift" \
-    && pass "'kubectl describe' shows the ImageDrift condition" || fail "'kubectl describe' output missing ImageDrift"
+    && pass "'kubectl describe' shows the ImageDrift condition at baseline" || fail "'kubectl describe' output missing ImageDrift"
+  # ConditionImageDrift is three-valued (api/v1alpha1/dbinstance_conditions.go):
+  # True=drifted, False/ImageUpToDate=on the current revision, and
+  # Unknown/ImageCatalogUnresolved=no validated stream for
+  # databaseDefaults.osVersion, i.e. drift could not be evaluated at all. A
+  # baseline instance is provisioned from the current revision, so it must
+  # report an explicit False here — an empty value means the controller
+  # predates the three-valued condition, and Unknown means osVersion is
+  # misconfigured (which would silently no-op the whole repave feature and
+  # make stage2 fail for the wrong reason).
+  local st rs; st=$(image_drift_status); rs=$(image_drift_reason)
+  if [ "$st" = "False" ] && [ "$rs" = "ImageUpToDate" ]; then
+    pass "ImageDrift=False/ImageUpToDate on the freshly-provisioned baseline"
+  elif [ "$st" = "Unknown" ]; then
+    fail "ImageDrift=Unknown/$rs — databaseDefaults.osVersion resolves to no validated stream; fix the catalog before running stage2"
+  else
+    fail "ImageDrift=${st:-<absent>}/${rs:-<none>} at baseline, want False/ImageUpToDate"
+  fi
 
   say "stage1 done — now switch manager.yaml to the new OS stream and 'make deploy', then run stage2"
 }
@@ -353,6 +415,11 @@ stage2() {
   [ "$st" = "True" ] && pass "ImageDrift=True" || fail "ImageDrift never appeared (did you redeploy the controller?)"
   [ "$rs" = "OSUpdateAvailable" ] && pass "ImageDrift.reason=OSUpdateAvailable (safe update, not EOL-blocked)" \
     || fail "ImageDrift.reason=$rs, want OSUpdateAvailable"
+
+  say "T11b: printcolumns surface the drift reason now that it exists"
+  kubectl get dbinstance "$ID" -n "$NS" -o wide --no-headers 2>/dev/null | grep -q "OSUpdateAvailable" \
+    && pass "'-o wide' row surfaces IMAGEDRIFTREASON=OSUpdateAvailable" \
+    || fail "'-o wide' row does not show the drift reason"
 
   say "T3: repave — VM restarts exactly once, data PVC/connection Secret/TLS material untouched"
   kubectl annotate dbinstance "$ID" -n "$NS" "$ANNOT" --overwrite || die "annotate failed"
@@ -427,6 +494,10 @@ stage2() {
 
   if [ "${SKIP_DB:-0}" != "1" ]; then
     say "T4: data survived"
+    # The repave rebooted the VM onto a brand-new OS disk, so cloud-init ran
+    # again from scratch — same post-boot login race as stage1.
+    db_wait_ready || die "instance never accepted a master login after the repave"
+    echo
     local out; out=$(db_exec "SELECT x FROM repave_test;")
     echo "$out" | grep -q "^1$" && pass "repave_test row intact — pgdata preserved" \
       || fail "data check failed: $out"
@@ -478,6 +549,13 @@ stage3() {
     && pass "fresh OS PVC created at $created" || fail "OS PVC missing or predates re-apply ($created) — old disk reattached?"
 
   if [ "${SKIP_DB:-0}" != "1" ]; then
+    # This is a freshly provisioned instance, so it needs the same login gate
+    # as stage1 — and here it matters doubly: a login that fails for boot-race
+    # reasons returns psql's connection error, which does not contain
+    # "does not exist", so the assertion below would report "old data visible"
+    # for an instance that has no data at all.
+    db_wait_ready || die "re-applied instance never accepted a master login"
+    echo
     local out; out=$(db_exec "SELECT x FROM repave_test;")
     echo "$out" | grep -q "does not exist" && pass "repave_test absent — genuinely fresh database" \
       || fail "old data visible on re-applied instance: $out"
@@ -551,6 +629,7 @@ stage4() {
     || fail "unset engineVersion did not reach available (phase=$phase_default): ${result_default#*|}"
   if [ "$phase_default" = "available" ] && [ "${SKIP_DB:-0}" != "1" ]; then
     ID="$id_default" # temporarily redirect db_exec/server_major_version at the probe instance
+    db_wait_ready 120 || true # report-only: the assertion below is the verdict
     local got; got=$(server_major_version)
     ID="${ID%-eol-default}"
     [ -n "$got" ] && pass "defaulted instance actually booted PostgreSQL $got" || fail "could not read server_version on defaulted-engineVersion instance"

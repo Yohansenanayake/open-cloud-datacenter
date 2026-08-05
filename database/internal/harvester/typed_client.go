@@ -49,6 +49,14 @@ const (
 	dataNetInterface = "data-net"
 )
 
+// GuestBootstrapCompleteMarker is the in-guest path bootstrap.sh touches once
+// the master role and its database exist, and that the readiness probe tests
+// for before trusting pg_isready. It is declared here rather than in
+// internal/credentials — which writes it — because credentials imports this
+// package, so the dependency can only point this way.
+// TestUserDataTouchesTheProbedBootstrapMarker pins the two in sync.
+const GuestBootstrapCompleteMarker = "/var/lib/dbaas/bootstrap-complete"
+
 // TypedClient manages Harvester resources through Harvester's generated
 // clientset and standard Kubernetes typed clients.
 type TypedClient struct {
@@ -501,14 +509,26 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	vm.Spec.Template.Spec.Domain.CPU.Sockets = 1
 	vm.Spec.Template.Spec.Domain.CPU.Threads = 1
 
-	// Readiness probe: pg_isready runs inside the guest via the QEMU guest agent
-	// virtio channel — no pod-network port exposure required.
+	// Readiness probe: runs inside the guest via the QEMU guest agent virtio
+	// channel — no pod-network port exposure required.
+	//
+	// Both halves are required. pg_isready only asks whether a postmaster
+	// answers, which is true well before cloud-init has created the master
+	// role and its database — first for the throwaway cluster
+	// pg_createcluster starts, then again between the hostssl restart and the
+	// bootstrap SQL. Readiness gates DatabaseReady, which gates
+	// phase=available, so on its own it told clients "connect now" during a
+	// window where PostgreSQL answers every login with
+	// "password authentication failed" (its response for a role that does
+	// not exist yet). The marker is written by bootstrap.sh only once that
+	// SQL has succeeded — see buildUserData in internal/credentials/cloudinit.go.
 	vm.Spec.Template.Spec.ReadinessProbe = &kubevirtv1.Probe{
 		Handler: kubevirtv1.Handler{
 			Exec: &corev1.ExecAction{
 				Command: []string{
 					"/bin/sh", "-c",
-					fmt.Sprintf("pg_isready -h 127.0.0.1 -p %d -U %s -d postgres", p.Port, p.MasterUser),
+					fmt.Sprintf("test -f %s && pg_isready -h 127.0.0.1 -p %d -U %s -d postgres",
+						GuestBootstrapCompleteMarker, p.Port, p.MasterUser),
 				},
 			},
 		},

@@ -477,8 +477,20 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if probe.Exec == nil {
 		t.Fatalf("ReadinessProbe.Exec is not set")
 	}
-	if !strings.Contains(strings.Join(probe.Exec.Command, " "), "pg_isready") {
+	cmd := strings.Join(probe.Exec.Command, " ")
+	if !strings.Contains(cmd, "pg_isready") {
 		t.Fatalf("ReadinessProbe command does not contain pg_isready: %v", probe.Exec.Command)
+	}
+	// pg_isready alone is not a bootstrap-completion signal — it passes while
+	// cloud-init is still short of creating the master role, so readiness (and
+	// through it phase=available) would invite clients to connect into a
+	// guaranteed authentication failure. Both halves must be present, and the
+	// marker must gate first so a half-bootstrapped guest never reads ready.
+	if !strings.Contains(cmd, "test -f "+GuestBootstrapCompleteMarker) {
+		t.Fatalf("ReadinessProbe must gate on %s before pg_isready: %v", GuestBootstrapCompleteMarker, probe.Exec.Command)
+	}
+	if strings.Index(cmd, GuestBootstrapCompleteMarker) > strings.Index(cmd, "pg_isready") {
+		t.Fatalf("bootstrap marker test must precede pg_isready: %v", probe.Exec.Command)
 	}
 	if probe.InitialDelaySeconds != 30 || probe.PeriodSeconds != 10 || probe.FailureThreshold != 12 {
 		t.Fatalf("ReadinessProbe timing initial=%d period=%d failure=%d, want 30/10/12",

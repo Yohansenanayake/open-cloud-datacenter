@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
 func testMaterial() *Material {
@@ -138,6 +139,44 @@ func TestBuildCloudInitGuardsClusterResetAgainstMountedPgdata(t *testing.T) {
 	dropIdx := strings.Index(userdata, "pg_dropcluster")
 	if guardIdx == -1 || dropIdx == -1 || dropIdx < guardIdx {
 		t.Fatalf("pg_dropcluster must appear after the findmnt guard, got guardIdx=%d dropIdx=%d", guardIdx, dropIdx)
+	}
+}
+
+// TestUserDataTouchesTheProbedBootstrapMarker pins the contract between the
+// script that writes the readiness marker and the probe that tests for it.
+// The two live in different packages (the path constant has to sit in
+// harvester, since credentials imports it and not the reverse), so nothing
+// but this test stops the string in the bash below from drifting away from
+// harvester.GuestBootstrapCompleteMarker. If it does, the probe waits on a
+// file nobody ever creates and every instance stays permanently not-Ready.
+func TestUserDataTouchesTheProbedBootstrapMarker(t *testing.T) {
+	userdata, _ := BuildCloudInit(testBootstrapParams(), testMaterial())
+
+	touch := "touch " + harvester.GuestBootstrapCompleteMarker
+	if !strings.Contains(userdata, touch) {
+		t.Fatalf("userdata never runs %q — the readiness probe would block forever", touch)
+	}
+
+	// Ordering is the whole point: the marker means "the master role and its
+	// database exist", so it must be touched strictly after the bootstrap
+	// SQL. Touched before, it re-opens the exact race it was added to close —
+	// pg_isready passes, phase goes available, and the first client login
+	// fails with "password authentication failed" against a role PostgreSQL
+	// has not created yet.
+	sqlIdx := strings.Index(userdata, "CREATE ROLE \"${MASTER_USER}\"")
+	touchIdx := strings.Index(userdata, touch)
+	if sqlIdx == -1 {
+		t.Fatal("userdata missing the master-role CREATE ROLE statement")
+	}
+	if touchIdx < sqlIdx {
+		t.Fatalf("marker touched at %d, before the master-role SQL at %d — readiness would go true too early", touchIdx, sqlIdx)
+	}
+
+	// ...and strictly before the exporter block, so a monitoring failure
+	// under `set -e` cannot hold back DatabaseReady. Monitoring is a separate
+	// axis (DerivePhaseSummary reports it as degraded-but-available).
+	if exporterIdx := strings.Index(userdata, "/etc/default/prometheus-postgres-exporter"); exporterIdx != -1 && touchIdx > exporterIdx {
+		t.Fatalf("marker touched at %d, after exporter setup at %d — monitoring failures would block database readiness", touchIdx, exporterIdx)
 	}
 }
 

@@ -302,6 +302,26 @@ ssh_pwauth: true
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
       EOSQL
 
+      # Bootstrap-completion marker, checked by the KubeVirt readiness probe
+      # (internal/harvester/typed_client.go). pg_isready alone answers "is a
+      # postmaster listening", which goes true several steps earlier — while
+      # pg_createcluster's throwaway cluster is up, and again right after the
+      # restart above but before the role/database exist. A client that took
+      # phase=available at its word in that window got
+      # "password authentication failed for user ${MASTER_USER}", because
+      # PostgreSQL reports a missing role exactly like a wrong password.
+      #
+      # Written here, not at the end of the script: the contract is "the
+      # master role and its database are usable". Exporter setup below is the
+      # separate MonitoringReady axis and must not gate DatabaseReady.
+      #
+      # Lives on the OS disk, so it is absent on a genuine first boot and
+      # after a repave's disk swap (both of which re-run this script), and
+      # persists across a plain reboot (which does not). /var/lib/dbaas
+      # itself already exists by this point — runcmd below creates and
+      # chowns it before bootstrap.sh ever runs.
+      touch /var/lib/dbaas/bootstrap-complete
+
       cat >/etc/default/prometheus-postgres-exporter <<EOEXPORTER
       DATA_SOURCE_NAME=postgresql://postgres_exporter:${EXPORTER_PASSWORD}@127.0.0.1:${DB_PORT}/postgres?sslmode=require
       ARGS="--web.listen-address=:9187"
