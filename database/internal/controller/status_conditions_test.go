@@ -72,6 +72,23 @@ func TestFinalizeStatusAggregatesIntervention(t *testing.T) {
 	}
 }
 
+func TestSyncRepaveInProgressClearsAfterSelfHealedDriftSettles(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Generation = 3
+	running := true
+	inst.Spec.Running = &running
+	inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionTrue, dbaasv1.ReasonRepaveApplied, "repave applied")
+	inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "database and monitoring ready")
+	// ImageDrift is intentionally absent: the OS-disk observation has
+	// self-healed CurrentImageRevision to the revision the VM actually uses.
+
+	(&DBInstanceReconciler{}).syncRepaveInProgressCondition(inst)
+
+	if inst.Status.GetCondition(dbaasv1.ConditionRepaveInProgress) != nil {
+		t.Fatal("RepaveInProgress should clear after drift is gone and Ready is current")
+	}
+}
+
 func condition(typ string, status metav1.ConditionStatus, reason dbaasv1.ConditionReason, generation int64) *metav1.Condition {
 	return &metav1.Condition{Type: typ, Status: status, Reason: string(reason), ObservedGeneration: generation}
 }

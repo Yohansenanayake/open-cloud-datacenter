@@ -56,7 +56,11 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// to ever retry it (every other writer is gated behind the one-shot
 	// repave-trigger annotation).
 	if inst.Status.AppliedSpec != nil {
-		if imageID, err := r.Harvester.GetVMOSDiskImageID(ctx, inst.Namespace, vmNameFor(inst)); err == nil && imageID != "" {
+		imageID, err := r.Harvester.GetVMOSDiskImageID(ctx, inst.Namespace, vmNameFor(inst))
+		if err != nil {
+			return Transient(fmt.Errorf("observe VM OS-disk image: %w", err))
+		}
+		if imageID != "" {
 			if _, imageName, found := strings.Cut(imageID, "/"); found {
 				if rev, ok := catalog.RevisionForImageName(imageName); ok && rev != inst.Status.CurrentImageRevision {
 					inst.Status.CurrentImageRevision = rev

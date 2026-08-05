@@ -163,6 +163,20 @@ func TestEnsureRepaveSelfHealIgnoresUnresolvableImageID(t *testing.T) {
 	}
 }
 
+func TestEnsureRepaveSelfHealReturnsTransientOnImageObservationError(t *testing.T) {
+	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	stub.OSDiskImageIDErr = errors.New("harvester unavailable")
+
+	res := r.ensureRepave(context.Background(), inst)
+
+	if res.Outcome != OutcomeTransient {
+		t.Fatalf("res = %+v, want Transient", res)
+	}
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "observe VM OS-disk image: harvester unavailable") {
+		t.Fatalf("res.Err = %v, want contextual image-observation error", res.Err)
+	}
+}
+
 func TestEnsureRepaveDriftEngineVersionSupportedReportsOSUpdateAvailable(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	inst.Spec.EngineVersion = "16" // in defaultBakedImageName's SupportedEngineVersions

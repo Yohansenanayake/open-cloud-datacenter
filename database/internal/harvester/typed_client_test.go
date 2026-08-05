@@ -253,6 +253,13 @@ func TestSwapVMOSDiskProducesRevisionSuffixedPVCAndRepointsVolume(t *testing.T) 
 	if got := newTemplate.Annotations[harvesterbuilder.AnnotationKeyImageID]; got != wantImageID {
 		t.Fatalf("new PVC template imageId annotation = %q, want %q", got, wantImageID)
 	}
+	gotImageID, err := client.GetVMOSDiskImageID(ctx, "tenant-a", "pg-orders")
+	if err != nil {
+		t.Fatalf("GetVMOSDiskImageID returned error: %v", err)
+	}
+	if gotImageID != wantImageID {
+		t.Fatalf("GetVMOSDiskImageID = %q, want %q", gotImageID, wantImageID)
+	}
 }
 
 func TestSwapVMOSDiskIsIdempotentWhenAlreadyOnTargetStorageClass(t *testing.T) {
