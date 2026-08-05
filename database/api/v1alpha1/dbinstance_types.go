@@ -306,7 +306,7 @@ type DBInstanceStatus struct {
 	// key) the VM is currently running, updated after each successful
 	// repave. Used for drift detection — when this differs from the
 	// catalog's current revision for the instance's stream,
-	// ConditionImageDrift is set to True.
+	// ConditionImageDrift is set to True; when it matches, to False.
 	// +optional
 	CurrentImageRevision string `json:"currentImageRevision,omitempty"`
 

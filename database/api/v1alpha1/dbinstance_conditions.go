@@ -55,12 +55,26 @@ const (
 	// to serve, but readiness or guest-agent attribution says it is unhealthy.
 	ConditionDegraded        = "Degraded"
 	ConditionDeletionBlocked = "DeletionBlocked"
-	// ConditionImageDrift is report-only: True whenever the instance's
-	// applied image revision differs from the catalog's current revision
-	// for its stream. Reason distinguishes a safe update
-	// (ReasonOSUpdateAvailable) from one blocked by an EOL'd engineVersion
-	// (ReasonEngineVersionEOL) — one condition type, not two, since the two
-	// causes are mutually exclusive facets of the same "image drift" axis.
+	// ConditionImageDrift is report-only and explicitly three-valued, so
+	// "your image is current" is never indistinguishable from "drift was
+	// never evaluated":
+	//
+	//	True    — the applied image revision differs from the catalog's
+	//	          current revision for its stream. Reason distinguishes a
+	//	          safe update (ReasonOSUpdateAvailable) from one blocked by
+	//	          an EOL'd engineVersion (ReasonEngineVersionEOL) — one
+	//	          condition type, not two, since the two causes are mutually
+	//	          exclusive facets of the same "image drift" axis.
+	//	False   — the VM is on the catalog's current revision
+	//	          (ReasonImageUpToDate).
+	//	Unknown — no stream could be resolved for databaseDefaults.osVersion
+	//	          (unset, unknown, or not yet Validated), so drift could not
+	//	          be evaluated at all (ReasonImageCatalogUnresolved). This is
+	//	          a misconfiguration worth surfacing, not a healthy state.
+	//
+	// Consumers must therefore branch on Status, never on the condition's
+	// presence: per the Kubernetes API conventions absence means Unknown,
+	// and this type is only absent before the first reconcile.
 	ConditionImageDrift = "ImageDrift"
 	// ConditionRepaveInProgress is an activity condition, same shape as
 	// ConditionResizeInProgress — an independent axis from ConditionImageDrift
@@ -125,8 +139,10 @@ const (
 	ReasonDeletionProgressing         ConditionReason = "DeletionProgressing"
 
 	// ConditionImageDrift reasons.
-	ReasonOSUpdateAvailable ConditionReason = "OSUpdateAvailable"
-	ReasonEngineVersionEOL  ConditionReason = "EngineVersionEOL"
+	ReasonOSUpdateAvailable      ConditionReason = "OSUpdateAvailable"
+	ReasonEngineVersionEOL       ConditionReason = "EngineVersionEOL"
+	ReasonImageUpToDate          ConditionReason = "ImageUpToDate"
+	ReasonImageCatalogUnresolved ConditionReason = "ImageCatalogUnresolved"
 
 	// Repave dispatch reasons.
 	ReasonRepaveNotAvailable       ConditionReason = "RepaveNotAvailable"
@@ -191,6 +207,8 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonDeletionProgressing):         ReasonDeletionProgressing,
 	string(ReasonOSUpdateAvailable):           ReasonOSUpdateAvailable,
 	string(ReasonEngineVersionEOL):            ReasonEngineVersionEOL,
+	string(ReasonImageUpToDate):               ReasonImageUpToDate,
+	string(ReasonImageCatalogUnresolved):      ReasonImageCatalogUnresolved,
 	string(ReasonRepaveNotAvailable):          ReasonRepaveNotAvailable,
 	string(ReasonRepaveBlockedEOL):            ReasonRepaveBlockedEOL,
 	string(ReasonRepaveInvalidStream):         ReasonRepaveInvalidStream,

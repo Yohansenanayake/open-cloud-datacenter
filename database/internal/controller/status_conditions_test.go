@@ -79,13 +79,54 @@ func TestSyncRepaveInProgressClearsAfterSelfHealedDriftSettles(t *testing.T) {
 	inst.Spec.Running = &running
 	inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionTrue, dbaasv1.ReasonRepaveApplied, "repave applied")
 	inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "database and monitoring ready")
-	// ImageDrift is intentionally absent: the OS-disk observation has
-	// self-healed CurrentImageRevision to the revision the VM actually uses.
+	// ImageDrift is intentionally absent: a status written by a controller
+	// build from before ImageDrift became three-valued. Absence must still
+	// read as "not drifted" so an in-flight repave can settle across an
+	// operator upgrade.
 
 	(&DBInstanceReconciler{}).syncRepaveInProgressCondition(inst)
 
 	if inst.Status.GetCondition(dbaasv1.ConditionRepaveInProgress) != nil {
 		t.Fatal("RepaveInProgress should clear after drift is gone and Ready is current")
+	}
+}
+
+// TestSyncRepaveInProgressDriftStates pins the exact coupling between
+// ImageDrift's three values and the repave activity condition. Before
+// ImageDrift gained an explicit False state this step tested the condition's
+// PRESENCE, so a written-out False would have pinned RepaveInProgress=True
+// forever — every repave would hang one step short of done.
+func TestSyncRepaveInProgressDriftStates(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		driftState metav1.ConditionStatus
+		driftWhy   dbaasv1.ConditionReason
+		wantClear  bool
+	}{
+		{"resolved drift clears", metav1.ConditionFalse, dbaasv1.ReasonImageUpToDate, true},
+		// Unknown must clear too: a mid-repave config change that invalidates
+		// the stream would otherwise strand RepaveInProgress=True with
+		// nothing left able to retire it.
+		{"unevaluable drift clears", metav1.ConditionUnknown, dbaasv1.ReasonImageCatalogUnresolved, true},
+		{"live drift keeps the repave in progress", metav1.ConditionTrue, dbaasv1.ReasonOSUpdateAvailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := newProvisionInst()
+			inst.Generation = 3
+			running := true
+			inst.Spec.Running = &running
+			inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionTrue, dbaasv1.ReasonRepaveApplied, "repave applied")
+			inst.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "database and monitoring ready")
+			inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, tc.driftState, tc.driftWhy, "")
+
+			(&DBInstanceReconciler{}).syncRepaveInProgressCondition(inst)
+
+			cleared := inst.Status.GetCondition(dbaasv1.ConditionRepaveInProgress) == nil
+			if cleared != tc.wantClear {
+				t.Fatalf("RepaveInProgress cleared = %v with ImageDrift=%s/%s, want %v",
+					cleared, tc.driftState, tc.driftWhy, tc.wantClear)
+			}
+		})
 	}
 }
 

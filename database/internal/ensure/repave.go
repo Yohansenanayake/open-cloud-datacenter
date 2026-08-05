@@ -84,18 +84,25 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	defaults := r.databaseDefaults()
 	entry, stream, ok := resolveBakedImage(defaults)
 	if !ok {
-		// Nothing to compare against — the feature no-ops exactly as if the
-		// catalog were empty. Clear any stale drift from before the stream
-		// became unresolvable (e.g. a config change) rather than leaving it
-		// to look actionable.
-		inst.Status.RemoveCondition(dbaasv1.ConditionImageDrift)
+		// Nothing to compare against — the repave feature no-ops exactly as
+		// if the catalog were empty. Report Unknown rather than clearing the
+		// condition: any stale True from before the stream became
+		// unresolvable must stop looking actionable, but "I could not check"
+		// is a misconfiguration and must not masquerade as False/up-to-date.
+		inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionUnknown,
+			dbaasv1.ReasonImageCatalogUnresolved,
+			fmt.Sprintf("no validated baked-image stream for osVersion %q — image drift cannot be evaluated",
+				defaults.OSVersion))
 		return Satisfied()
 	}
 
 	// --- drift detection: runs every pass a stream is resolvable, NOT gated
 	// on the trigger annotation. One condition, Reason carries which flavor
-	// (decision #9) — a safe update (ReasonOSUpdateAvailable) vs one blocked
-	// by an EOL'd engineVersion (ReasonEngineVersionEOL).
+	// a safe update (ReasonOSUpdateAvailable) vs one blocked
+	// by an EOL'd engineVersion (ReasonEngineVersionEOL) vs no drift at all
+	// (ReasonImageUpToDate). Always written, never removed: an absent
+	// condition would mean Unknown, which is what the unresolvable-stream
+	// branch above legitimately reports.
 	if inst.Status.AppliedSpec != nil && inst.Status.CurrentImageRevision != stream.Revision {
 		if _, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry); ok {
 			inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionTrue,
@@ -109,7 +116,12 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 					inst.Spec.EngineVersion, stream.Revision, entry.SupportedEngineVersions))
 		}
 	} else {
-		inst.Status.RemoveCondition(dbaasv1.ConditionImageDrift)
+		// Also covers the pre-provisioning window (AppliedSpec == nil): the
+		// VM has not been created yet, and when it is, ensureVM builds it
+		// from this very stream — so there is nothing to update to.
+		inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionFalse,
+			dbaasv1.ReasonImageUpToDate,
+			fmt.Sprintf("VM is on the current image revision %q", stream.Revision))
 	}
 
 	// --- repave dispatch: gated on the trigger annotation ---
@@ -210,7 +222,12 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	}
 	inst.Status.Resources.OSDiskPVCName = newPVC
 	inst.Status.CurrentImageRevision = stream.Revision
-	inst.Status.RemoveCondition(dbaasv1.ConditionImageDrift) // drift resolved by the swap
+	// Drift resolved by the swap — report it as evaluated-and-clean, not as
+	// unevaluated. syncRepaveInProgressCondition keys off this being no
+	// longer True.
+	inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionFalse,
+		dbaasv1.ReasonImageUpToDate,
+		fmt.Sprintf("VM is on the current image revision %q", stream.Revision))
 
 	if res, stop := r.regenerateCloudInit(ctx, inst, engineVersion); stop {
 		return res

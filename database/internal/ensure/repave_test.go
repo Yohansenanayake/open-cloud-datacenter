@@ -60,6 +60,21 @@ func noProviderCalls(stub *stubHarvester) bool {
 	return stub.StopVMCalls == 0 && stub.SwapVMOSDiskCalls == 0 && stub.DeletePVCCalls == 0
 }
 
+// wantDrift asserts ImageDrift's full three-valued state. ImageDrift is never
+// removed once a pass has evaluated it — absence would mean Unknown, which is
+// reserved for "no validated stream to compare against" — so every assertion
+// here checks Status and Reason rather than presence.
+func wantDrift(t *testing.T, inst *dbaasv1.DBInstance, status metav1.ConditionStatus, reason dbaasv1.ConditionReason) {
+	t.Helper()
+	c := inst.Status.GetCondition(dbaasv1.ConditionImageDrift)
+	if c == nil {
+		t.Fatalf("ImageDrift is absent, want %s/%s", status, reason)
+	}
+	if c.Status != status || c.Reason != string(reason) {
+		t.Fatalf("ImageDrift = %s/%s, want %s/%s", c.Status, c.Reason, status, reason)
+	}
+}
+
 // --- no-op cases: catalog unresolvable ---
 
 func TestEnsureRepaveNoCatalogEntrySatisfied(t *testing.T) {
@@ -71,9 +86,9 @@ func TestEnsureRepaveNoCatalogEntrySatisfied(t *testing.T) {
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
-	if inst.Status.GetCondition(dbaasv1.ConditionImageDrift) != nil {
-		t.Fatal("ImageDrift should be absent when the catalog can't resolve a stream")
-	}
+	// Unknown, not False: an unresolvable stream means drift was never
+	// evaluated, which must stay distinguishable from "you are up to date".
+	wantDrift(t, inst, metav1.ConditionUnknown, dbaasv1.ReasonImageCatalogUnresolved)
 	if !noProviderCalls(stub) {
 		t.Fatal("no provider calls expected when the feature no-ops")
 	}
@@ -110,9 +125,7 @@ func TestEnsureRepaveOnLatestRevisionNoDrift(t *testing.T) {
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
-	if inst.Status.GetCondition(dbaasv1.ConditionImageDrift) != nil {
-		t.Fatal("ImageDrift should be absent when already on the latest revision")
-	}
+	wantDrift(t, inst, metav1.ConditionFalse, dbaasv1.ReasonImageUpToDate)
 	if !noProviderCalls(stub) {
 		t.Fatal("no provider calls expected with no drift")
 	}
@@ -140,9 +153,7 @@ func TestEnsureRepaveSelfHealsCurrentImageRevisionFromVMReality(t *testing.T) {
 	if inst.Status.CurrentImageRevision != defaultBakedImageName {
 		t.Fatalf("CurrentImageRevision = %q, want self-healed to %q", inst.Status.CurrentImageRevision, defaultBakedImageName)
 	}
-	if inst.Status.GetCondition(dbaasv1.ConditionImageDrift) != nil {
-		t.Fatal("ImageDrift should be absent once CurrentImageRevision self-heals to match the latest revision")
-	}
+	wantDrift(t, inst, metav1.ConditionFalse, dbaasv1.ReasonImageUpToDate)
 	if !noProviderCalls(stub) {
 		t.Fatal("self-heal must not perform any VM/disk operation — it only corrects a status field")
 	}
@@ -378,9 +389,7 @@ func TestEnsureRepaveTriggerAppliesSwapWhenDown(t *testing.T) {
 	if inst.Status.Resources.PendingDeleteOSDiskPVCName != "" {
 		t.Fatal("PendingDeleteOSDiskPVCName should be cleared once DeletePVC succeeds")
 	}
-	if inst.Status.GetCondition(dbaasv1.ConditionImageDrift) != nil {
-		t.Fatal("ImageDrift should be removed once the swap resolves the drift")
-	}
+	wantDrift(t, inst, metav1.ConditionFalse, dbaasv1.ReasonImageUpToDate)
 	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; ok {
 		t.Fatal("trigger annotation should be cleared once applied")
 	}

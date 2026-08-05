@@ -101,13 +101,18 @@ func (r *DBInstanceReconciler) syncResizeInProgressCondition(inst *dbaasv1.DBIns
 // syncRepaveInProgressCondition clears RepaveInProgress only once the drift
 // it was addressing is gone and the instance has settled: Ready when
 // running, or PowerStateReady when stopped. Mirrors
-// syncResizeInProgressCondition's pattern — ConditionImageDrift's ABSENCE is
-// the positive "converged" signal here, the role ConditionStorageReady=True
-// plays for resize (ImageDrift has no explicit False state; it's either True
-// or removed entirely).
+// syncResizeInProgressCondition's pattern — ConditionImageDrift no longer
+// being True is the positive "converged" signal here, the role
+// ConditionStorageReady=True plays for resize.
+//
+// The test is deliberately "not True" rather than "is False": ImageDrift is
+// three-valued, and Unknown (no validated stream for
+// databaseDefaults.osVersion) must still let an in-flight repave settle
+// instead of pinning RepaveInProgress=True forever on a config change made
+// mid-repave.
 func (r *DBInstanceReconciler) syncRepaveInProgressCondition(inst *dbaasv1.DBInstance) {
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionRepaveInProgress) ||
-		inst.Status.GetCondition(dbaasv1.ConditionImageDrift) != nil {
+		inst.Status.IsConditionTrue(dbaasv1.ConditionImageDrift) {
 		return
 	}
 
