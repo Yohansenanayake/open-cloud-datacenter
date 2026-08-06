@@ -88,8 +88,8 @@ var BakedImages = map[string]BakedImageEntry{
 // as if the catalog were empty.
 var LatestBakedImages = map[string]BakedImageStream{
 	"22.04": {Revision: "ubuntu-2204-postgres-v20260515", ValidationState: ValidationValidated},
-	// "24.04": {Revision: "ubuntu-2404-postgres-v20260701", ValidationState: ValidationValidated},
-	"24.04": {Revision: "ubuntu-2404-postgres-v20260815", ValidationState: ValidationValidated},
+	"24.04": {Revision: "ubuntu-2404-postgres-v20260701", ValidationState: ValidationValidated},
+	// "24.04": {Revision: "ubuntu-2404-postgres-v20260815", ValidationState: ValidationValidated},   //change this for test
 }
 
 // RevisionForImageName reverse-looks-up the BakedImages revision key whose
