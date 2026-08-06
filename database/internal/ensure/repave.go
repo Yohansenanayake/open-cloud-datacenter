@@ -55,14 +55,28 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// status write here can be lost to a conflicted patch with nothing else
 	// to ever retry it (every other writer is gated behind the one-shot
 	// repave-trigger annotation).
+	//
+	// imageID's name half is the real Harvester object name, not
+	// necessarily internal/catalog's ImageName string — on a real cluster,
+	// imported images typically get an auto-generated object name and only
+	// carry the catalog string as DisplayName, which is why
+	// ResolveVMImageDisplayName is needed here rather than comparing
+	// imageID's name half against the catalog directly (verified against a
+	// real deployment: this exact gap is why a lost status write never
+	// self-healed and left the instance stuck on RepaveInProgress/Modifying
+	// indefinitely, despite the swap and the database both being healthy).
 	if inst.Status.AppliedSpec != nil {
 		imageID, err := r.Harvester.GetVMOSDiskImageID(ctx, inst.Namespace, vmNameFor(inst))
 		if err != nil {
 			return Transient(fmt.Errorf("observe VM OS-disk image: %w", err))
 		}
 		if imageID != "" {
-			if _, imageName, found := strings.Cut(imageID, "/"); found {
-				if rev, ok := catalog.RevisionForImageName(imageName); ok && rev != inst.Status.CurrentImageRevision {
+			if imgNs, imgName, found := strings.Cut(imageID, "/"); found {
+				displayName, err := r.Harvester.ResolveVMImageDisplayName(ctx, imgNs, imgName)
+				if err != nil {
+					return Transient(fmt.Errorf("resolve VM OS-disk image display name: %w", err))
+				}
+				if rev, ok := catalog.RevisionForImageName(displayName); ok && rev != inst.Status.CurrentImageRevision {
 					inst.Status.CurrentImageRevision = rev
 				}
 			}

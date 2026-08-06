@@ -76,6 +76,16 @@ type StubHarvester struct {
 	// on the VM's current OS-disk PVC. Empty (the zero value) mirrors "VM
 	// not created yet / nothing to reconcile against".
 	OSDiskImageID string
+
+	// OSDiskImageDisplayName, if set, is what ResolveVMImageDisplayName
+	// returns for the object name half of OSDiskImageID — set this to
+	// simulate a real Harvester image whose auto-generated object name
+	// differs from its catalog-matching DisplayName (internal/catalog is
+	// keyed by DisplayName, not object name). Left empty, the stub echoes
+	// the requested name back unchanged, i.e. object name == DisplayName,
+	// matching every fixture that predates this field.
+	OSDiskImageDisplayName       string
+	ResolveVMImageDisplayNameErr error
 }
 
 func (s *StubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
@@ -145,4 +155,13 @@ func (s *StubHarvester) DeletePVC(_ context.Context, _, name string) error {
 }
 func (s *StubHarvester) GetVMOSDiskImageID(_ context.Context, _, _ string) (string, error) {
 	return s.OSDiskImageID, s.OSDiskImageIDErr
+}
+func (s *StubHarvester) ResolveVMImageDisplayName(_ context.Context, _, name string) (string, error) {
+	if s.ResolveVMImageDisplayNameErr != nil {
+		return "", s.ResolveVMImageDisplayNameErr
+	}
+	if s.OSDiskImageDisplayName != "" {
+		return s.OSDiskImageDisplayName, nil
+	}
+	return name, nil
 }

@@ -657,6 +657,22 @@ func (c *TypedClient) GetVMOSDiskImageID(ctx context.Context, ns, vmName string)
 	return "", nil
 }
 
+// ResolveVMImageDisplayName returns the DisplayName of the
+// VirtualMachineImage identified by ns/name. See the ClientInterface doc
+// comment for why this indirection exists: GetVMOSDiskImageID's caller needs
+// to compare against internal/catalog's human-readable ImageName strings,
+// not the real (often auto-generated) object name imageID carries.
+func (c *TypedClient) ResolveVMImageDisplayName(ctx context.Context, ns, name string) (string, error) {
+	img, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineImages(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return img.Spec.DisplayName, nil
+}
+
 // SwapVMOSDisk repoints the "os-disk" volumeClaimTemplates entry to a new
 // revision-suffixed PVC backed by newImageRef's StorageClass, and repoints
 // the "os-disk" volume's claimName to match. Mirrors ResizeDataVolume's

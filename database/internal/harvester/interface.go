@@ -67,6 +67,18 @@ type ClientInterface interface {
 	// DBInstance.Status.CurrentImageRevision independent of whether a prior
 	// status write persisted. Returns ("", nil) if not yet determinable.
 	GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error)
+
+	// ResolveVMImageDisplayName returns the DisplayName of the
+	// VirtualMachineImage identified by ns/name — the inverse of
+	// ResolveVMImage's own displayName-fallback lookup. GetVMOSDiskImageID
+	// observes a real Harvester object identity off the VM's live os-disk
+	// PVC annotation, but internal/catalog is keyed by the human-readable
+	// strings operators write into BakedImages; on a real cluster, imported
+	// images commonly get an auto-generated object name with that string
+	// only on DisplayName, so self-heal must translate back through this
+	// before comparing against the catalog. Returns ("", nil), not an
+	// error, if the image no longer exists.
+	ResolveVMImageDisplayName(ctx context.Context, ns, name string) (string, error)
 }
 
 // ResolvedVMImage contains the provider-neutral image fields needed to build a

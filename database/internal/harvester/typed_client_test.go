@@ -358,6 +358,40 @@ func TestDeletePVCDeletesExisting(t *testing.T) {
 	}
 }
 
+// On a real cluster, an imported VirtualMachineImage's object name is
+// typically auto-generated (e.g. "image-c8sqv") and only its DisplayName
+// carries the human-readable string internal/catalog is keyed by
+// (testTypedVMImage's Name="ubuntu-22.04"/DisplayName="Ubuntu 22.04" already
+// models that divergence). GetVMOSDiskImageID's caller needs the DisplayName
+// to compare against the catalog — this pins that ResolveVMImageDisplayName
+// returns it, not the object name it was called with.
+func TestResolveVMImageDisplayName(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	client := newTestTypedClient(image)
+
+	got, err := client.ResolveVMImageDisplayName(ctx, image.Namespace, image.Name)
+	if err != nil {
+		t.Fatalf("ResolveVMImageDisplayName returned error: %v", err)
+	}
+	if got != image.Spec.DisplayName {
+		t.Fatalf("ResolveVMImageDisplayName = %q, want %q", got, image.Spec.DisplayName)
+	}
+}
+
+// A deleted/never-imported image is "not yet determinable", same contract as
+// GetVMOSDiskImageID — not an error the caller should treat as fatal.
+func TestResolveVMImageDisplayNameReturnsEmptyOnNotFound(t *testing.T) {
+	ctx := context.Background()
+	got, err := newTestTypedClient().ResolveVMImageDisplayName(ctx, "default", "does-not-exist")
+	if err != nil {
+		t.Fatalf("ResolveVMImageDisplayName returned error for a missing image: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("ResolveVMImageDisplayName = %q, want empty for a missing image", got)
+	}
+}
+
 // CreatePostgresVM no longer generates credentials/cloud-init (PR8 — that
 // moved to internal/credentials + internal/resource; the reuse-on-reentry
 // invariant is now tested there). It only builds the VM against an
