@@ -105,6 +105,35 @@ func TestEnsurePreflightUnsupportedEngineVersionIsTerminal(t *testing.T) {
 	}
 }
 
+// Regression guard: once an instance has been provisioned (AppliedSpec set),
+// preflight must never Terminal-reject it just because the catalog's latest
+// entry for its OS stream later drops its engineVersion — that would flip an
+// already-available instance to incompatible-parameters purely from a
+// catalog edit, with no repave ever attempted. Reporting the EOL is
+// ensureRepave's job (ImageDrift=EngineVersionEOL); preflight must stay
+// Satisfied here.
+func TestEnsurePreflightExistingInstanceEngineVersionEOLIsNotTerminal(t *testing.T) {
+	stub := &stubHarvester{}
+	r := &testHarness{Dependencies: Dependencies{Harvester: stub}}
+	inst := newProvisionInst()
+	inst.Spec.EngineVersion = "15" // not in defaultBakedImageName's ["16","17"]
+	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{NetworkRef: inst.Spec.NetworkRef, EngineVersion: inst.Spec.EngineVersion}
+	inst.Status.CurrentImageRevision = "old-revision"
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied — an existing instance must never be rejected for a catalog-only change", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("PreflightReady = %+v, want True", cond)
+	}
+	if stub.LastVMImageRef != "" {
+		t.Fatalf("ResolveVMImage should not be called for an already-provisioned instance, got ref %q", stub.LastVMImageRef)
+	}
+}
+
 func TestEnsurePreflightUsesConfiguredClassAndOSVersionDefault(t *testing.T) {
 	const customOSVersion = "test-custom-version"
 	const customImageName = "test-custom-image"
