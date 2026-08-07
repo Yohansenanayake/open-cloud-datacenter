@@ -35,6 +35,7 @@ func testVMCreateParams() VMCreateParams {
 		CPUCores:               2,
 		MemoryMB:               4096,
 		OSImage:                "ubuntu-22.04",
+		OSDiskPVCName:          "pg-orders-os",
 		DataVolumeRef:          "pg-orders-data",
 		DataVolumeSizeGB:       20,
 		DataVolumeStorageClass: "harvester-longhorn",
@@ -314,6 +315,7 @@ func TestSwapVMOSDiskDoesNotCollideAcrossInstances(t *testing.T) {
 	firstParams := testVMCreateParams()
 	secondParams := testVMCreateParams()
 	secondParams.ID = "billing"
+	secondParams.OSDiskPVCName = "pg-billing-os"
 	secondParams.DataVolumeRef = "pg-billing-data"
 	secondParams.CloudInitSecretName = "pg-billing-cloudinit"
 	if _, err := client.CreatePostgresVM(ctx, firstParams); err != nil {

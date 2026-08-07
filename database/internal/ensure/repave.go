@@ -219,7 +219,7 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// VM is down: swap the OS disk, then delete the old one. No
 	// ClearDataVolumeOwnerRef/DeleteDataVolume — decision #5 drops both as
 	// unnecessary for this storage backend.
-	oldPVC, newPVC, err := r.Harvester.SwapVMOSDisk(ctx, inst.Namespace, vmNameFor(inst), inst.Name, entry.ImageName)
+	oldPVC, newPVC, err := r.Harvester.SwapVMOSDisk(ctx, inst.Namespace, vmNameFor(inst), diskIdentifierFor(inst), entry.ImageName)
 	if err != nil {
 		return Transient(err) // status untouched — don't claim a swap that didn't happen
 	}

@@ -110,6 +110,7 @@ type VMCreateParams struct {
 	CPUCores               int
 	MemoryMB               int
 	OSImage                string
+	OSDiskPVCName          string
 	DataVolumeRef          string
 	DataVolumeSizeGB       int
 	DataVolumeStorageClass string

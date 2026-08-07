@@ -453,7 +453,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 
 	labels := map[string]string{dbaasv1.LabelInstance: p.ID, dbaasv1.LabelRole: "primary"}
 	templateLabels := map[string]string{dbaasv1.LabelInstance: p.ID}
-	osPVCName := fmt.Sprintf("pg-%s-os", p.ID)
+	osPVCName := p.OSDiskPVCName
 	dataPVCName := p.DataVolumeRef
 	if dataPVCName == "" {
 		dataPVCName = DataVolumeName(p.ID)

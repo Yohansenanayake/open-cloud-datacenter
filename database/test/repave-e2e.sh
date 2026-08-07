@@ -157,10 +157,29 @@ wait_leave_phase() { # wait until phase != $1 (repave kicks off)
   done
 }
 
-os_pvcs() { # list this instance's OS disk PVC names (exact or -suffixed)
-  kubectl get pvc -n "$NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
-    grep -E "^pg-${ID}-os(-|$)" || true
+# disk_identifier mirrors diskIdentifierFor in internal/ensure/vm.go: OS/data
+# disk names are "pg-<ID>-<uid8>-{os,data}", not plain "pg-<ID>-*" (T004) —
+# folding in the first 8 chars of the DBInstance's own UID means a
+# deleted-and-recreated instance (same $ID, new UID) never collides with a
+# disk leaked by its previous incarnation.
+disk_identifier() { # disk_identifier -> <ID>-<uid8>
+  local uid; uid=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null | tr -d '-')
+  echo "${ID}-${uid:0:8}"
 }
+
+os_pvcs() { # list this instance's OS disk PVC names (exact or -suffixed)
+  local base; base="pg-$(disk_identifier)-os"
+  kubectl get pvc -n "$NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+    grep -E "^${base}(-|$)" || true
+}
+
+# data_pvc_name/os_pvc_name read the authoritative current name straight from
+# status.resources — same principle db_exec already follows: never
+# reconstruct a disk name by pattern-matching when the controller has
+# already recorded the real one (T004: pattern-matching pg-<id>-data/os
+# alone no longer works now that names carry the disk-identifier's uid8).
+data_pvc_name() { kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.resources.dataVolumeName}' 2>/dev/null; }
+os_pvc_name()   { kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.resources.osDiskPVCName}' 2>/dev/null; }
 
 resolve_dbname() {
   # Mirrors the controller's own fallback exactly (internal/ensure/vm.go:
@@ -320,8 +339,9 @@ stage1() {
 
   local pvcs; pvcs=$(os_pvcs)
   [ -n "$pvcs" ] && pass "OS PVC exists: $pvcs" || fail "no OS PVC found"
-  kubectl get pvc "pg-${ID}-data" -n "$NS" >/dev/null 2>&1 \
-    && pass "data PVC pg-${ID}-data exists" || fail "data PVC missing"
+  local data_pvc; data_pvc=$(data_pvc_name)
+  kubectl get pvc "$data_pvc" -n "$NS" >/dev/null 2>&1 \
+    && pass "data PVC $data_pvc exists" || fail "data PVC missing"
 
   local base_pvc; base_pvc=$(os_pvcs | head -1)
   local base_sc; base_sc=$(kubectl get pvc "$base_pvc" -n "$NS" -o jsonpath='{.spec.storageClassName}' 2>/dev/null)
@@ -432,7 +452,7 @@ stage2() {
   [ "$count" = "1" ] && pass "exactly one OS PVC: $new_pvc" || fail "expected 1 OS PVC, got: $pvcs"
   [ "$new_pvc" != "$baseline_os_pvc" ] && pass "PVC name changed ($baseline_os_pvc -> $new_pvc)" \
     || fail "PVC name unchanged — disk was NOT swapped"
-  echo "$new_pvc" | grep -qE "^pg-${ID}-os-." && pass "new name is revision-suffixed" \
+  echo "$new_pvc" | grep -qE "^pg-$(disk_identifier)-os-." && pass "new name is revision-suffixed" \
     || fail "new PVC not revision-suffixed: $new_pvc"
 
   local new_vmi_uid; new_vmi_uid=$(vmi_uid)
@@ -440,9 +460,10 @@ stage2() {
     && pass "VMI UID changed ($baseline_vmi_uid -> $new_vmi_uid) — VM actually restarted" \
     || fail "VMI UID unchanged ($new_vmi_uid) — VM was never restarted for the repave"
 
-  kubectl get pvc "pg-${ID}-data" -n "$NS" >/dev/null 2>&1 \
-    && pass "data PVC pg-${ID}-data name unchanged (repave only swaps the OS disk)" \
-    || fail "data PVC pg-${ID}-data missing after repave"
+  local data_pvc; data_pvc=$(data_pvc_name)
+  kubectl get pvc "$data_pvc" -n "$NS" >/dev/null 2>&1 \
+    && pass "data PVC $data_pvc name unchanged (repave only swaps the OS disk)" \
+    || fail "data PVC $data_pvc missing after repave"
   local new_connect_uid new_cacrt
   new_connect_uid=$(kubectl get secret "pg-${ID}-connect" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
   new_cacrt=$(kubectl get secret "pg-${ID}-connect" -n "$NS" -o jsonpath='{.data.ca\.crt}' 2>/dev/null)
@@ -474,7 +495,7 @@ stage2() {
   kubectl get pvc "$baseline_os_pvc" -n "$NS" >/dev/null 2>&1 \
     && fail "old OS PVC $baseline_os_pvc still exists — should have been deleted after the swap" \
     || pass "old OS PVC $baseline_os_pvc is gone"
-  [ -z "$(kubectl get dv -n "$NS" -o name 2>/dev/null | grep "pg-${ID}-os")" ] \
+  [ -z "$(kubectl get dv -n "$NS" -o name 2>/dev/null | grep "pg-$(disk_identifier)-os")" ] \
     && pass "no stray DataVolumes" || fail "stray DataVolume present"
 
   say "decision #16 regression: PendingDeleteOSDiskPVCName cleared after a successful swap"
@@ -544,7 +565,7 @@ stage3() {
   wait_phase "available" || die "re-applied instance never became available"
   echo
 
-  local created; created=$(kubectl get pvc "pg-${ID}-os" -n "$NS" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+  local created; created=$(kubectl get pvc "$(os_pvc_name)" -n "$NS" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
   [ -n "$created" ] && [[ "$created" > "$before" || "$created" == "$before" ]] \
     && pass "fresh OS PVC created at $created" || fail "OS PVC missing or predates re-apply ($created) — old disk reattached?"
 
