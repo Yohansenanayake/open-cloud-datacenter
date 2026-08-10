@@ -61,6 +61,10 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.DatabaseDefaults.OSVersion) == "" {
 		return fmt.Errorf("databaseDefaults.osVersion must not be empty")
 	}
+	if problems := validation.IsDNS1123Label(c.Infrastructure.Harvester.ImageNamespace); len(problems) > 0 {
+		return fmt.Errorf("infrastructure.harvester.imageNamespace %q is invalid: %s",
+			c.Infrastructure.Harvester.ImageNamespace, strings.Join(problems, ", "))
+	}
 	if c.Observability.Grafana.BaseURL != "" {
 		parsed, err := url.ParseRequestURI(c.Observability.Grafana.BaseURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {

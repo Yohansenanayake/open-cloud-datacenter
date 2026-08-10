@@ -104,6 +104,18 @@ func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName
 		inst.Status.Resources.DataVolumeName = dataVolumeNameFor(inst)
+		// Unlike the two fields above, OSDiskPVCName can't be recomputed
+		// deterministically once a repave has happened (it becomes
+		// revision-suffixed) — observed from the live VM instead, the same
+		// way repave's self-heal observes CurrentImageRevision via
+		// GetVMOSDiskImageID.
+		osDiskPVCName, err := r.Harvester.GetVMOSDiskPVCName(ctx, inst.Namespace, vmName)
+		if err != nil {
+			return Transient(err)
+		}
+		if osDiskPVCName != "" {
+			inst.Status.Resources.OSDiskPVCName = osDiskPVCName
+		}
 		inst.SetCurrentCondition(dbaasv1.ConditionVMReady, metav1.ConditionTrue,
 			dbaasv1.ReasonVMPresent, "virtualmachine exists")
 		return Satisfied()

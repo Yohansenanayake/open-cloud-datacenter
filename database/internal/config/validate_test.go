@@ -59,3 +59,15 @@ func TestValidateRejectsEmptyOSVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRejectsInvalidImageNamespace(t *testing.T) {
+	for _, value := range []string{"", "Default", "my_namespace"} {
+		cfg := Default()
+		cfg.Infrastructure.Harvester.ImageNamespace = value
+
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "infrastructure.harvester.imageNamespace") {
+			t.Fatalf("Validate() with ImageNamespace = %q error = %v, want infrastructure.harvester.imageNamespace field", value, err)
+		}
+	}
+}

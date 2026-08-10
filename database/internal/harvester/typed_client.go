@@ -619,18 +619,18 @@ func ignoreNotFound(err error) error {
 // PVC template to (see buildPostgresVM's PVCDisk("os-disk", ...) call).
 const osDiskVolumeName = "os-disk"
 
-// GetVMOSDiskImageID returns the harvesterhci.io/imageId annotation
-// ("namespace/name") Harvester stamps on the VM's current OS-disk PVC —
-// ground truth for the running image, independent of any DBInstance status
-// field. Returns ("", nil), not an error, if it can't be determined yet
-// (e.g. VM not created).
-func (c *TypedClient) GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error) {
+// currentOSDiskPVCName fetches vmName and returns its current "os-disk"
+// volume's claimName. Returns ("", nil, nil), not an error, if the VM or
+// that volume doesn't exist yet — shared by GetVMOSDiskImageID and
+// GetVMOSDiskPVCName so both self-heal helpers observe the same live state
+// through one code path.
+func (c *TypedClient) currentOSDiskPVCName(ctx context.Context, ns, vmName string) (string, *kubevirtv1.VirtualMachine, error) {
 	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", nil
+			return "", nil, nil
 		}
-		return "", err
+		return "", nil, err
 	}
 
 	volIdx := -1
@@ -641,9 +641,21 @@ func (c *TypedClient) GetVMOSDiskImageID(ctx context.Context, ns, vmName string)
 		}
 	}
 	if volIdx == -1 || vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim == nil {
-		return "", nil
+		return "", vm, nil
 	}
-	currentPVCName := vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName
+	return vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName, vm, nil
+}
+
+// GetVMOSDiskImageID returns the harvesterhci.io/imageId annotation
+// ("namespace/name") Harvester stamps on the VM's current OS-disk PVC —
+// ground truth for the running image, independent of any DBInstance status
+// field. Returns ("", nil), not an error, if it can't be determined yet
+// (e.g. VM not created).
+func (c *TypedClient) GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error) {
+	currentPVCName, vm, err := c.currentOSDiskPVCName(ctx, ns, vmName)
+	if err != nil || currentPVCName == "" {
+		return "", err
+	}
 
 	pvcs, err := VolumeClaimTemplates(vm)
 	if err != nil {
@@ -655,6 +667,15 @@ func (c *TypedClient) GetVMOSDiskImageID(ctx context.Context, ns, vmName string)
 		}
 	}
 	return "", nil
+}
+
+// GetVMOSDiskPVCName returns the claimName of the VM's current "os-disk"
+// volume — ground truth for which PVC actually backs it, independent of any
+// DBInstance status field. Returns ("", nil), not an error, if it can't be
+// determined yet (e.g. VM not created).
+func (c *TypedClient) GetVMOSDiskPVCName(ctx context.Context, ns, vmName string) (string, error) {
+	name, _, err := c.currentOSDiskPVCName(ctx, ns, vmName)
+	return name, err
 }
 
 // ResolveVMImageDisplayName returns the DisplayName of the

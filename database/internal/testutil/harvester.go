@@ -86,6 +86,13 @@ type StubHarvester struct {
 	// matching every fixture that predates this field.
 	OSDiskImageDisplayName       string
 	ResolveVMImageDisplayNameErr error
+
+	// OSDiskPVCName is returned verbatim by GetVMOSDiskPVCName — set it to
+	// the claimName a test wants ensureVM's self-heal branch to observe on
+	// the VM's current OS-disk volume. Empty (the zero value) mirrors "VM
+	// not created yet / nothing to reconcile against".
+	OSDiskPVCName    string
+	OSDiskPVCNameErr error
 }
 
 func (s *StubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
@@ -155,6 +162,9 @@ func (s *StubHarvester) DeletePVC(_ context.Context, _, name string) error {
 }
 func (s *StubHarvester) GetVMOSDiskImageID(_ context.Context, _, _ string) (string, error) {
 	return s.OSDiskImageID, s.OSDiskImageIDErr
+}
+func (s *StubHarvester) GetVMOSDiskPVCName(_ context.Context, _, _ string) (string, error) {
+	return s.OSDiskPVCName, s.OSDiskPVCNameErr
 }
 func (s *StubHarvester) ResolveVMImageDisplayName(_ context.Context, _, name string) (string, error) {
 	if s.ResolveVMImageDisplayNameErr != nil {

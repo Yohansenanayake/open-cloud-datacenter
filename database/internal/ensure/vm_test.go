@@ -179,6 +179,41 @@ func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {
 	}
 }
 
+// OSDiskPVCName can't be recomputed by formula once a repave has happened
+// (it becomes revision-suffixed), unlike VMName/DataVolumeName — so if
+// status was lost/reset while the VM keeps running, this field must be
+// self-healed from live observation the same way its two siblings are.
+func TestEnsureVMSelfHealsOSDiskPVCNameWhenPresent(t *testing.T) {
+	inst := newProvisionInst()
+	stub := &stubHarvester{OSDiskPVCName: "pg-orders-ordersui-os-ubuntu-2404-postgres-v20260815"}
+	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
+
+	res := r.ensureVM(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
+	}
+	if inst.Status.Resources.OSDiskPVCName != stub.OSDiskPVCName {
+		t.Fatalf("OSDiskPVCName not self-healed from observation: got %q, want %q",
+			inst.Status.Resources.OSDiskPVCName, stub.OSDiskPVCName)
+	}
+}
+
+// A transient Harvester read failure while self-healing OSDiskPVCName must
+// not report Satisfied — the field could be silently left stale/empty.
+func TestEnsureVMSelfHealOSDiskPVCNameErrorIsTransient(t *testing.T) {
+	inst := newProvisionInst()
+	boom := errors.New("boom")
+	stub := &stubHarvester{OSDiskPVCNameErr: boom}
+	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
+
+	res := r.ensureVM(context.Background(), inst)
+
+	if res.Outcome != OutcomeTransient {
+		t.Fatalf("Outcome = %q, want Transient", res.Outcome)
+	}
+}
+
 // Out-of-band `kubectl delete vm`: the ref says the VM was created, but
 // observation says it is gone — the step must repair, not trust status.
 func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {

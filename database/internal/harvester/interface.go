@@ -68,6 +68,16 @@ type ClientInterface interface {
 	// status write persisted. Returns ("", nil) if not yet determinable.
 	GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error)
 
+	// GetVMOSDiskPVCName returns the claimName of the VM's current "os-disk"
+	// volume — ground truth for which PVC actually backs it, used to
+	// self-heal DBInstance.Status.Resources.OSDiskPVCName the same way
+	// GetVMOSDiskImageID self-heals CurrentImageRevision. Unlike the data
+	// disk's PVC name, this can't be recomputed deterministically once a
+	// repave has happened (it becomes revision-suffixed), so it must be
+	// observed from the live VM rather than derived. Returns ("", nil) if
+	// not yet determinable.
+	GetVMOSDiskPVCName(ctx context.Context, ns, vmName string) (string, error)
+
 	// ResolveVMImageDisplayName returns the DisplayName of the
 	// VirtualMachineImage identified by ns/name — the inverse of
 	// ResolveVMImage's own displayName-fallback lookup. GetVMOSDiskImageID
