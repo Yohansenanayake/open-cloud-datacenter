@@ -27,7 +27,7 @@ import (
 )
 
 func TestEffectiveEngineVersionExplicitSupported(t *testing.T) {
-	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}}
+	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}, DefaultEngineVersion: "17"}
 	version, ok := effectiveEngineVersion("16", entry)
 	if !ok || version != "16" {
 		t.Fatalf("effectiveEngineVersion(16) = (%q, %v), want (16, true)", version, ok)
@@ -35,31 +35,38 @@ func TestEffectiveEngineVersionExplicitSupported(t *testing.T) {
 }
 
 func TestEffectiveEngineVersionExplicitUnsupported(t *testing.T) {
-	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}}
+	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}, DefaultEngineVersion: "17"}
 	if _, ok := effectiveEngineVersion("15", entry); ok {
 		t.Fatal("effectiveEngineVersion(15) = ok, want not ok — 15 is not in SupportedEngineVersions")
 	}
 }
 
-// Unset defaults to the image's highest supported version — the runtime
-// bootstrap needs a concrete, non-empty version to create a cluster with,
-// and engineVersion was never enforced before the catalog existed, so a
-// hard reject here would break every instance that never set it.
-func TestEffectiveEngineVersionUnsetDefaultsToHighest(t *testing.T) {
-	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}}
+// Unset resolves to entry.DefaultEngineVersion — a curated field, not a
+// position/value derived from SupportedEngineVersions. The list here is
+// deliberately NOT sorted with the default last (or highest): {"16","17","18"}
+// with DefaultEngineVersion "17" proves resolution reads the explicit field
+// rather than falling back to "last element" or "max value" — either of
+// which would wrongly return "18" for this fixture.
+func TestEffectiveEngineVersionUnsetUsesConfiguredDefault(t *testing.T) {
+	entry := catalog.BakedImageEntry{
+		SupportedEngineVersions: []string{"16", "17", "18"},
+		DefaultEngineVersion:    "17",
+	}
 	version, ok := effectiveEngineVersion("", entry)
 	if !ok || version != "17" {
 		t.Fatalf("effectiveEngineVersion(\"\") = (%q, %v), want (17, true)", version, ok)
 	}
 }
 
-// A catalog entry with no supported versions at all is a data-integrity bug
-// (every real BakedImageEntry should list at least one) — there's nothing
-// to default to, so this must fail rather than pass an empty string through
-// to bootstrap.sh's pg_createcluster call.
-func TestEffectiveEngineVersionNoSupportedVersionsIsNotOK(t *testing.T) {
-	if _, ok := effectiveEngineVersion("", catalog.BakedImageEntry{}); ok {
-		t.Fatal("effectiveEngineVersion with no SupportedEngineVersions = ok, want not ok")
+// A catalog entry with no DefaultEngineVersion recorded is a data-integrity
+// bug (every real BakedImageEntry must set one, enforced by
+// internal/catalog's own test) — there's nothing to default to, so this must
+// fail rather than pass an empty string through to bootstrap.sh's
+// pg_createcluster call.
+func TestEffectiveEngineVersionNoDefaultRecordedIsNotOK(t *testing.T) {
+	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}}
+	if _, ok := effectiveEngineVersion("", entry); ok {
+		t.Fatal("effectiveEngineVersion with no DefaultEngineVersion = ok, want not ok")
 	}
 }
 

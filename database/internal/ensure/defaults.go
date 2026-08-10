@@ -34,26 +34,20 @@ func specPortWithDefault(port, configuredDefault int) int {
 	return port
 }
 
-// effectiveEngineVersion resolves inst.Spec.EngineVersion to the concrete
-// version that will actually be used to create a PostgreSQL cluster at boot
-// (internal/credentials's bootstrap.sh needs a real, non-empty version — it
-// runs `pg_createcluster --start <version> main`). spec.engineVersion is
-// +optional and, pre-catalog, was never enforced; rather than hard-rejecting
-// every instance that never set it (matching the source project's stricter
-// M1 behavior would do exactly that), an unset value defaults to the image's
-// highest supported version — SupportedEngineVersions' last entry. ok is
-// false only when there's truly nothing to pick: an explicit version not in
-// entry's list, or (a catalog data bug) an entry with no supported versions
-// at all. Shared by preflight/vm/repave so they can't drift on this
-// resolution independently.
+// effectiveEngineVersion resolves spec.EngineVersion to the concrete version
+// pg_createcluster boots with, falling back to entry.DefaultEngineVersion
+// when unset (spec.engineVersion was never enforced pre-catalog, so this
+// stays lenient rather than rejecting existing instances). ok is false when
+// there's nothing valid to resolve to. Shared by preflight/vm/repave so they
+// can't drift on this independently.
 func effectiveEngineVersion(specEngineVersion string, entry catalog.BakedImageEntry) (version string, ok bool) {
 	if specEngineVersion != "" {
 		return specEngineVersion, slices.Contains(entry.SupportedEngineVersions, specEngineVersion)
 	}
-	if len(entry.SupportedEngineVersions) == 0 {
+	if entry.DefaultEngineVersion == "" {
 		return "", false
 	}
-	return entry.SupportedEngineVersions[len(entry.SupportedEngineVersions)-1], true
+	return entry.DefaultEngineVersion, true
 }
 
 // resolveBakedImage looks up the current validated revision for

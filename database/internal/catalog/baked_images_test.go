@@ -16,7 +16,10 @@ limitations under the License.
 
 package catalog
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestLatestBakedImagesSeededStreamsResolve(t *testing.T) {
 	for _, osVersion := range []string{"22.04", "24.04"} {
@@ -46,6 +49,14 @@ func TestBakedImagesEntriesAreSelfConsistent(t *testing.T) {
 		}
 		if len(entry.SupportedEngineVersions) == 0 {
 			t.Fatalf("BakedImages[%q].SupportedEngineVersions is empty", name)
+		}
+		if entry.DefaultEngineVersion == "" {
+			t.Fatalf("BakedImages[%q].DefaultEngineVersion is empty", name)
+		}
+		if !slices.Contains(entry.SupportedEngineVersions, entry.DefaultEngineVersion) {
+			t.Fatalf("BakedImages[%q].DefaultEngineVersion = %q, not present in its own SupportedEngineVersions %v "+
+				"(effectiveEngineVersion would resolve an unset spec.engineVersion to a version this image doesn't support)",
+				name, entry.DefaultEngineVersion, entry.SupportedEngineVersions)
 		}
 	}
 }

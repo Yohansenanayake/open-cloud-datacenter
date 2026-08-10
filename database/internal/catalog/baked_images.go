@@ -31,6 +31,10 @@ type BakedImageEntry struct {
 	// SupportedEngineVersions are the spec.engineVersion values this
 	// revision supports.
 	SupportedEngineVersions []string
+	// DefaultEngineVersion is the version used when spec.engineVersion is
+	// unset. A curated choice, not derived from SupportedEngineVersions'
+	// order or values — must be one of its entries.
+	DefaultEngineVersion string
 }
 
 // BakedImageStream is the currently-active revision for one OS stream.
@@ -64,16 +68,22 @@ var BakedImages = map[string]BakedImageEntry{
 		ImageName:               "ubuntu-2204-postgres-v20260515",
 		OSVersion:               "22.04",
 		SupportedEngineVersions: []string{"15", "16", "17"},
+		DefaultEngineVersion:    "17",
 	},
 	"ubuntu-2404-postgres-v20260701": {
 		ImageName:               "ubuntu-2404-postgres-v20260701",
 		OSVersion:               "24.04",
 		SupportedEngineVersions: []string{"15", "16", "17", "18"},
+		DefaultEngineVersion:    "17",
 	},
 	"ubuntu-2404-postgres-v20260815": {
 		ImageName:               "ubuntu-2404-postgres-v20260815",
 		OSVersion:               "24.04",
+		// 17 dropped on purpose — this revision simulates the PG-major-EOL
+		// scenario (E1-E4 in database/test/README.md's test matrix), so 18
+		// is the only supported version and therefore the only valid default.
 		SupportedEngineVersions: []string{"18"},
+		DefaultEngineVersion:    "18",
 	},
 }
 

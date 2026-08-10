@@ -141,6 +141,7 @@ func TestEnsurePreflightUsesConfiguredClassAndOSVersionDefault(t *testing.T) {
 		ImageName:               customImageName,
 		OSVersion:               customOSVersion,
 		SupportedEngineVersions: []string{"16"},
+		DefaultEngineVersion:    "16",
 	}
 	catalog.LatestBakedImages[customOSVersion] = catalog.BakedImageStream{
 		Revision:        customImageName,

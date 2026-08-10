@@ -57,6 +57,7 @@ func init() {
 		ImageName:               defaultBakedImageName,
 		OSVersion:               osVersion,
 		SupportedEngineVersions: []string{"16", "17"},
+		DefaultEngineVersion:    "17",
 	}
 	catalog.LatestBakedImages[osVersion] = catalog.BakedImageStream{
 		Revision:        defaultBakedImageName,
