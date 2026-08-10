@@ -112,7 +112,7 @@ func TestBuildCloudInitActivatesRequestedEngineVersion(t *testing.T) {
 	userdata, _ := BuildCloudInit(p, testMaterial())
 
 	for _, want := range []string{
-		"ENGINE_VERSION=17",
+		"ENGINE_VERSION='17'",
 		`pg_dropcluster --stop "$ver" main`,
 		`pg_createcluster --start "${ENGINE_VERSION}" main`,
 		`PG_VER="${ENGINE_VERSION}"`,

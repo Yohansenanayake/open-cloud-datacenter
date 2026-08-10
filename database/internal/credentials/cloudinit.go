@@ -353,7 +353,7 @@ final_message: "DBaaS bootstrap complete for %s"
 		m.ReplPassword,
 		m.ExporterPassword,
 		p.MaxConnections,
-		p.EngineVersion,
+		shellSingleQuote(p.EngineVersion),
 		backupConfig,
 		caCertB64,
 		serverCertB64,

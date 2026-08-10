@@ -441,8 +441,8 @@ func TestEnsureRepaveTriggerAppliesSwapWhenDown(t *testing.T) {
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "tenant-a", Name: inst.Status.Resources.CloudInitSecretName}, &ci); err != nil {
 		t.Fatalf("cloud-init secret missing: %v", err)
 	}
-	if !strings.Contains(string(ci.Data["userdata"]), "ENGINE_VERSION=17") {
-		t.Fatalf("cloud-init userdata missing defaulted ENGINE_VERSION=17: %s", ci.Data["userdata"])
+	if !strings.Contains(string(ci.Data["userdata"]), "ENGINE_VERSION='17'") {
+		t.Fatalf("cloud-init userdata missing defaulted ENGINE_VERSION='17': %s", ci.Data["userdata"])
 	}
 }
 
@@ -524,6 +524,33 @@ func TestEnsureRepaveRecoversPendingDeleteBeforeAnythingElse(t *testing.T) {
 	}
 	if inst.Status.Resources.PendingDeleteOSDiskPVCName != "" {
 		t.Fatal("PendingDeleteOSDiskPVCName should be cleared once the recovery delete succeeds")
+	}
+}
+
+// A transient failure observing the VM's OS-disk image (self-heal, ordered
+// after recovery) must not prevent the independent pending-delete recovery
+// from running — DeletePVC doesn't depend on that observation succeeding.
+// Regression test for the two blocks having been in the wrong order: with
+// self-heal first, this exact scenario returned Transient before DeletePVC
+// was ever called, silently starving the recovery every pass image
+// observation failed.
+func TestEnsureRepaveRecoversPendingDeleteEvenWhenSelfHealObservationFails(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{NetworkRef: inst.Spec.NetworkRef}
+	inst.Status.Resources.PendingDeleteOSDiskPVCName = "pg-orders-os-stale"
+	stub := &stubHarvester{OSDiskImageIDErr: errors.New("boom")}
+	r := newTestHarness(t, stub, inst)
+
+	res := r.ensureRepave(context.Background(), inst)
+
+	if res.Outcome != OutcomeTransient {
+		t.Fatalf("res = %+v, want Transient (from the self-heal failure)", res)
+	}
+	if stub.DeletePVCCalls != 1 {
+		t.Fatalf("DeletePVCCalls = %d, want 1 — recovery must run before the failing self-heal observation", stub.DeletePVCCalls)
+	}
+	if inst.Status.Resources.PendingDeleteOSDiskPVCName != "" {
+		t.Fatal("PendingDeleteOSDiskPVCName should be cleared even though self-heal observation failed afterward")
 	}
 }
 

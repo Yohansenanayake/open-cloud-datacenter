@@ -106,10 +106,10 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 		t.Fatalf("cloud-init secret has empty userdata/networkdata: %+v", ci.Data)
 	}
 	// inst.Spec.EngineVersion is unset — effectiveEngineVersion must default
-	// to defaultBakedImageName's highest supported version ("17") rather
-	// than leaving bootstrap.sh's ENGINE_VERSION empty.
-	if !strings.Contains(string(ci.Data["userdata"]), "ENGINE_VERSION=17") {
-		t.Fatalf("cloud-init userdata missing defaulted ENGINE_VERSION=17: %s", ci.Data["userdata"])
+	// to defaultBakedImageName's configured DefaultEngineVersion ("17")
+	// rather than leaving bootstrap.sh's ENGINE_VERSION empty.
+	if !strings.Contains(string(ci.Data["userdata"]), "ENGINE_VERSION='17'") {
+		t.Fatalf("cloud-init userdata missing defaulted ENGINE_VERSION='17': %s", ci.Data["userdata"])
 	}
 	if refs := ci.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 		t.Fatalf("cloud-init secret owner refs = %+v, want controller-owned", refs)

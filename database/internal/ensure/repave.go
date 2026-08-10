@@ -51,6 +51,21 @@ func (*repaveStep) Name() string { return "repave" }
 // entirely: no drift is reported and a trigger annotation is left untouched
 // for the next pass to reconsider once the catalog is validated.
 func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
+	// Decision #16 — crash-safety recovery. Runs first, unconditionally,
+	// regardless of catalog state or image observability: if a prior pass
+	// recorded a pending delete and was interrupted before DeletePVC
+	// succeeded, retry it here rather than depending on SwapVMOSDisk's
+	// idempotent no-op to notice there's still cleanup to do. Ordered ahead
+	// of the self-heal block below on purpose — DeletePVC doesn't depend on
+	// a successful Harvester image observation, so a transient image-read
+	// failure there must not block this independent, always-retriable cleanup.
+	if pending := inst.Status.Resources.PendingDeleteOSDiskPVCName; pending != "" {
+		if err := r.Harvester.DeletePVC(ctx, inst.Namespace, pending); err != nil {
+			return Transient(err)
+		}
+		inst.Status.Resources.PendingDeleteOSDiskPVCName = ""
+	}
+
 	// Self-heal CurrentImageRevision from the VM's actual OS-disk PVC: a
 	// status write here can be lost to a conflicted patch with nothing else
 	// to ever retry it (every other writer is gated behind the one-shot
@@ -81,18 +96,6 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 				}
 			}
 		}
-	}
-
-	// Decision #16 — crash-safety recovery. Runs first, unconditionally,
-	// regardless of catalog state: if a prior pass recorded a pending delete
-	// and was interrupted before DeletePVC succeeded, retry it here rather
-	// than depending on SwapVMOSDisk's idempotent no-op to notice there's
-	// still cleanup to do.
-	if pending := inst.Status.Resources.PendingDeleteOSDiskPVCName; pending != "" {
-		if err := r.Harvester.DeletePVC(ctx, inst.Namespace, pending); err != nil {
-			return Transient(err)
-		}
-		inst.Status.Resources.PendingDeleteOSDiskPVCName = ""
 	}
 
 	defaults := r.databaseDefaults()
