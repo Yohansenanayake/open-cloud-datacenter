@@ -85,8 +85,10 @@ type InfrastructureConfig struct {
 
 type HarvesterConfig struct {
 	ManagementLogicalSwitch string `konf:"managementLogicalSwitch"`
-	// ImageNamespace is the Harvester namespace internal/catalog's baked
-	// prefix. Empty means ResolveVMImage falls back to "default".
+	// ImageNamespace is the Harvester namespace that baked-image names from
+	// internal/catalog resolve against when they carry no explicit
+	// "namespace/name" prefix. Empty means ResolveVMImage falls back to
+	// "default".
 	ImageNamespace string `konf:"imageNamespace"`
 }
 
