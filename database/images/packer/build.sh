@@ -11,7 +11,8 @@ OS_VERSION="${3:-22.04}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGES_YAML="$SCRIPT_DIR/images.yaml"
-USER_DATA="$SCRIPT_DIR/http/user-data"
+META_DATA_TEMPLATE="$SCRIPT_DIR/http/meta-data"
+USER_DATA_TEMPLATE="$SCRIPT_DIR/http/user-data"
 # A private, unpredictable directory rather than a PID-based /tmp path
 # (CWE-377): mktemp -d creates it atomically with 0700 perms, so another
 # user on the build host can't pre-place a symlink at a guessable name.
@@ -20,6 +21,16 @@ USER_DATA="$SCRIPT_DIR/http/user-data"
 # dir rather than being the mktemp target directly.
 KEY_DIR="$(mktemp -d)"
 KEY_FILE="$KEY_DIR/packer_key"
+# Rendered seed files (meta-data copied as-is, user-data with this run's
+# SSH key substituted in) live under the same private per-run KEY_DIR
+# rather than being written in place into the shared http/ directory —
+# two build.sh invocations against the same checkout (e.g. building the
+# 22.04 and 24.04 streams concurrently) would otherwise sed-edit the same
+# http/user-data file, and whichever build's ISO-bake step reads it last
+# wins, leaving the other build's VM with the wrong SSH key baked in and
+# no way for Packer's communicator to authenticate against it.
+SEED_DIR="$KEY_DIR/seed"
+mkdir -p "$SEED_DIR"
 
 # Install yq if not present
 if ! command -v yq &>/dev/null; then
@@ -109,16 +120,15 @@ if ! command -v qemu-system-x86_64 &>/dev/null; then
 fi
 
 cleanup() {
-  sed -i "s|ssh-ed25519 .*packer-build|PACKER_SSH_PUBLIC_KEY_PLACEHOLDER|g" \
-    "$USER_DATA" 2>/dev/null || true
   rm -rf "$KEY_DIR"
 }
 trap cleanup EXIT
 
 ssh-keygen -t ed25519 -f "$KEY_FILE" -N "" -C "packer-build" -q
 
-sed -i "s|PACKER_SSH_PUBLIC_KEY_PLACEHOLDER|$(cat ${KEY_FILE}.pub)|g" \
-  "$USER_DATA"
+cp "$META_DATA_TEMPLATE" "$SEED_DIR/meta-data"
+sed "s|PACKER_SSH_PUBLIC_KEY_PLACEHOLDER|$(cat ${KEY_FILE}.pub)|g" \
+  "$USER_DATA_TEMPLATE" > "$SEED_DIR/user-data"
 
 export PACKER_SSH_PRIVATE_KEY_FILE="$KEY_FILE"
 
@@ -132,6 +142,7 @@ packer build \
   -var "os_version=${OS_VERSION}" \
   -var "iso_url=${ISO_URL}" \
   -var "iso_checksum=${ISO_CHECKSUM}" \
+  -var "seed_dir=${SEED_DIR}" \
   ubuntu-postgres.pkr.hcl
 
 echo "Built: output-ubuntu-${OS_SHORT}-postgres-v${BUILD_DATE}/ubuntu-${OS_SHORT}-postgres-v${BUILD_DATE}.qcow2"

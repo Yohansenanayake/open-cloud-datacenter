@@ -24,6 +24,12 @@ variable "iso_checksum" {
   }
 }
 variable "ssh_private_key_file" { default = env("PACKER_SSH_PRIVATE_KEY_FILE") }
+# Per-build seed directory (meta-data + user-data with this run's SSH key
+# already substituted in). Defaults to the shared ./http for a direct
+# `packer build` invocation, but build.sh always overrides this with a
+# private per-run directory — see build.sh for why sharing ./http across
+# concurrent builds is unsafe.
+variable "seed_dir" { default = "./http" }
 
 locals {
   os_short   = replace(var.os_version, ".", "")
@@ -36,7 +42,7 @@ source "qemu" "ubuntu-postgres" {
   iso_checksum = var.iso_checksum
   disk_image   = true
 
-  cd_files = ["./http/meta-data", "./http/user-data"]
+  cd_files = ["${var.seed_dir}/meta-data", "${var.seed_dir}/user-data"]
   cd_label = "cidata"
 
   output_directory = local.output_dir
