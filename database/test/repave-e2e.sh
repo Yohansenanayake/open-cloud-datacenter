@@ -506,7 +506,7 @@ stage2() {
   [ -z "$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.metadata.annotations.dbaas\.opencloud\.wso2\.com/repave-trigger}')" ] \
     && pass "repave-trigger annotation cleared" || fail "annotation still present"
   [ "$(image_drift_status)" != "True" ] \
-    && pass "ImageDrift condition removed" || fail "ImageDrift still True"
+    && pass "ImageDrift no longer True (now $(image_drift_status)/$(image_drift_reason))" || fail "ImageDrift still True"
 
   say "Task 7/T002 regression: RepaveInProgress clears once settled (does not stay stuck)"
   local rip; rip=$(repave_status)

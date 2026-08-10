@@ -150,6 +150,9 @@ func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (v
 	if p.DataVolumeStorageClass == "" {
 		return vmName, fmt.Errorf("data volume storage class must not be empty")
 	}
+	if p.OSDiskPVCName == "" {
+		return vmName, fmt.Errorf("OS disk PVC name must not be empty")
+	}
 
 	image, err := c.ResolveVMImage(ctx, p.OSImage)
 	if err != nil {

@@ -69,6 +69,16 @@ func TestTypedCreatePostgresVMRequiresInjectedStorageClass(t *testing.T) {
 	}
 }
 
+func TestTypedCreatePostgresVMRequiresOSDiskPVCName(t *testing.T) {
+	params := testVMCreateParams()
+	params.OSDiskPVCName = ""
+
+	_, err := newTestTypedClient().CreatePostgresVM(context.Background(), params)
+	if err == nil || err.Error() != "OS disk PVC name must not be empty" {
+		t.Fatalf("CreatePostgresVM() error = %v, want missing OS disk PVC name error", err)
+	}
+}
+
 func TestResolveVMImage(t *testing.T) {
 	ctx := context.Background()
 	image := testTypedVMImage()
