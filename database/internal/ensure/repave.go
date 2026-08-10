@@ -120,7 +120,13 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// (ReasonImageUpToDate). Always written, never removed: an absent
 	// condition would mean Unknown, which is what the unresolvable-stream
 	// branch above legitimately reports.
-	if inst.Status.AppliedSpec != nil && inst.Status.CurrentImageRevision != stream.Revision {
+	switch {
+	case inst.Status.AppliedSpec != nil && inst.Status.CurrentImageRevision == "":
+		inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionUnknown,
+			dbaasv1.ReasonCurrentImageRevisionUnknown,
+			"current image revision has not been observed yet — drift cannot be evaluated")
+
+	case inst.Status.AppliedSpec != nil && inst.Status.CurrentImageRevision != stream.Revision:
 		if _, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry); ok {
 			inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionTrue,
 				dbaasv1.ReasonOSUpdateAvailable,
@@ -132,7 +138,8 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 				fmt.Sprintf("engineVersion %q is not available in revision %q (available: %v) — migrate data before repaving",
 					inst.Spec.EngineVersion, stream.Revision, entry.SupportedEngineVersions))
 		}
-	} else {
+
+	default:
 		// Also covers the pre-provisioning window (AppliedSpec == nil): the
 		// VM has not been created yet, and when it is, ensureVM builds it
 		// from this very stream — so there is nothing to update to.

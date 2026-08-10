@@ -62,8 +62,9 @@ func noProviderCalls(stub *stubHarvester) bool {
 
 // wantDrift asserts ImageDrift's full three-valued state. ImageDrift is never
 // removed once a pass has evaluated it — absence would mean Unknown, which is
-// reserved for "no validated stream to compare against" — so every assertion
-// here checks Status and Reason rather than presence.
+// reserved for "drift could not be evaluated" (no validated stream to compare
+// against, or the applied revision itself hasn't been observed yet) — so
+// every assertion here checks Status and Reason rather than presence.
 func wantDrift(t *testing.T, inst *dbaasv1.DBInstance, status metav1.ConditionStatus, reason dbaasv1.ConditionReason) {
 	t.Helper()
 	c := inst.Status.GetCondition(dbaasv1.ConditionImageDrift)
@@ -128,6 +129,26 @@ func TestEnsureRepaveOnLatestRevisionNoDrift(t *testing.T) {
 	wantDrift(t, inst, metav1.ConditionFalse, dbaasv1.ReasonImageUpToDate)
 	if !noProviderCalls(stub) {
 		t.Fatal("no provider calls expected with no drift")
+	}
+}
+
+// An empty CurrentImageRevision (an instance provisioned before this field
+// existed, or a self-heal that couldn't match the VM's image back to the
+// catalog) must report Unknown, not True/OSUpdateAvailable — "" != stream.Revision
+// is always true, so without this guard every such instance would show a
+// false drift warning even if it's already on the current image.
+func TestEnsureRepaveEmptyCurrentImageRevisionReportsUnknown(t *testing.T) {
+	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	inst.Status.CurrentImageRevision = ""
+
+	res := r.ensureRepave(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied", res)
+	}
+	wantDrift(t, inst, metav1.ConditionUnknown, dbaasv1.ReasonCurrentImageRevisionUnknown)
+	if !noProviderCalls(stub) {
+		t.Fatal("no provider calls expected while drift can't be evaluated")
 	}
 }
 
