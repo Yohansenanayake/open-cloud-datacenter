@@ -127,7 +127,7 @@ trap cleanup EXIT
 ssh-keygen -t ed25519 -f "$KEY_FILE" -N "" -C "packer-build" -q
 
 cp "$META_DATA_TEMPLATE" "$SEED_DIR/meta-data"
-sed "s|PACKER_SSH_PUBLIC_KEY_PLACEHOLDER|$(cat ${KEY_FILE}.pub)|g" \
+sed "s|PACKER_SSH_PUBLIC_KEY_PLACEHOLDER|$(cat -- "${KEY_FILE}.pub")|g" \
   "$USER_DATA_TEMPLATE" > "$SEED_DIR/user-data"
 
 export PACKER_SSH_PRIVATE_KEY_FILE="$KEY_FILE"

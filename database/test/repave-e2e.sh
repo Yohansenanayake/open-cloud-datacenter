@@ -214,7 +214,8 @@ db_wait_ready() { # db_wait_ready [timeout] — block until a real login succeed
   # (internal/harvester/typed_client.go), so the master role is guaranteed to
   # exist by the time we get here — but only against a controller new enough
   # to set that probe. Against an older controller, or a VM created before the
-  # probe change, pg_isready alone flips Ready while bootstrap.sh is still
+  # probe change, pg_isready alone flips Ready while boots
+  trap.sh is still
   # short of its CREATE ROLE, and every login in that window fails with
   # "password authentication failed" (PostgreSQL's answer for a role that does
   # not exist yet).
@@ -505,8 +506,12 @@ stage2() {
 
   [ -z "$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.metadata.annotations.dbaas\.opencloud\.wso2\.com/repave-trigger}')" ] \
     && pass "repave-trigger annotation cleared" || fail "annotation still present"
-  [ "$(image_drift_status)" != "True" ] \
-    && pass "ImageDrift no longer True (now $(image_drift_status)/$(image_drift_reason))" || fail "ImageDrift still True"
+  local post_st post_rs; post_st=$(image_drift_status); post_rs=$(image_drift_reason)
+  if [ "$post_st" = "False" ] && [ "$post_rs" = "ImageUpToDate" ]; then
+    pass "ImageDrift=False/ImageUpToDate after the repave"
+  else
+    fail "ImageDrift=${post_st:-<absent>}/${post_rs:-<none>} after repave, want False/ImageUpToDate"
+  fi
 
   say "Task 7/T002 regression: RepaveInProgress clears once settled (does not stay stuck)"
   local rip; rip=$(repave_status)
