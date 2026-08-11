@@ -16,6 +16,11 @@ endif
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
 
+GUEST_TOOLS_VERSION ?= 0.1.0
+GUEST_TOOLS_BUILD_DIR ?= bin/guest-tools/amd64
+GUEST_TOOLS_DIST_DIR ?= dist/guest-tools
+GUEST_TOOLS_LDFLAGS = -s -w -X github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/guestops.Version=$(GUEST_TOOLS_VERSION)
+
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
@@ -111,6 +116,22 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+
+.PHONY: guest-tools
+guest-tools: guest-tools-binaries ## Build the amd64 DBaaS guest-tools Debian package and checksum.
+	./packaging/guest-tools/build-deb.sh \
+		"$(GUEST_TOOLS_VERSION)" \
+		"$(GUEST_TOOLS_DIST_DIR)" \
+		"$(GUEST_TOOLS_BUILD_DIR)/dbaas-console" \
+		"$(GUEST_TOOLS_BUILD_DIR)/dbaas-backupctl"
+
+.PHONY: guest-tools-binaries
+guest-tools-binaries: ## Build static amd64 DBaaS guest-tool binaries.
+	mkdir -p "$(GUEST_TOOLS_BUILD_DIR)"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(GUEST_TOOLS_LDFLAGS)" \
+		-o "$(GUEST_TOOLS_BUILD_DIR)/dbaas-console" ./cmd/dbaas-console
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(GUEST_TOOLS_LDFLAGS)" \
+		-o "$(GUEST_TOOLS_BUILD_DIR)/dbaas-backupctl" ./cmd/dbaas-backupctl
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

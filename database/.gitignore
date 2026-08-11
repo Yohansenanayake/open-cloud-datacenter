@@ -1,4 +1,4 @@
 bin/
 cover.out
 *-docs/
-
+/dist/guest-tools/
