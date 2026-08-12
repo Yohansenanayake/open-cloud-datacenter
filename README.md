@@ -21,25 +21,14 @@ Turn an on-prem datacenter into a self-service cloud. OCD is an open, modular co
 
 ## Architecture
 
-Two paths to provision a resource, one platform underneath:
+<p align="center">
+  <img src="docs/media/OCD-High-Level-Architecture-Rounded.png" alt="Open Cloud Data Center high-level architecture" width="100%">
+</p>
 
-```mermaid
-flowchart TD
-    U["you"] --> A["dcctl / cloud-ui"]
-    A --> B["controlplane<br/>(dispatches custom resources)"]
-    B --> C["operators<br/>(DBaaS · Key Vault)"]
-    C --> H
+The architecture is built around two complementary efforts:
 
-    P["platform admin"] --> T["terraform<br/>(IaC modules)"]
-    T --> H
-
-    H["Harvester + Rancher<br/>VMs · Kubernetes clusters · storage"]
-
-    style H fill:#2d5,stroke:#163,color:#000
-```
-
-- **Self-service path** — `dcctl` (CLI) or `cloud-ui` (web) talk to `controlplane`'s DC-API, which dispatches custom resources that the `operators` reconcile into real VMs on Harvester.
-- **Infrastructure path** — a platform admin applies `terraform` modules directly against Harvester + Rancher to stand up or operate the platform itself — including deploying the operators and the control plane's own hosting cluster.
+- **Open Cloud Data Center Core** — combines Rancher and Harvester with an operator extension layer for adding platform capabilities. It also includes Terraform modules and can be consumed through IaC or GitOps workflows.
+- **Data Center API** — abstracts the Core and other backend systems behind a unified control plane, accessible through the UI, CLI, and provider integrations.
 
 ## `terraform` — infrastructure as code
 
