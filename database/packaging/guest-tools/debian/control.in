@@ -1,0 +1,10 @@
+Package: dbaas-guest-tools
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: amd64
+Maintainer: WSO2 Open Cloud Datacenter <open-cloud-datacenter@wso2.com>
+Depends: sudo
+Description: Restricted DBaaS guest backup operations
+ Provides the serial-console login wrapper and privileged fixed-operation
+ helper used by the WSO2 DBaaS controller.

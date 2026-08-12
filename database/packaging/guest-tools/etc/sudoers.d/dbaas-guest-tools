@@ -1,0 +1,3 @@
+# The privileged helper accepts no operation on its command line. Requests are
+# validated independently on standard input by both guest binaries.
+dbaas-ops ALL=(root) NOPASSWD: /usr/lib/dbaas/dbaas-backupctl
