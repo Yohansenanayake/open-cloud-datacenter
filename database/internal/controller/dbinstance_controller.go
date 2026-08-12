@@ -82,6 +82,8 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
 // +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop;virtualmachines/restart,verbs=update
+// +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachineinstances/console,verbs=get
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;create;update
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=harvesterhci.io,resources=virtualmachineimages,verbs=get;list
 // External references the controller never creates: preflight only validates they
@@ -217,8 +219,8 @@ func (r *DBInstanceReconciler) removeDBInstanceFinalizer(ctx context.Context, ke
 	})
 }
 
-// deleteOperatorSecrets removes the two controller-private, cross-namespace
-// Secrets. It deletes by the recorded ref first, then sweeps the operator
+// deleteOperatorSecrets removes controller-private, cross-namespace Secrets.
+// It deletes by the recorded ref first, then sweeps the operator
 // namespace by the DBInstance-UID label as a backstop for refs lost to a
 // status reset or created before the ref was recorded — the label is the
 // only durable link once status is gone.

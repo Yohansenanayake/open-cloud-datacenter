@@ -30,6 +30,8 @@ func testMaterial() *Material {
 		AdminPassword:    "admin-pw",
 		ReplPassword:     "repl-pw",
 		ExporterPassword: "exporter-pw",
+		GuestUsername:    GuestOpsUsername,
+		GuestPassword:    "guest-pw",
 		TLS: &TLSBundle{
 			CACertPEM:     "CA-CERT-PEM",
 			CAKeyPEM:      "CA-KEY-PEM",
@@ -42,10 +44,36 @@ func testMaterial() *Material {
 func testBootstrapParams() BootstrapParams {
 	return BootstrapParams{
 		ID:             "orders",
+		DBInstanceUID:  "orders-uid",
 		DBName:         "orders",
 		Port:           5432,
 		MasterUser:     "dbadmin",
 		MaxConnections: 100,
+	}
+}
+
+func TestBuildCloudInitConfiguresRestrictedSerialUser(t *testing.T) {
+	userdata, _ := BuildCloudInit(testBootstrapParams(), testMaterial())
+
+	for _, want := range []string{
+		"users:\n  - default",
+		"name: dbaas-ops",
+		"homedir: /nonexistent",
+		"no_create_home: true",
+		"shell: /usr/lib/dbaas/dbaas-console",
+		"lock_passwd: false",
+		`plain_text_passwd: "guest-pw"`,
+		"path: /etc/dbaas/instance-uid",
+		"owner: root:root",
+		`permissions: "0644"`,
+		"      orders-uid",
+		"DenyUsers dbaas-ops",
+		"systemctl enable --now serial-getty@ttyS0.service",
+		"systemctl reload ssh.service || systemctl reload sshd.service || true",
+	} {
+		if !strings.Contains(userdata, want) {
+			t.Errorf("userdata missing %q", want)
+		}
 	}
 }
 

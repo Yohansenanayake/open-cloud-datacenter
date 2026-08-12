@@ -73,7 +73,7 @@ func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 		t.Fatal("connection secret should not exist before an endpoint is known")
 	}
 
-	// All three durable secrets actually exist in the cluster.
+	// All four durable secrets actually exist in the cluster.
 	var tenant corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-credentials"}, &tenant); err != nil {
 		t.Fatalf("tenant credentials secret missing: %v", err)
@@ -85,6 +85,13 @@ func TestEnsureCredentialsResolvesAndRecordsRefsWithoutEndpoint(t *testing.T) {
 	var tls corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "dbaas-system", Name: credentials.TLSSecretName(inst)}, &tls); err != nil {
 		t.Fatalf("TLS secret missing: %v", err)
+	}
+	var guest corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "dbaas-system", Name: credentials.GuestAccessSecretName(inst)}, &guest); err != nil {
+		t.Fatalf("guest access secret missing: %v", err)
+	}
+	if guest.StringData[credentials.GuestAccessUsernameKey] != credentials.GuestOpsUsername || guest.StringData[credentials.GuestAccessPasswordKey] == "" {
+		t.Fatalf("guest access secret contents = %+v", guest.StringData)
 	}
 }
 

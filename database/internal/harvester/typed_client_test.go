@@ -230,6 +230,13 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if vm.Spec.Template.Spec.Domain.Memory != nil && vm.Spec.Template.Spec.Domain.Memory.Guest != nil {
 		t.Fatalf("memory.guest is set before Harvester admission: %s", vm.Spec.Template.Spec.Domain.Memory.Guest.String())
 	}
+	devices := vm.Spec.Template.Spec.Domain.Devices
+	if devices.AutoattachSerialConsole == nil || !*devices.AutoattachSerialConsole {
+		t.Fatalf("autoattachSerialConsole = %v, want true", devices.AutoattachSerialConsole)
+	}
+	if devices.LogSerialConsole == nil || *devices.LogSerialConsole {
+		t.Fatalf("logSerialConsole = %v, want false", devices.LogSerialConsole)
+	}
 	memoryLimit := vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceMemory]
 	if got := memoryLimit.String(); got != "4Gi" {
 		t.Fatalf("memory limit = %q, want 4Gi", got)

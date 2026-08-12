@@ -133,6 +133,10 @@ guest-tools-binaries: ## Build static amd64 DBaaS guest-tool binaries.
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(GUEST_TOOLS_LDFLAGS)" \
 		-o "$(GUEST_TOOLS_BUILD_DIR)/dbaas-backupctl" ./cmd/dbaas-backupctl
 
+.PHONY: guestctl
+guestctl: ## Build the development controller-to-guest CLI.
+	go build -o bin/dbaas-guestctl ./cmd/dbaas-guestctl
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

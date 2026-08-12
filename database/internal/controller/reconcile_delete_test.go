@@ -16,7 +16,7 @@ limitations under the License.
 
 package controller
 
-// Deletion cleanup for the two controller-private, cross-namespace Secrets
+// Deletion cleanup for controller-private, cross-namespace Secrets
 // (PR8). They can't carry an owner reference (different namespace than the
 // DBInstance), so reconcileDelete must remove them itself: by the recorded
 // ref first, then a UID-label sweep as backstop for a ref lost to a status
@@ -82,13 +82,14 @@ func TestReconcileDeleteRemovesOperatorSecretsByRef(t *testing.T) {
 
 	internal := operatorSecret(credentials.InternalSecretName(inst), true)
 	tls := operatorSecret(credentials.TLSSecretName(inst), true)
-	r := newProvisionReconciler(t, &stubHarvester{}, inst, internal, tls)
+	guest := operatorSecret(credentials.GuestAccessSecretName(inst), true)
+	r := newProvisionReconciler(t, &stubHarvester{}, inst, internal, tls, guest)
 
 	if _, err := runReconcileDelete(ctx, r, inst); err != nil {
 		t.Fatalf("reconcileDelete: %v", err)
 	}
 
-	for _, name := range []string{credentials.InternalSecretName(inst), credentials.TLSSecretName(inst)} {
+	for _, name := range []string{credentials.InternalSecretName(inst), credentials.TLSSecretName(inst), credentials.GuestAccessSecretName(inst)} {
 		if err := r.Get(ctx, types.NamespacedName{Namespace: "dbaas-system", Name: name}, &corev1.Secret{}); err == nil {
 			t.Fatalf("operator secret %s still exists after delete", name)
 		}
@@ -109,7 +110,8 @@ func TestReconcileDeleteSweepsByUIDLabelWhenRefsMissing(t *testing.T) {
 
 	internal := operatorSecret(credentials.InternalSecretName(inst), true)
 	tls := operatorSecret(credentials.TLSSecretName(inst), true)
-	r := newProvisionReconciler(t, &stubHarvester{}, inst, internal, tls)
+	guest := operatorSecret(credentials.GuestAccessSecretName(inst), true)
+	r := newProvisionReconciler(t, &stubHarvester{}, inst, internal, tls, guest)
 
 	if _, err := runReconcileDelete(ctx, r, inst); err != nil {
 		t.Fatalf("reconcileDelete: %v", err)

@@ -32,8 +32,14 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
-// TenantCredentialsSecretName, InternalSecretName, and TLSSecretName are the
-// deterministic Secret names Resolver reads and creates. All three are
+const (
+	GuestOpsUsername       = "dbaas-ops"
+	GuestAccessUsernameKey = "username"
+	GuestAccessPasswordKey = "password"
+)
+
+// The functions below return the deterministic Secret names Resolver reads
+// and creates. All names are
 // recomputable from the live DBInstance (name/UID) — never status-memory.
 func TenantCredentialsSecretName(inst *dbaasv1.DBInstance) string {
 	return fmt.Sprintf("pg-%s-credentials", inst.Name)
@@ -47,6 +53,10 @@ func TLSSecretName(inst *dbaasv1.DBInstance) string {
 	return fmt.Sprintf("dbi-%s-tls", inst.UID)
 }
 
+func GuestAccessSecretName(inst *dbaasv1.DBInstance) string {
+	return fmt.Sprintf("dbi-%s-guest-access", inst.UID)
+}
+
 // Resolver resolves the durable credential/TLS Material for a DBInstance. It
 // generates each backing Secret exactly once and reuses it on every later
 // call — regenerating after a VM has already booted with the old password/CA
@@ -57,8 +67,8 @@ type Resolver struct {
 	// credentials Secret (same-namespace). May be nil in tests that don't
 	// assert on owner refs.
 	Scheme *runtime.Scheme
-	// OperatorNamespace is where the two controller-private Secrets (internal
-	// DB credentials, TLS) live — outside the tenant namespace.
+	// OperatorNamespace is where controller-private Secrets (internal DB
+	// credentials, guest access, and TLS) live — outside the tenant namespace.
 	OperatorNamespace string
 	// DefaultMasterUser is used when spec.masterUsername is omitted.
 	DefaultMasterUser string
@@ -84,6 +94,10 @@ func (r *Resolver) Resolve(ctx context.Context, inst *dbaasv1.DBInstance) (Resol
 	if err != nil {
 		return ResolveResult{}, err
 	}
+	guestUsername, guestPassword, guestChanged, err := r.getOrCreateGuestAccess(ctx, inst)
+	if err != nil {
+		return ResolveResult{}, err
+	}
 	vmName := harvester.VMName(inst.Name)
 	tls, tlsChanged, err := r.getOrCreateTLS(ctx, inst, vmName)
 	if err != nil {
@@ -96,9 +110,11 @@ func (r *Resolver) Resolve(ctx context.Context, inst *dbaasv1.DBInstance) (Resol
 			AdminPassword:    adminPassword,
 			ReplPassword:     replPw,
 			ExporterPassword: exporterPw,
+			GuestUsername:    guestUsername,
+			GuestPassword:    guestPassword,
 			TLS:              tls,
 		},
-		Changed: tenantChanged || internalChanged || tlsChanged,
+		Changed: tenantChanged || internalChanged || guestChanged || tlsChanged,
 	}, nil
 }
 
@@ -204,6 +220,53 @@ func (r *Resolver) getOrCreateInternal(ctx context.Context, inst *dbaasv1.DBInst
 	return replPw, exporterPw, true, nil
 }
 
+// getOrCreateGuestAccess resolves the operator-only serial login credential.
+// It is never exposed through DBInstance status or a tenant-namespace Secret.
+func (r *Resolver) getOrCreateGuestAccess(ctx context.Context, inst *dbaasv1.DBInstance) (username, password string, changed bool, err error) {
+	key := types.NamespacedName{Namespace: r.OperatorNamespace, Name: GuestAccessSecretName(inst)}
+	var sec corev1.Secret
+	if getErr := r.Client.Get(ctx, key, &sec); getErr == nil {
+		username, password, err = guestAccessMaterialFrom(&sec, key)
+		return username, password, false, err
+	} else if !apierrors.IsNotFound(getErr) {
+		return "", "", false, getErr
+	}
+
+	username = GuestOpsUsername
+	password, err = randomString(32)
+	if err != nil {
+		return "", "", false, fmt.Errorf("generate guest access password: %w", err)
+	}
+
+	newSec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+			Labels: map[string]string{
+				dbaasv1.LabelInstance:      inst.Name,
+				dbaasv1.LabelDBInstanceUID: string(inst.UID),
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			GuestAccessUsernameKey: username,
+			GuestAccessPasswordKey: password,
+		},
+	}
+	if err := r.Client.Create(ctx, newSec); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", "", false, err
+		}
+		var won corev1.Secret
+		if getErr := r.Client.Get(ctx, key, &won); getErr != nil {
+			return "", "", false, getErr
+		}
+		username, password, err = guestAccessMaterialFrom(&won, key)
+		return username, password, true, err
+	}
+	return username, password, true, nil
+}
+
 // getOrCreateTLS resolves the operator-namespace private TLS Secret: CA +
 // server cert signed by it, CN/SAN = vmName.
 func (r *Resolver) getOrCreateTLS(ctx context.Context, inst *dbaasv1.DBInstance, vmName string) (*TLSBundle, bool, error) {
@@ -275,6 +338,14 @@ func internalMaterialFrom(s *corev1.Secret, key types.NamespacedName) (string, s
 		return "", "", fmt.Errorf("internal credentials secret %s/%s is missing repl_password or exporter_password", key.Namespace, key.Name)
 	}
 	return repl, exporter, nil
+}
+
+func guestAccessMaterialFrom(s *corev1.Secret, key types.NamespacedName) (string, string, error) {
+	username, password := get(s, GuestAccessUsernameKey), get(s, GuestAccessPasswordKey)
+	if username != GuestOpsUsername || password == "" {
+		return "", "", fmt.Errorf("guest access secret %s/%s is missing a valid username or password", key.Namespace, key.Name)
+	}
+	return username, password, nil
 }
 
 func tlsBundleFrom(s *corev1.Secret, key types.NamespacedName) (*TLSBundle, error) {

@@ -153,6 +153,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	}
 	userdata, networkdata := credentials.BuildCloudInit(credentials.BootstrapParams{
 		ID:             inst.Name,
+		DBInstanceUID:  string(inst.UID),
 		DBName:         dbName,
 		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
 		MasterUser:     masterUser,

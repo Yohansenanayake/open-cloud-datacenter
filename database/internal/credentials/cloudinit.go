@@ -31,6 +31,7 @@ import (
 // into this package.
 type BootstrapParams struct {
 	ID             string
+	DBInstanceUID  string
 	DBName         string
 	Port           int
 	MasterUser     string
@@ -152,6 +153,16 @@ chpasswd:
 ssh_pwauth: true
 `, yamlFlowScalar(p.VMPassword))
 	}
+	guestUserBlock := fmt.Sprintf(`users:
+  - default
+  - name: %s
+    gecos: DBaaS operations
+    homedir: /nonexistent
+    no_create_home: true
+    shell: /usr/lib/dbaas/dbaas-console
+    lock_passwd: false
+    plain_text_passwd: %s
+`, m.GuestUsername, yamlFlowScalar(m.GuestPassword))
 
 	caCertB64 := base64.StdEncoding.EncodeToString([]byte(m.TLS.CACertPEM))
 	serverCertB64 := base64.StdEncoding.EncodeToString([]byte(m.TLS.ServerCertPEM))
@@ -164,7 +175,17 @@ ssh_pwauth: true
 	// so a top-level `packages:` directive is silently ignored. Doing the
 	// install from runcmd works on every flavour.
 	return fmt.Sprintf(`#cloud-config
-%swrite_files:
+%s%swrite_files:
+  - path: /etc/dbaas/instance-uid
+    owner: root:root
+    permissions: "0644"
+    content: |
+      %s
+  - path: /etc/ssh/sshd_config.d/99-dbaas-ops.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      DenyUsers dbaas-ops
   - path: /etc/dbaas/bootstrap.env
     permissions: "0600"
     content: |
@@ -299,12 +320,16 @@ ssh_pwauth: true
       # anyone who restores from a snapshot) read the admin password.
       shred -uz /etc/dbaas/bootstrap.env 2>/dev/null || rm -f /etc/dbaas/bootstrap.env
 runcmd:
+  - systemctl enable --now serial-getty@ttyS0.service
+  - systemctl reload ssh.service || systemctl reload sshd.service || true
   - mkdir -p /var/lib/dbaas
   - chown root:root /var/lib/dbaas
   - /etc/dbaas/bootstrap.sh
 final_message: "DBaaS bootstrap complete for %s"
 `,
+		guestUserBlock,
 		vmUserBlock,
+		p.DBInstanceUID,
 		p.ID,
 		p.DBName,
 		p.Port,

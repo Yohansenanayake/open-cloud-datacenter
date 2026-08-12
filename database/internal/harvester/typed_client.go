@@ -491,6 +491,8 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	vm.Annotations[util.AnnotationRunStrategy] = string(kubevirtv1.RunStrategyAlways)
 	vm.Spec.Template.Spec.Domain.CPU.Sockets = 1
 	vm.Spec.Template.Spec.Domain.CPU.Threads = 1
+	vm.Spec.Template.Spec.Domain.Devices.AutoattachSerialConsole = ptr(true)
+	vm.Spec.Template.Spec.Domain.Devices.LogSerialConsole = ptr(false)
 
 	// Readiness probe: pg_isready runs inside the guest via the QEMU guest agent
 	// virtio channel — no pod-network port exposure required.

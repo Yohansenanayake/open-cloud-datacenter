@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package credentials is the durable-material source of truth for a
-// DBInstance's admin/internal passwords and TLS bundle. Material is resolved
+// DBInstance's admin, internal, guest-access, and TLS material. Material is resolved
 // — generated at most once, reused forever after — by Resolver, never
 // regenerated inside the Harvester provisioning client: regenerating after a
 // VM has already booted with the old password/CA would diverge from the
@@ -41,6 +41,8 @@ type Material struct {
 	AdminPassword    string
 	ReplPassword     string
 	ExporterPassword string
+	GuestUsername    string
+	GuestPassword    string
 	TLS              *TLSBundle
 }
 

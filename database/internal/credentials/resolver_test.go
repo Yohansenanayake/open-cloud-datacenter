@@ -80,7 +80,7 @@ func TestTenantPasswordGenerationFailureIsReturned(t *testing.T) {
 	}
 }
 
-func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
+func TestResolveCreatesAllFourSecretsWithCorrectShapes(t *testing.T) {
 	ctx := context.Background()
 	inst := testInst()
 	r := newTestResolver(t)
@@ -98,6 +98,9 @@ func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
 	}
 	if m.ReplPassword == "" || m.ExporterPassword == "" {
 		t.Fatalf("Material internal fields = %+v", m)
+	}
+	if m.GuestUsername != GuestOpsUsername || m.GuestPassword == "" {
+		t.Fatalf("Material guest access fields = %+v", m)
 	}
 	if m.TLS == nil || m.TLS.CACertPEM == "" || m.TLS.CAKeyPEM == "" || m.TLS.ServerCertPEM == "" || m.TLS.ServerKeyPEM == "" {
 		t.Fatalf("Material TLS = %+v", m.TLS)
@@ -135,6 +138,24 @@ func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
 	}
 	if len(internal.GetOwnerReferences()) != 0 {
 		t.Fatalf("internal secret must not carry an owner ref (cross-namespace): %+v", internal.GetOwnerReferences())
+	}
+
+	// Guest-access Secret: operator-only, UID-labeled, and not owner-ref'd.
+	var guest corev1.Secret
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: "dbaas-system", Name: GuestAccessSecretName(inst)}, &guest); err != nil {
+		t.Fatalf("get guest access secret: %v", err)
+	}
+	if guest.StringData[GuestAccessUsernameKey] != GuestOpsUsername || guest.StringData[GuestAccessPasswordKey] != m.GuestPassword {
+		t.Fatalf("guest access secret contents = %+v", guest.StringData)
+	}
+	if len(guest.StringData) != 2 {
+		t.Fatalf("guest access secret keys = %+v, want username and password only", guest.StringData)
+	}
+	if guest.Labels[dbaasv1.LabelDBInstanceUID] != "orders-uid" || guest.Labels[dbaasv1.LabelInstance] != "orders" {
+		t.Fatalf("guest access secret labels = %+v", guest.Labels)
+	}
+	if len(guest.GetOwnerReferences()) != 0 {
+		t.Fatalf("guest access secret must not carry an owner ref (cross-namespace): %+v", guest.GetOwnerReferences())
 	}
 
 	// TLS Secret: operator namespace, kubernetes.io/tls, UID-labeled.
@@ -180,13 +201,16 @@ func TestResolveReusesExistingMaterialOnReentry(t *testing.T) {
 	if m1.ReplPassword != m2.ReplPassword || m1.ExporterPassword != m2.ExporterPassword {
 		t.Fatalf("internal passwords changed across re-entry")
 	}
+	if m1.GuestUsername != m2.GuestUsername || m1.GuestPassword != m2.GuestPassword {
+		t.Fatal("guest access material changed across re-entry")
+	}
 	if m1.TLS.CACertPEM != m2.TLS.CACertPEM || m1.TLS.ServerCertPEM != m2.TLS.ServerCertPEM {
 		t.Fatalf("TLS material changed across re-entry")
 	}
 }
 
 // Covers the asymmetric partial state: the cloud-init Secret is gone (scrubbed
-// or lost) but the three durable Secrets survive — Resolve must still reuse,
+// or lost) but the four durable Secrets survive — Resolve must still reuse,
 // never regenerate.
 func TestResolveReusesMaterialWhenOnlyDurableSecretsSurvive(t *testing.T) {
 	ctx := context.Background()
@@ -199,7 +223,7 @@ func TestResolveReusesMaterialWhenOnlyDurableSecretsSurvive(t *testing.T) {
 	}
 
 	// Nothing else to delete here — cloud-init is out of this package's scope
-	// (internal/resource owns it) — but re-resolving with all three durable
+	// (internal/resource owns it) — but re-resolving with all four durable
 	// Secrets already present must still be a pure read.
 	second, err := r.Resolve(ctx, inst)
 	if err != nil {
@@ -211,6 +235,9 @@ func TestResolveReusesMaterialWhenOnlyDurableSecretsSurvive(t *testing.T) {
 	m1, m2 := first.Material, second.Material
 	if *m1.TLS != *m2.TLS {
 		t.Fatalf("TLS bundle diverged: %+v vs %+v", m1.TLS, m2.TLS)
+	}
+	if m1.GuestPassword != m2.GuestPassword {
+		t.Fatal("guest password diverged")
 	}
 }
 
@@ -329,11 +356,24 @@ func TestResolveAdoptsAlreadyExistsRaceWinner(t *testing.T) {
 	}
 }
 
-func TestResolveRejectsMalformedInternalAndTLSSecrets(t *testing.T) {
+func TestResolveRejectsMalformedPrivateSecrets(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*Resolver, *dbaasv1.DBInstance) error
 	}{
+		{
+			name: "guest access has unexpected username",
+			mutate: func(r *Resolver, inst *dbaasv1.DBInstance) error {
+				key := types.NamespacedName{Namespace: r.OperatorNamespace, Name: GuestAccessSecretName(inst)}
+				var sec corev1.Secret
+				if err := r.Client.Get(context.Background(), key, &sec); err != nil {
+					return err
+				}
+				sec.StringData[GuestAccessUsernameKey] = "root"
+				delete(sec.Data, GuestAccessUsernameKey)
+				return r.Client.Update(context.Background(), &sec)
+			},
+		},
 		{
 			name: "internal credentials missing exporter password",
 			mutate: func(r *Resolver, inst *dbaasv1.DBInstance) error {

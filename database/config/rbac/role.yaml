@@ -43,6 +43,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - update
+- apiGroups:
   - cdi.kubevirt.io
   resources:
   - datavolumes
@@ -121,6 +129,12 @@ rules:
   - list
   - update
   - watch
+- apiGroups:
+  - subresources.kubevirt.io
+  resources:
+  - virtualmachineinstances/console
+  verbs:
+  - get
 - apiGroups:
   - subresources.kubevirt.io
   resources:

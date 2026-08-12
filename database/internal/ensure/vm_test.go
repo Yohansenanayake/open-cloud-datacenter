@@ -19,6 +19,7 @@ package ensure
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -95,6 +96,12 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 	if len(ci.Data["userdata"]) == 0 || len(ci.Data["networkdata"]) == 0 {
 		t.Fatalf("cloud-init secret has empty userdata/networkdata: %+v", ci.Data)
+	}
+	userdata := string(ci.Data["userdata"])
+	for _, want := range []string{"name: dbaas-ops", "orders-uid", "serial-getty@ttyS0.service"} {
+		if !strings.Contains(userdata, want) {
+			t.Fatalf("cloud-init userdata missing %q", want)
+		}
 	}
 	if refs := ci.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 		t.Fatalf("cloud-init secret owner refs = %+v, want controller-owned", refs)

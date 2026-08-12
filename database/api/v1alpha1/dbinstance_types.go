@@ -455,8 +455,7 @@ const (
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"
 	LabelRole     = "dbaas.opencloud.wso2.com/role"
 	LabelMetrics  = "dbaas.opencloud.wso2.com/metrics"
-	// LabelDBInstanceUID marks the two controller-private, cross-namespace
-	// Secrets (operator-namespace internal-credentials and TLS Secrets) with
+	// LabelDBInstanceUID marks controller-private, cross-namespace Secrets with
 	// the owning DBInstance's UID. Cross-namespace objects can't carry owner
 	// references, so this label is the backstop cleanup sweep alongside the
 	// recorded ref in status.resources.

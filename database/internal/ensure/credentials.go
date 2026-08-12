@@ -36,8 +36,8 @@ func newCredentialsStep(deps Dependencies) Step { return &credentialsStep{Depend
 func (*credentialsStep) Name() string { return "credentials" }
 
 // ensureCredentials resolves the durable credential/TLS material: the
-// tenant admin-credentials Secret, and the two operator-namespace private
-// Secrets (internal DB credentials, TLS). Material is generated at most once
+// tenant admin-credentials Secret, and the operator-namespace private Secrets
+// (internal DB credentials, guest access, and TLS). Material is generated at most once
 // per Secret — re-resolving on later passes only reads what already exists,
 // preserving the reuse-on-reentry invariant (a regenerated password/CA would
 // diverge from an already-booted VM). Creation stops this pass so the next pass
