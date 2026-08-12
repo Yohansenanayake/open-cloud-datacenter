@@ -56,7 +56,7 @@ func run(
 	args []string,
 	stdin io.Reader,
 	stdout, stderr io.Writer,
-	readFile func(string) ([]byte, error),//Reads the configured DBInstance UID.
+	readFile func(string) ([]byte, error), //Reads the configured DBInstance UID.
 	runner backupctlRunner,
 	configureTerminal terminalConfigurator,
 ) int {
