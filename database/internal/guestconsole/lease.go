@@ -82,14 +82,14 @@ func (m *LeaseManager) Acquire(ctx context.Context, namespace, instanceUID, hold
 	}
 
 	name := LeaseName(instanceUID)
-	//leases is a k8s client for the lease resource scoped to a namespace.
-	leases := m.Client.Leases(namespace)
-	existing, err := leases.Get(ctx, name, metav1.GetOptions{})
+	// leaseClient manages Lease resources in this namespace.
+	leaseClient := m.Client.Leases(namespace)
+	existing, err := leaseClient.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		// microtime used for timestamp
 		now := metav1.NewMicroTime(m.Now().UTC())
 		durationSeconds := int32(m.Duration / time.Second)
-		_, createErr := leases.Create(ctx, &coordinationv1.Lease{
+		_, createErr := leaseClient.Create(ctx, &coordinationv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Spec: coordinationv1.LeaseSpec{
 				HolderIdentity:       stringPointer(holder),
@@ -106,7 +106,7 @@ func (m *LeaseManager) Acquire(ctx context.Context, namespace, instanceUID, hold
 		}
 		// If the lease was created by another process between the Get and Create calls, we will get an AlreadyExists error.
 		// In that case, we will try to Get the lease again to check if it is available for us to acquire.
-		existing, err = leases.Get(ctx, name, metav1.GetOptions{})
+		existing, err = leaseClient.Get(ctx, name, metav1.GetOptions{})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get guest console lease: %w", err)
@@ -128,7 +128,7 @@ func (m *LeaseManager) Acquire(ctx context.Context, namespace, instanceUID, hold
 		existing.Spec.LeaseTransitions = &transitions
 	}
 	// k8s api server handles the final race condition check
-	if _, err := leases.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+	if _, err := leaseClient.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			return nil, ErrBusy
 		}
@@ -195,8 +195,8 @@ func (g *LeaseGuard) RenewLoop(ctx context.Context) <-chan error {
 }
 
 func (g *LeaseGuard) renew(ctx context.Context) error {
-	leases := g.manager.Client.Leases(g.namespace)
-	lease, err := leases.Get(ctx, g.name, metav1.GetOptions{})
+	leaseClient := g.manager.Client.Leases(g.namespace)
+	lease, err := leaseClient.Get(ctx, g.name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -207,15 +207,15 @@ func (g *LeaseGuard) renew(ctx context.Context) error {
 	durationSeconds := int32(g.manager.Duration / time.Second)
 	lease.Spec.RenewTime = &now
 	lease.Spec.LeaseDurationSeconds = &durationSeconds
-	_, err = leases.Update(ctx, lease, metav1.UpdateOptions{})
+	_, err = leaseClient.Update(ctx, lease, metav1.UpdateOptions{})
 	return err
 }
 
 // Release clears this guard's holder identity. It does not delete the Lease,
 // so every handoff retains Kubernetes resource-version conflict protection.
 func (g *LeaseGuard) Release(ctx context.Context) error {
-	leases := g.manager.Client.Leases(g.namespace)
-	lease, err := leases.Get(ctx, g.name, metav1.GetOptions{})
+	leaseClient := g.manager.Client.Leases(g.namespace)
+	lease, err := leaseClient.Get(ctx, g.name, metav1.GetOptions{})
 	// If the lease is already gone, we can consider it released.
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -231,7 +231,7 @@ func (g *LeaseGuard) Release(ctx context.Context) error {
 	now := metav1.NewMicroTime(g.manager.Now().UTC())
 	lease.Spec.HolderIdentity = nil
 	lease.Spec.RenewTime = &now
-	if _, err := leases.Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
+	if _, err := leaseClient.Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("release guest console lease: %w", err)
 	}
 	return nil
