@@ -36,8 +36,9 @@ import (
 )
 
 var (
-	ErrConnect              = errors.New("guest console connection failed")
-	ErrSerialDisabled       = errors.New("VMI serial console is disabled")
+	ErrConnect        = errors.New("guest console connection failed")
+	ErrSerialDisabled = errors.New("VMI serial console is disabled")
+	//unsafe because future operations will send credentials.
 	ErrSerialLoggingEnabled = errors.New("VMI serial console logging is enabled")
 	ErrLeaseRelease         = errors.New("guest console lease release failed")
 )
@@ -47,21 +48,27 @@ const consoleConnectRetryInterval = time.Second
 type ConsoleOpener func(ctx context.Context, namespace, vmiName string) (net.Conn, error)
 
 type Client struct {
-	VMIs              kvclientset.Interface
-	Leases            *LeaseManager
-	OpenConsole       ConsoleOpener
+	VMIs        kvclientset.Interface
+	Leases      *LeaseManager
+	OpenConsole ConsoleOpener
+	//Creates a unique identity for each console session.
 	NewHolderIdentity func() (string, error)
-	ConnectTimeout    time.Duration
-	SessionDeadline   time.Duration
-	SessionTimeouts   SessionTimeouts
+	//maximum time for VMI lookup, Lease acquisition, and console connection.
+	ConnectTimeout time.Duration
+	//overall maximum duration of the complete operation.
+	SessionDeadline time.Duration
+	//individual login, request, response, and logout limits.
+	SessionTimeouts SessionTimeouts
 }
 
+// This describes one guest console connection
 type Target struct {
 	Namespace   string
 	VMIName     string
 	InstanceUID string
 	Username    string
-	Password    []byte
+	//password is a byte slice so the CLI can overwrite its memory after use.
+	Password []byte
 }
 
 func NewClient(config *rest.Config) (*Client, error) {
@@ -85,7 +92,8 @@ func NewClient(config *rest.Config) (*Client, error) {
 }
 
 // Execute opens one exclusive console session and returns one validated guest
-// response. The request and console transcript are never included in errors.
+// response(controls one complete operation). The request and console transcript are never included in errors.
+// validate → inspect VMI → acquire Lease → open console → run session → close console → release Lease
 func (c *Client) Execute(ctx context.Context, target Target, request guestprotocol.Request) (response guestprotocol.Response, err error) {
 	if c == nil || c.VMIs == nil || c.Leases == nil || c.OpenConsole == nil || c.NewHolderIdentity == nil {
 		return response, errors.New("guest console client is incomplete")
@@ -100,12 +108,16 @@ func (c *Client) Execute(ctx context.Context, target Target, request guestprotoc
 		return response, errors.New("guest console client timeouts are invalid")
 	}
 
+	// applies 60 second overall limit. ctx derived from the caller's context so this operation
+	// can be ended by either caller cancellation , caller deadline or client's 60 second session deadline.
 	sessionCtx, cancelSession := context.WithTimeout(ctx, c.SessionDeadline)
 	defer cancelSession()
+	// Initial connection phase gets at most 10 seconds. Once connected, context is canceled and sessionctx will controls the protocol session.
 	connectCtx, cancelConnect := context.WithTimeout(sessionCtx, c.ConnectTimeout)
 	vmi, getErr := c.VMIs.KubevirtV1().VirtualMachineInstances(target.Namespace).Get(connectCtx, target.VMIName, metav1.GetOptions{})
 	if getErr != nil {
 		cancelConnect()
+		// raw error is not returned because it may contain sensitive information.
 		return response, ErrConnect
 	}
 	if vmi.Status.Phase != kubevirtv1.Running {
@@ -136,21 +148,33 @@ func (c *Client) Execute(ctx context.Context, target Target, request guestprotoc
 		return response, ErrConnect
 	}
 
+	// renewCtx stops Lease renewal when the session ends or cleanup begins.
 	renewCtx, cancelRenew := context.WithCancel(sessionCtx)
 	leaseErrors := guard.RenewLoop(renewCtx)
+
+	// operationCtx stops the active console session if its Lease is lost.
 	operationCtx, cancelOperation := context.WithCancelCause(sessionCtx)
+	renewalDone := make(chan struct{})
 	go func() {
+		defer close(renewalDone)
+		// A closed channel without an error means renewal stopped normally.
 		if leaseErr, ok := <-leaseErrors; ok && leaseErr != nil {
 			cancelOperation(leaseErr)
 		}
 	}()
+	// cleanup function
 	defer func() {
 		cancelOperation(nil)
 		cancelRenew()
+		// Wait for any in-flight renewal before releasing the Lease.
+		<-renewalDone
+		//By cleanup time, sessionCtx may already be expired. If release reused it, the Kubernetes API call would fail immediately and the Lease would remain held until expiry.
+		//The separate five-second context gives cleanup a short final opportunity to clear ownership
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer releaseCancel()
 		if releaseErr := guard.Release(releaseCtx); releaseErr != nil && err == nil {
 			response = guestprotocol.Response{}
+			//release error replaces the returned result only if the main operation had otherwise succeeded
 			err = ErrLeaseRelease
 		}
 	}()
@@ -208,6 +232,7 @@ func openConsoleStreamWithRetry(
 		}
 		timer := time.NewTimer(retryInterval)
 		select {
+		// All retry attempts are bounded by the connectCtx deadline
 		case <-ctx.Done():
 			timer.Stop()
 			return nil, ctx.Err()
@@ -232,8 +257,9 @@ func openConsoleStreamAttempt(
 
 	select {
 	case <-ctx.Done():
-		// If the KubeVirt helper finishes after our deadline, start and close
-		// its stream so its internal HTTP round tripper can exit cleanly.
+		//If the context expires first, this goroutine waits for the late result. 
+		//If KubeVirt eventually creates a stream, closeUnusedStream() closes it. 
+		//This prevents an unused WebSocket from remaining open
 		go func() {
 			late := <-opened
 			if late.err == nil {

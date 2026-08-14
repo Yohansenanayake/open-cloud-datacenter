@@ -207,6 +207,7 @@ type fakeGuestOptions struct {
 	splitWrites           bool
 	ansiPrompts           bool
 	singleWriteAfterLogin bool
+	beforeResponse        <-chan struct{}
 	responseRequestID     string
 	rawResponse           string
 }
@@ -265,6 +266,9 @@ func fakeProtocolGuest(conn net.Conn, options fakeGuestOptions) {
 	request, err := guestprotocol.DecodeRequest([]byte(frame))
 	if err != nil {
 		return
+	}
+	if options.beforeResponse != nil {
+		<-options.beforeResponse
 	}
 	responseRequestID := request.RequestID
 	if options.responseRequestID != "" {
