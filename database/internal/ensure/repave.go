@@ -51,7 +51,7 @@ func (*repaveStep) Name() string { return "repave" }
 // entirely: no drift is reported and a trigger annotation is left untouched
 // for the next pass to reconsider once the catalog is validated.
 func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
-	// Decision #16 — crash-safety recovery. Runs first, unconditionally,
+	// crash-safety recovery. Runs first, unconditionally,
 	// regardless of catalog state or image observability: if a prior pass
 	// recorded a pending delete and was interrupted before DeletePVC
 	// succeeded, retry it here rather than depending on SwapVMOSDisk's
@@ -227,7 +227,7 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	}
 
 	// VM is down: swap the OS disk, then delete the old one. No
-	// ClearDataVolumeOwnerRef/DeleteDataVolume — decision #5 drops both as
+	// ClearDataVolumeOwnerRef/DeleteDataVolume —  drops both as
 	// unnecessary for this storage backend.
 	oldPVC, newPVC, err := r.Harvester.SwapVMOSDisk(ctx, inst.Namespace, vmNameFor(inst), diskIdentifierFor(inst), entry.ImageName)
 	if err != nil {
