@@ -26,12 +26,12 @@ variable "harvester_cluster_id" {
 }
 
 variable "project_name" {
-  description = "Unique project name generated from the Argo workflow UID."
+  description = "Name of the tenant project managed by this workflow."
   type        = string
 
   validation {
-    condition     = can(regex("^cap002-[a-f0-9-]+$", var.project_name))
-    error_message = "project_name must use the generated cap002-<workflow-uid> form."
+    condition     = can(regex("^cap002-[a-z0-9]([a-z0-9-]*[a-z0-9])?$", var.project_name))
+    error_message = "project_name must start with cap002- and use lowercase DNS-label characters."
   }
 }
 

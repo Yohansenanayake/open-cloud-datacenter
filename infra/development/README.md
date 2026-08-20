@@ -8,23 +8,18 @@ The reference will cover:
 - Provisioning a Host tenant space and downstream Kubernetes cluster.
 - Installing and configuring Argo Workflows.
 - Configuring MinIO as an internal S3-compatible artifact repository.
-- Bootstrapping a private AWS S3 backend for encrypted, lock-protected CAP-002
-  Terraform state.
+- Providing Harvester-backed persistent storage for the CAP-002 Terraform
+  workspace.
 - Creating scoped workflow service accounts and RBAC.
 - Referencing Target credentials through Kubernetes Secrets.
-- Running smoke workflows that validate parameters, DAG execution, artifacts,
-  and unconditional cleanup.
+- Running smoke workflows that incrementally validate parameters, Terraform
+  execution, artifact handling, and cleanup.
 
 Development defaults may use single replicas, modest resource requests,
 cluster-internal services, and Harvester-backed persistent storage. Every such
 choice must be identified as development-only in the corresponding manifest or
 values file.
 
-The CAP-002 backend bootstrap is available under
-[`aws-state-backend/`](aws-state-backend/README.md). Its own local bootstrap
-state, plans, credentials, live ConfigMap exports, and cluster-generated
-metadata must not be committed.
-
-MinIO and AWS S3 have separate responsibilities: MinIO receives sanitized Argo
-results and future evidence, while AWS S3 receives Terraform state and lock
-objects only.
+CAP-002 initially retains its local Terraform state on a dedicated PVC in the
+Host cluster. MinIO remains reserved for future sanitized Argo results and
+evidence; Terraform state must never be uploaded there as an artifact.

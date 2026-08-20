@@ -7,35 +7,50 @@ metadata:
     testsuite.opencloud.wso2.com/capability-id: CAP-002
     testsuite.opencloud.wso2.com/capability-name: tenant-space
 spec:
-  entrypoint: tenant-space
-  onExit: exit-handler
-  serviceAccountName: cap-002-tenant-space
-  activeDeadlineSeconds: 5400
-  podSpecPatch: >-
-    {"securityContext":{"fsGroup":65532,"fsGroupChangePolicy":"OnRootMismatch"}}
-  synchronization:
-    mutexes:
-      - name: cap-002-tenant-space-vlan
+  entrypoint: provision-tenant-space
   arguments:
     parameters:
-      - name: preserve-on-failure
-        value: "false"
-  volumeClaimGC:
-    strategy: OnWorkflowCompletion
-  podGC:
-    strategy: OnWorkflowCompletion
-    deleteDelayDuration: 5m
-  volumeClaimTemplates:
-    - metadata:
-        name: workspace
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        storageClassName: harvester
-        resources:
-          requests:
-            storage: 2Gi
+      - name: rancher-url
+        value: https://REPLACE_WITH_RANCHER_HOSTNAME
+        description: HTTPS URL of the Rancher API managing the target Harvester cluster.
+      - name: harvester-cluster-id
+        value: REPLACE_WITH_HARVESTER_CLUSTER_ID
+        description: Rancher cluster ID of the target Harvester cluster.
+      - name: project-name-prefix
+        value: cap002-tenant-space-dev
+        description: Prefix for the Rancher project name; an 8-character workflow UID suffix is appended.
+      - name: vm-network-vlan-id
+        value: "700"
+        description: VLAN ID used by the tenant VM network.
+      - name: cpu-limit
+        value: "24"
+        description: Tenant CPU quota.
+      - name: memory-limit
+        value: 32Gi
+        description: Tenant memory quota.
+      - name: storage-limit
+        value: 256Gi
+        description: Tenant storage quota.
+      - name: group-role-bindings-json
+        value: |-
+          [
+            {
+              "user_principal_id": "REPLACE_WITH_RANCHER_PRINCIPAL",
+              "role_template_id": "REPLACE_WITH_ROLE_TEMPLATE_ID"
+            }
+          ]
+        description: JSON array of Rancher project role bindings.
+  serviceAccountName: cap-002-tenant-space
+  activeDeadlineSeconds: 3600
+  synchronization:
+    mutexes:
+      - name: cap-002-tenant-space
+  podSpecPatch: >-
+    {"securityContext":{"fsGroup":65532,"fsGroupChangePolicy":"OnRootMismatch"}}
   volumes:
+    - name: terraform-workspace
+      persistentVolumeClaim:
+        claimName: cap-002-terraform-workspace
     - name: harvester-kubeconfig
       secret:
         secretName: cap-002-target-credentials
@@ -46,41 +61,18 @@ spec:
     - name: tmp
       emptyDir: {}
   templates:
-    - name: tenant-space
+    - name: provision-tenant-space
       steps:
         - - name: prepare
             template: prepare
-            arguments:
-              parameters:
-                - name: state-key
-                  value: ""
-                - name: preserve-on-failure
-                  value: "{{workflow.parameters.preserve-on-failure}}"
         - - name: init
             template: terraform-init
-        - - name: validate
-            template: terraform-validate
         - - name: plan
             template: terraform-plan
         - - name: apply
             template: terraform-apply
-        - - name: outputs
-            template: terraform-outputs
 
     - name: prepare
-      inputs:
-        parameters:
-          - name: state-key
-            default: ""
-          - name: preserve-on-failure
-            default: "false"
-      retryStrategy:
-        limit: "2"
-        retryPolicy: Always
-        backoff:
-          duration: 5s
-          factor: 2
-          maxDuration: 30s
       container:
         image: cap-002-terraform-runner
         imagePullPolicy: IfNotPresent
@@ -101,30 +93,24 @@ spec:
               esac
             }
 
-            for value in "$targetId" "$rancherUrl" "$harvesterClusterId" \
-              "$vmNetworkVlanId" "$cpuLimit" "$memoryLimit" "$storageLimit" \
-              "$repositoryUrl" "$repositoryCommit" "$stateBucket" \
-              "$stateRegion" "$statePrefix"; do
-              contains_placeholder "$value" && fail "a required ConfigMap value is empty or still uses a REPLACE_ placeholder"
+            for value in "$rancherUrl" "$harvesterClusterId" \
+              "$projectNamePrefix" "$vmNetworkVlanId" "$cpuLimit" \
+              "$memoryLimit" "$storageLimit" "$groupRoleBindingsJson" \
+              "$workflowUid"; do
+              contains_placeholder "$value" && fail "a workflow parameter is empty or still contains REPLACE_"
             done
 
-            printf '%s' "$targetId" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || fail "targetId is not DNS-label compatible"
             printf '%s' "$rancherUrl" | grep -Eq '^https://[^[:space:]]+$' || fail "rancherUrl must use HTTPS"
-            printf '%s' "$repositoryUrl" | grep -Eq '^https://[^[:space:]]+$' || fail "repositoryUrl must use HTTPS"
-            printf '%s' "$repositoryCommit" | grep -Eq '^[0-9a-f]{40}$' || fail "repositoryCommit must be a full 40-character commit SHA"
-            printf '%s' "$stateBucket" | grep -Eq '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$' || fail "stateBucket is invalid"
-            printf '%s' "$stateRegion" | grep -Eq '^[a-z0-9-]+$' || fail "stateRegion is invalid"
-            printf '%s' "$statePrefix" | grep -Eq '^[a-z0-9][a-z0-9/-]*[a-z0-9]$' || fail "statePrefix is invalid"
-            printf '%s' "$vmNetworkVlanId" | grep -Eq '^[0-9]+$' || fail "vmNetworkVlanId is not numeric"
+            printf '%s' "$projectNamePrefix" | grep -Eq '^cap002-[a-z0-9]([a-z0-9-]*[a-z0-9])?$' || fail "projectNamePrefix must start with cap002- and use DNS-label characters"
+            printf '%s' "$vmNetworkVlanId" | grep -Eq '^[0-9]+$' || fail "vmNetworkVlanId must be numeric"
             [ "$vmNetworkVlanId" -ge 1 ] && [ "$vmNetworkVlanId" -le 4094 ] || fail "vmNetworkVlanId must be between 1 and 4094"
             [ -n "$TF_VAR_rancher_api_token" ] || fail "Rancher API token is empty"
-            [ -n "$AWS_ACCESS_KEY_ID" ] || fail "AWS access key ID is empty"
-            [ -n "$AWS_SECRET_ACCESS_KEY" ] || fail "AWS secret access key is empty"
             [ -s /credentials/harvester/kubeconfig ] || fail "Harvester kubeconfig is missing or empty"
-            case "$PRESERVE_ON_FAILURE" in
-              true|false) ;;
-              *) fail "preserve-on-failure must be true or false" ;;
-            esac
+
+            runSuffix="$(printf '%s' "$workflowUid" | tr -d '-' | cut -c 1-8)"
+            [ "${#runSuffix}" -eq 8 ] || fail "workflow UID could not produce an 8-character run suffix"
+            projectName="${projectNamePrefix}-${runSuffix}"
+            [ "${#projectName}" -le 63 ] || fail "generated project name must not exceed 63 characters"
 
             printf '%s' "$groupRoleBindingsJson" | jq -e '
               type == "array" and
@@ -135,46 +121,19 @@ spec:
               )
             ' >/dev/null || fail "groupRoleBindingsJson is invalid"
 
-            requested_state_key="$REQUESTED_STATE_KEY"
-            if [ -n "$requested_state_key" ]; then
-              expected_prefix="${statePrefix%/}/tenant-space/${targetId}/"
-              case "$requested_state_key" in
-                "$expected_prefix"*/terraform.tfstate) ;;
-                *) fail "recovery state key is outside the configured Target prefix" ;;
-              esac
-              relative_state_key="${requested_state_key#"$expected_prefix"}"
-              run_uid="${relative_state_key%/terraform.tfstate}"
-              case "$run_uid" in
-                */*) fail "recovery state key has unexpected path segments" ;;
-              esac
-              state_key="$requested_state_key"
-            else
-              run_uid="$WORKFLOW_UID"
-              state_key="${statePrefix%/}/tenant-space/${targetId}/${run_uid}/terraform.tfstate"
-            fi
-
-            printf '%s' "$run_uid" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || fail "state key does not contain a valid workflow UID"
-
-            mkdir -p /workspace/repository /workspace/plugin-cache /workspace/results /workspace/home
-            git -C /workspace/repository init
-            if git -C /workspace/repository remote get-url origin >/dev/null 2>&1; then
-              git -C /workspace/repository remote set-url origin "$repositoryUrl"
-            else
-              git -C /workspace/repository remote add origin "$repositoryUrl"
-            fi
-            git -C /workspace/repository fetch --depth 1 origin "$repositoryCommit"
-            git -C /workspace/repository checkout --detach FETCH_HEAD
-            actual_commit="$(git -C /workspace/repository rev-parse HEAD)"
-            [ "$actual_commit" = "$repositoryCommit" ] || fail "checked-out commit does not match repositoryCommit"
-
-            terraform_dir=/workspace/repository/capabilities/tenant-space/fixtures/terraform
-            [ -f "$terraform_dir/versions.tf" ] || fail "CAP-002 Terraform fixture is missing from the approved commit"
+            runDir="/workspace/runs/$workflowUid"
+            terraformDir="$runDir/terraform"
+            mkdir -p "$terraformDir" "$runDir/state" /workspace/home /workspace/plugin-cache
+            rm -f "$terraformDir"/*.tf \
+              "$terraformDir/.terraform.lock.hcl" \
+              "$terraformDir/terraform.auto.tfvars.json"
+            cp -R /opt/testsuite/capabilities/tenant-space/terraform/. "$terraformDir/"
 
             jq -n \
               --arg rancher_url "$rancherUrl" \
               --arg harvester_cluster_id "$harvesterClusterId" \
               --arg harvester_kubeconfig_path /credentials/harvester/kubeconfig \
-              --arg project_name "cap002-${run_uid}" \
+              --arg project_name "$projectName" \
               --arg cpu_limit "$cpuLimit" \
               --arg memory_limit "$memoryLimit" \
               --arg storage_limit "$storageLimit" \
@@ -190,48 +149,39 @@ spec:
                 storage_limit: $storage_limit,
                 vm_network_vlan_id: $vm_network_vlan_id,
                 group_role_bindings: $group_role_bindings
-              }' >"$terraform_dir/terraform.auto.tfvars.json"
+              }' >"$terraformDir/terraform.auto.tfvars.json"
 
-            cat > /workspace/backend.hcl <<EOF
-            bucket       = "${stateBucket}"
-            key          = "${state_key}"
-            region       = "${stateRegion}"
-            encrypt      = true
-            use_lockfile = true
-            EOF
-
-            printf '%s' "$state_key" > /workspace/state-key
-        envFrom:
-          - configMapRef:
-              name: cap-002-tenant-space-config
+            echo "tenant project name: $projectName"
         env:
-          - name: WORKFLOW_UID
+          - name: rancherUrl
+            value: "{{workflow.parameters.rancher-url}}"
+          - name: harvesterClusterId
+            value: "{{workflow.parameters.harvester-cluster-id}}"
+          - name: projectNamePrefix
+            value: "{{workflow.parameters.project-name-prefix}}"
+          - name: vmNetworkVlanId
+            value: "{{workflow.parameters.vm-network-vlan-id}}"
+          - name: cpuLimit
+            value: "{{workflow.parameters.cpu-limit}}"
+          - name: memoryLimit
+            value: "{{workflow.parameters.memory-limit}}"
+          - name: storageLimit
+            value: "{{workflow.parameters.storage-limit}}"
+          - name: groupRoleBindingsJson
+            value: "{{workflow.parameters.group-role-bindings-json}}"
+          - name: workflowUid
             value: "{{workflow.uid}}"
-          - name: REQUESTED_STATE_KEY
-            value: "{{inputs.parameters.state-key}}"
-          - name: PRESERVE_ON_FAILURE
-            value: "{{inputs.parameters.preserve-on-failure}}"
           - name: TF_VAR_rancher_api_token
             valueFrom:
               secretKeyRef:
                 name: cap-002-target-credentials
                 key: rancher-api-token
-          - name: AWS_ACCESS_KEY_ID
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-access-key-id
-          - name: AWS_SECRET_ACCESS_KEY
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-secret-access-key
           - name: HOME
             value: /workspace/home
           - name: TF_PLUGIN_CACHE_DIR
             value: /workspace/plugin-cache
         volumeMounts:
-          - name: workspace
+          - name: terraform-workspace
             mountPath: /workspace
           - name: harvester-kubeconfig
             mountPath: /credentials/harvester
@@ -256,44 +206,18 @@ spec:
               - ALL
 
     - name: terraform-init
-      retryStrategy:
-        limit: "2"
-        retryPolicy: Always
-        backoff:
-          duration: 5s
-          factor: 2
-          maxDuration: 30s
       container:
         image: cap-002-terraform-runner
         imagePullPolicy: IfNotPresent
-        command:
-          - /bin/sh
+        command: [/bin/sh]
         args:
           - -ceu
           - |
-            cd /workspace/repository/capabilities/tenant-space/fixtures/terraform
-            terraform init \
-              -input=false \
-              -no-color \
-              -reconfigure \
-              -lockfile=readonly \
-              -backend-config=/workspace/backend.hcl
+            cd "/workspace/runs/$WORKFLOW_UID/terraform"
+            terraform init -input=false -no-color -lockfile=readonly
         env:
-          - name: AWS_ACCESS_KEY_ID
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-access-key-id
-          - name: AWS_SECRET_ACCESS_KEY
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-secret-access-key
-          - name: AWS_REGION
-            valueFrom:
-              configMapKeyRef:
-                name: cap-002-tenant-space-config
-                key: stateRegion
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
           - name: HOME
             value: /workspace/home
           - name: TF_PLUGIN_CACHE_DIR
@@ -303,120 +227,44 @@ spec:
           - name: TF_INPUT
             value: "0"
         volumeMounts:
-          - name: workspace
+          - name: terraform-workspace
             mountPath: /workspace
           - name: tmp
             mountPath: /tmp
         resources:
-          requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
-            cpu: "2"
-            memory: 1Gi
-        securityContext:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits: {cpu: "2", memory: 1Gi}
+        securityContext: &containerSecurityContext
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           runAsNonRoot: true
           runAsUser: 65532
           runAsGroup: 65532
           capabilities:
-            drop:
-              - ALL
-
-    - name: terraform-validate
-      container:
-        image: cap-002-terraform-runner
-        imagePullPolicy: IfNotPresent
-        command:
-          - /bin/sh
-        args:
-          - -ceu
-          - |
-            cd /workspace/repository/capabilities/tenant-space/fixtures/terraform
-            terraform fmt -check
-            terraform validate -no-color
-        env:
-          - name: TF_VAR_rancher_api_token
-            valueFrom:
-              secretKeyRef:
-                name: cap-002-target-credentials
-                key: rancher-api-token
-          - name: HOME
-            value: /workspace/home
-          - name: TF_PLUGIN_CACHE_DIR
-            value: /workspace/plugin-cache
-          - name: TF_IN_AUTOMATION
-            value: "1"
-          - name: TF_INPUT
-            value: "0"
-        volumeMounts:
-          - name: workspace
-            mountPath: /workspace
-          - name: harvester-kubeconfig
-            mountPath: /credentials/harvester
-            readOnly: true
-          - name: tmp
-            mountPath: /tmp
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: "1"
-            memory: 512Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          capabilities:
-            drop:
-              - ALL
+            drop: [ALL]
 
     - name: terraform-plan
       container:
         image: cap-002-terraform-runner
         imagePullPolicy: IfNotPresent
-        command:
-          - /bin/sh
+        command: [/bin/sh]
         args:
           - -ceu
           - |
-            cd /workspace/repository/capabilities/tenant-space/fixtures/terraform
-            set +e
+            runDir="/workspace/runs/$WORKFLOW_UID"
+            cd "$runDir/terraform"
             terraform plan \
-              -detailed-exitcode \
               -input=false \
               -no-color \
-              -out=/workspace/tenant-space.tfplan
-            plan_exit_code=$?
-            set -e
-            if [ "$plan_exit_code" -ne 0 ] && [ "$plan_exit_code" -ne 2 ]; then
-              exit "$plan_exit_code"
-            fi
-        env:
+              -out="$runDir/tenant-space.tfplan"
+        env: &terraformEnvironment
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
           - name: TF_VAR_rancher_api_token
             valueFrom:
               secretKeyRef:
                 name: cap-002-target-credentials
                 key: rancher-api-token
-          - name: AWS_ACCESS_KEY_ID
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-access-key-id
-          - name: AWS_SECRET_ACCESS_KEY
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-secret-access-key
-          - name: AWS_REGION
-            valueFrom:
-              configMapKeyRef:
-                name: cap-002-tenant-space-config
-                key: stateRegion
           - name: HOME
             value: /workspace/home
           - name: TF_PLUGIN_CACHE_DIR
@@ -425,369 +273,38 @@ spec:
             value: "1"
           - name: TF_INPUT
             value: "0"
-        volumeMounts:
-          - name: workspace
+        volumeMounts: &terraformVolumeMounts
+          - name: terraform-workspace
             mountPath: /workspace
           - name: harvester-kubeconfig
             mountPath: /credentials/harvester
             readOnly: true
           - name: tmp
             mountPath: /tmp
-        resources:
-          requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
-            cpu: "2"
-            memory: 1Gi
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          capabilities:
-            drop:
-              - ALL
+        resources: &terraformResources
+          requests: {cpu: 250m, memory: 256Mi}
+          limits: {cpu: "2", memory: 1Gi}
+        securityContext: *containerSecurityContext
 
     - name: terraform-apply
       container:
         image: cap-002-terraform-runner
         imagePullPolicy: IfNotPresent
-        command:
-          - /bin/sh
+        command: [/bin/sh]
         args:
           - -ceu
           - |
-            cd /workspace/repository/capabilities/tenant-space/fixtures/terraform
-            [ -s /workspace/tenant-space.tfplan ] || {
+            runDir="/workspace/runs/$WORKFLOW_UID"
+            [ -s "$runDir/tenant-space.tfplan" ] || {
               echo "saved Terraform plan is missing" >&2
               exit 1
             }
+            cd "$runDir/terraform"
             terraform apply \
               -input=false \
               -no-color \
-              /workspace/tenant-space.tfplan
-        env:
-          - name: TF_VAR_rancher_api_token
-            valueFrom:
-              secretKeyRef:
-                name: cap-002-target-credentials
-                key: rancher-api-token
-          - name: AWS_ACCESS_KEY_ID
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-access-key-id
-          - name: AWS_SECRET_ACCESS_KEY
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-secret-access-key
-          - name: AWS_REGION
-            valueFrom:
-              configMapKeyRef:
-                name: cap-002-tenant-space-config
-                key: stateRegion
-          - name: HOME
-            value: /workspace/home
-          - name: TF_PLUGIN_CACHE_DIR
-            value: /workspace/plugin-cache
-          - name: TF_IN_AUTOMATION
-            value: "1"
-          - name: TF_INPUT
-            value: "0"
-        volumeMounts:
-          - name: workspace
-            mountPath: /workspace
-          - name: harvester-kubeconfig
-            mountPath: /credentials/harvester
-            readOnly: true
-          - name: tmp
-            mountPath: /tmp
-        resources:
-          requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
-            cpu: "2"
-            memory: 1Gi
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          capabilities:
-            drop:
-              - ALL
-
-    - name: terraform-outputs
-      container:
-        image: cap-002-terraform-runner
-        imagePullPolicy: IfNotPresent
-        command:
-          - /bin/sh
-        args:
-          - -ceu
-          - |
-            cd /workspace/repository/capabilities/tenant-space/fixtures/terraform
-            mkdir -p /workspace/results
-            terraform output -json | jq '{
-              projectId: .project_id.value,
-              projectName: .project_name.value,
-              namespaceIds: .namespace_ids.value,
-              networkNames: .network_names.value
-            }' > /workspace/results/provision.json
-        env:
-          - name: AWS_ACCESS_KEY_ID
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-access-key-id
-          - name: AWS_SECRET_ACCESS_KEY
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-secret-access-key
-          - name: AWS_REGION
-            valueFrom:
-              configMapKeyRef:
-                name: cap-002-tenant-space-config
-                key: stateRegion
-          - name: HOME
-            value: /workspace/home
-          - name: TF_PLUGIN_CACHE_DIR
-            value: /workspace/plugin-cache
-          - name: TF_IN_AUTOMATION
-            value: "1"
-          - name: TF_INPUT
-            value: "0"
-        volumeMounts:
-          - name: workspace
-            mountPath: /workspace
-          - name: tmp
-            mountPath: /tmp
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: "1"
-            memory: 512Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          capabilities:
-            drop:
-              - ALL
-
-    - name: exit-handler
-      dag:
-        tasks:
-          - name: cleanup
-            template: terraform-destroy
-            when: "'{{workflow.status}}' == 'Succeeded' || '{{workflow.parameters.preserve-on-failure}}' != 'true'"
-          - name: publish
-            template: publish-result
-            depends: cleanup.Succeeded || cleanup.Failed || cleanup.Errored || cleanup.Skipped
-
-    - name: terraform-destroy
-      container:
-        image: cap-002-terraform-runner
-        imagePullPolicy: IfNotPresent
-        command:
-          - /bin/sh
-        args:
-          - -ceu
-          - |
-            mkdir -p /workspace/results
-            cleanup_file=/workspace/results/cleanup.json
-
-            record_failure() {
-              exit_code=$?
-              trap - EXIT
-              if [ "$exit_code" -ne 0 ]; then
-                jq -n --arg status failed '{status: $status}' >"$cleanup_file"
-              fi
-              exit "$exit_code"
-            }
-            trap record_failure EXIT
-
-            terraform_dir=/workspace/repository/capabilities/tenant-space/fixtures/terraform
-            if [ ! -f /workspace/backend.hcl ] || [ ! -d "$terraform_dir" ]; then
-              jq -n --arg status no-state '{status: $status}' >"$cleanup_file"
-              trap - EXIT
-              exit 0
-            fi
-
-            cd "$terraform_dir"
-            terraform init \
-              -input=false \
-              -no-color \
-              -reconfigure \
-              -lockfile=readonly \
-              -backend-config=/workspace/backend.hcl
-
-            state_error=/workspace/state-pull-error.log
-            if terraform state pull >/dev/null 2>"$state_error"; then
-              :
-            elif grep -Eqi 'no state file|state snapshot was found' "$state_error"; then
-              jq -n --arg status no-state '{status: $status}' >"$cleanup_file"
-              trap - EXIT
-              exit 0
-            else
-              echo "unable to read Terraform state; cleanup cannot safely continue" >&2
-              exit 1
-            fi
-
-            terraform destroy -auto-approve -input=false -no-color
-            jq -n --arg status destroyed '{status: $status}' >"$cleanup_file"
-            trap - EXIT
-        env:
-          - name: TF_VAR_rancher_api_token
-            valueFrom:
-              secretKeyRef:
-                name: cap-002-target-credentials
-                key: rancher-api-token
-          - name: AWS_ACCESS_KEY_ID
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-access-key-id
-          - name: AWS_SECRET_ACCESS_KEY
-            valueFrom:
-              secretKeyRef:
-                name: terraform-state-aws
-                key: aws-secret-access-key
-          - name: AWS_REGION
-            valueFrom:
-              configMapKeyRef:
-                name: cap-002-tenant-space-config
-                key: stateRegion
-          - name: HOME
-            value: /workspace/home
-          - name: TF_PLUGIN_CACHE_DIR
-            value: /workspace/plugin-cache
-          - name: TF_IN_AUTOMATION
-            value: "1"
-          - name: TF_INPUT
-            value: "0"
-        volumeMounts:
-          - name: workspace
-            mountPath: /workspace
-          - name: harvester-kubeconfig
-            mountPath: /credentials/harvester
-            readOnly: true
-          - name: tmp
-            mountPath: /tmp
-        resources:
-          requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
-            cpu: "2"
-            memory: 1Gi
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          capabilities:
-            drop:
-              - ALL
-
-    - name: publish-result
-      container:
-        image: cap-002-terraform-runner
-        imagePullPolicy: IfNotPresent
-        command:
-          - /bin/sh
-        args:
-          - -ceu
-          - |
-            mkdir -p /workspace/results
-            provision_file=/workspace/results/provision.json
-            cleanup_file=/workspace/results/cleanup.json
-            result_file=/workspace/results/result.json
-
-            if [ ! -s "$provision_file" ]; then
-              printf '%s\n' '{}' >"$provision_file"
-            fi
-
-            state_key=""
-            if [ -f /workspace/state-key ]; then
-              state_key="$(cat /workspace/state-key)"
-            fi
-
-            if [ ! -s "$cleanup_file" ]; then
-              if [ -z "$state_key" ]; then
-                jq -n --arg status no-state '{status: $status}' >"$cleanup_file"
-              elif [ "$WORKFLOW_STATUS" != "Succeeded" ] && [ "$PRESERVE_ON_FAILURE" = "true" ]; then
-                jq -n --arg status preserved '{status: $status}' >"$cleanup_file"
-              else
-                jq -n --arg status failed '{status: $status}' >"$cleanup_file"
-              fi
-            fi
-
-            jq -n \
-              --arg schema_version "v1alpha1" \
-              --arg capability_id "CAP-002" \
-              --arg capability_name "tenant-space" \
-              --arg workflow_name "$WORKFLOW_NAME" \
-              --arg workflow_uid "$WORKFLOW_UID" \
-              --arg workflow_status "$WORKFLOW_STATUS" \
-              --arg state_key "$state_key" \
-              --slurpfile provision "$provision_file" \
-              --slurpfile cleanup "$cleanup_file" \
-              '{
-                schemaVersion: $schema_version,
-                capabilityId: $capability_id,
-                capabilityName: $capability_name,
-                workflowName: $workflow_name,
-                workflowUid: $workflow_uid,
-                workflowStatus: $workflow_status,
-                stateKey: $state_key,
-                provision: $provision[0],
-                cleanup: $cleanup[0]
-              }' >"$result_file"
-        env:
-          - name: WORKFLOW_NAME
-            value: "{{workflow.name}}"
-          - name: WORKFLOW_UID
-            value: "{{workflow.uid}}"
-          - name: WORKFLOW_STATUS
-            value: "{{workflow.status}}"
-          - name: PRESERVE_ON_FAILURE
-            value: "{{workflow.parameters.preserve-on-failure}}"
-        volumeMounts:
-          - name: workspace
-            mountPath: /workspace
-          - name: tmp
-            mountPath: /tmp
-        resources:
-          requests:
-            cpu: 50m
-            memory: 64Mi
-          limits:
-            cpu: 250m
-            memory: 128Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          capabilities:
-            drop:
-              - ALL
-      outputs:
-        artifacts:
-          - name: result
-            path: /workspace/results/result.json
-            archive:
-              none: {}
+              "$runDir/tenant-space.tfplan"
+        env: *terraformEnvironment
+        volumeMounts: *terraformVolumeMounts
+        resources: *terraformResources
+        securityContext: *containerSecurityContext

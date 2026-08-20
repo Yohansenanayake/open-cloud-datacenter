@@ -3,9 +3,9 @@ kind: Kustomization
 namespace: argo
 
 resources:
+  - pvc.yaml
   - rbac.yaml
   - workflow-template.yaml
-  - recovery-workflow-template.yaml
 
 configurations:
   - kustomizeconfig.yaml

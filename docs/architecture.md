@@ -27,7 +27,7 @@ flowchart LR
         Aggregate[Future aggregate workflow]
         Workflow[Capability workflow]
         Runner[Test runner pod]
-        State[(Encrypted per-run Terraform state)]
+        State[(Terraform state PVC)]
         Store[(Artifact storage)]
         Aggregate -.->|Release-stage execution| Workflow
         Workflow --> Runner
@@ -86,11 +86,14 @@ metadata rather than maintained as a shared contributor-edited file.
 Aggregation adds ordering, concurrency, and suite-level reporting; it does not
 replace the capability-owned workflows.
 
-## Capability run lifecycle
+## Target capability run lifecycle
+
+The complete lifecycle is listed below. The initial CAP-002 milestone currently
+stops after step 4 and retains its workspace PVC.
 
 1. Validate Target connectivity, versions, capacity, and required inputs.
 2. Generate a unique run ID and acquire the required environment lock.
-3. Initialize uniquely keyed, lock-protected Terraform state.
+3. Initialize Terraform state on the capability workspace PVC.
 4. Provision the selected capability fixtures.
 5. Run bounded behavioral assertions.
 6. Collect and redact diagnostics.
@@ -105,10 +108,11 @@ replace the capability-owned workflows.
   parameters.
 - Every Target resource is associated with a unique run ID and expiry policy.
 - Every external wait has an explicit deadline.
-- Cleanup runs after both provisioning and assertion failures.
-- Terraform state must not enter the evidence bundle. The CAP-002 development
-  workflow stores encrypted, versioned state in AWS S3 and expires it after 30
-  days so a failed cleanup can be recovered.
+- Cleanup must eventually run after both provisioning and assertion failures.
+  The first CAP-002 milestone stops after provisioning so the tenant can be
+  inspected; automatic destroy is the next lifecycle milestone.
+- Terraform state must not enter the evidence bundle. The initial CAP-002
+  workflow retains it on a dedicated Host-cluster PVC.
 - Evidence is redacted before publication.
 - Every capability workflow remains independently runnable.
 - A new capability does not require changes to another capability workflow.
@@ -128,6 +132,7 @@ evidence/
 logs/
 ```
 
-CAP-002's Terraform-only phase publishes `result.json`; JUnit, behavioral-test
-logs, and broader evidence are added with the Go runner. The executable schema,
-retention rules, and evidence redaction policy will be versioned at that point.
+CAP-002 does not publish this contract in its first provisioning-only phase.
+Output collection is the next milestone; JUnit, behavioral-test logs, and
+broader evidence are added with the Go runner. The executable schema, retention
+rules, and evidence redaction policy will be versioned at that point.

@@ -1,7 +1,9 @@
 terraform {
   required_version = "= 1.15.8"
 
-  backend "s3" {}
+  backend "local" {
+    path = "../state/terraform.tfstate"
+  }
 
   required_providers {
     rancher2 = {

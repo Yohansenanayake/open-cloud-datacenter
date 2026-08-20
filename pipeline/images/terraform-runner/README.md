@@ -1,14 +1,16 @@
 # Terraform Runner Image
 
 This non-root image supplies Terraform, Git, jq, CA certificates, and a POSIX
-shell. Capability source is cloned at runtime and is not baked into the image.
+shell. For the initial CAP-002 milestone, it also carries the tenant-space
+Terraform fixture so the workflow does not need to clone Git at runtime.
 
 Build and push the image to a registry reachable from the Host cluster:
 
 ```bash
 docker build \
+  --file pipeline/images/terraform-runner/Dockerfile \
   --tag REGISTRY/harvester-testsuite-terraform-runner:0.1.0 \
-  pipeline/images/terraform-runner
+  .
 docker push REGISTRY/harvester-testsuite-terraform-runner:0.1.0
 ```
 

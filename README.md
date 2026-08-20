@@ -71,13 +71,13 @@ when a Target capability is degraded.
 | Kubernetes `client-go` and dynamic client | Accesses Kubernetes and Harvester APIs and CRDs |
 | JUnit and JSON | Provides portable test and automation results |
 | S3-compatible object storage | Retains workflow artifacts and evidence; MinIO is used by the development setup |
-| AWS S3 | Holds encrypted, lock-protected Terraform state for the development CAP-002 workflow |
+| Kubernetes persistent storage | Shares Terraform state and the saved plan between CAP-002 workflow steps |
 
 ## Capability workflow lifecycle
 
-Each independently runnable capability workflow follows the same bounded
-lifecycle. CAP-002 currently implements the Terraform provisioning and cleanup
-portion; behavioral Go assertions are added in a later milestone.
+The complete test suite will use the bounded lifecycle below. CAP-002 currently
+implements only configuration preparation and Terraform `init`, `plan`, and
+`apply`; each remaining stage will be added as a separate milestone.
 
 1. Validate Target connectivity, versions, capacity, and required inputs.
 2. Acquire an environment lock to prevent conflicting runs.
@@ -93,8 +93,8 @@ resulting capability behaves correctly.
 
 ## First milestone: CAP-002 Tenant Space
 
-The first CAP-002 phase provisions a tenant space with a unique run ID and
-records the resulting identifiers for:
+The first CAP-002 phase provisions one configured development tenant and lets an
+operator inspect:
 
 - Rancher project creation.
 - Workload and network namespace creation.
@@ -103,11 +103,11 @@ records the resulting identifiers for:
 - A protected zero-quota network namespace.
 - Harvester VLAN network configuration.
 - Expected project role bindings.
-- Cleanup of every resource created by the run.
 
-This phase proves the Terraform and Argo lifecycle, not the observable behavior
-of those resources. Quota enforcement, reconciliation, and negative-path
-assertions are added with the Go test layer.
+This phase proves only the Terraform provisioning path through Argo. It retains
+the Terraform state PVC and does not yet collect outputs or destroy the tenant.
+Output collection, cleanup, quota enforcement, reconciliation, and negative-path
+assertions are later milestones.
 
 The initial scenario covers a tenant with quota. Tenant-without-quota and deeper
 network and RBAC scenarios can be added without changing other capability
@@ -204,8 +204,9 @@ and development contract rather than a runnable release.
 - Submit approved workflow templates instead of arbitrary workflow definitions.
 - Use unique run IDs, execution deadlines, reserved test networks, and
   environment-level locking.
-- Keep Terraform state encrypted and isolated from artifacts. CAP-002 uses a
-  unique S3 key per run with locking and 30-day development retention.
+- Keep Terraform state isolated from artifacts. The initial CAP-002 workflow
+  retains local state on a dedicated development PVC until automated destroy is
+  implemented.
 
 ## Roadmap
 

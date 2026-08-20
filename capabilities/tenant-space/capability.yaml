@@ -6,7 +6,7 @@ metadata:
   title: Tenant Space
 spec:
   version: 0.1.0
-  description: Provisions and removes a quota-enabled Harvester tenant space.
+  description: Provisions a quota-enabled Harvester tenant space.
   workflowTemplate: cap-002-tenant-space
   timeout: 90m
   priority: critical
@@ -17,18 +17,14 @@ spec:
     - terraform
   lockScope: tenant-space-vlan
   inputs:
-    configuration: cap-002-tenant-space-config
-    targetCredentials: cap-002-target-credentials
-    stateCredentials: terraform-state-aws
     parameters:
-      - name: preserve-on-failure
-        type: boolean
-        default: false
-  outputs:
-    artifact: result.json
-    fields:
-      - provision.projectId
-      - provision.projectName
-      - provision.namespaceIds
-      - provision.networkNames
-      - cleanup.status
+      - rancher-url
+      - harvester-cluster-id
+      - project-name-prefix
+      - vm-network-vlan-id
+      - cpu-limit
+      - memory-limit
+      - storage-limit
+      - group-role-bindings-json
+    targetCredentials: cap-002-target-credentials
+  outputs: []

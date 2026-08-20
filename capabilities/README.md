@@ -54,6 +54,6 @@ execution.
 ## Initial capability
 
 The first implementation is [`tenant-space`](tenant-space/), with stable ID
-`CAP-002`. Its initial phase covers Terraform provisioning, Argo orchestration,
-sanitized output publication, and unconditional cleanup. Behavioral assertions
-will follow without changing the capability's public identity.
+`CAP-002`. Its initial phase covers Terraform provisioning through Argo using a
+shared state PVC. Output collection, cleanup, and behavioral assertions will be
+added incrementally without changing the capability's public identity.

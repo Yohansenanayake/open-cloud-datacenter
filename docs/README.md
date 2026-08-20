@@ -7,10 +7,9 @@ root [README](../README.md).
 
 - [Architecture](architecture.md): system boundaries, components, invariants,
   and the pipeline lifecycle.
-- [Development environment setup](../infra/development/README.md), including
-  the CAP-002 AWS state backend.
-- [CAP-002 operations](../capabilities/tenant-space/README.md), including normal
-  execution and failed-cleanup recovery.
+- [Development environment setup](../infra/development/README.md).
+- [CAP-002 operations](../capabilities/tenant-space/README.md), including the
+  initial provisioning workflow and retained state PVC.
 - Production environment setup: added after the development vertical slice is
   validated.
 - Capability authoring guide: added with the executable capability contract.
