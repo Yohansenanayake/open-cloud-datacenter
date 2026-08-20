@@ -1,0 +1,16 @@
+apiVersion: testsuite.opencloud.wso2.com/v1alpha1
+kind: EvidenceContract
+metadata:
+  capabilityId: CAP-002
+spec:
+  artifacts:
+    - name: result
+      path: results/result.json
+      mediaType: application/json
+      description: Sanitized provisioning and cleanup outcome.
+  excluded:
+    - Terraform state and lock files
+    - Saved Terraform plans
+    - Rancher API tokens
+    - Harvester kubeconfigs
+    - AWS credentials

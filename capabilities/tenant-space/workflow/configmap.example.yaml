@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cap-002-tenant-space-config
+  namespace: argo
+data:
+  targetId: dev-target
+  rancherUrl: https://REPLACE_WITH_RANCHER_HOSTNAME
+  harvesterClusterId: REPLACE_WITH_HARVESTER_CLUSTER_ID
+  vmNetworkVlanId: "700"
+  cpuLimit: "24"
+  memoryLimit: 32Gi
+  storageLimit: 256Gi
+  groupRoleBindingsJson: |-
+    [
+      {
+        "user_principal_id": "REPLACE_WITH_RANCHER_PRINCIPAL",
+        "role_template_id": "REPLACE_WITH_ROLE_TEMPLATE_ID"
+      }
+    ]
+  repositoryUrl: https://github.com/wso2/open-cloud-datacenter.git
+  repositoryCommit: REPLACE_WITH_40_CHARACTER_COMMIT_SHA
+  stateBucket: REPLACE_WITH_TERRAFORM_STATE_BUCKET
+  stateRegion: ap-south-1
+  statePrefix: capabilities

@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: argo
+
+resources:
+  - rbac.yaml
+  - workflow-template.yaml
+  - recovery-workflow-template.yaml
+
+configurations:
+  - kustomizeconfig.yaml
+
+images:
+  - name: cap-002-terraform-runner
+    newName: registry.example.invalid/harvester-testsuite-terraform-runner
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

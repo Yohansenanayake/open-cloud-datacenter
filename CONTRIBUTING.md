@@ -51,17 +51,23 @@ with upstream makes later updates and pull requests easier to manage.
 Each capability must be independently addable under:
 
 ```text
-capabilities/CAP-XXX/
+capabilities/descriptive-name/
 ├── capability.yaml
+├── workflow/
+│   └── workflow-template.yaml
 ├── fixtures/
 ├── tests/
 └── evidence.yaml
 ```
 
-A capability contribution should:
+The directory uses a readable capability name such as `tenant-space`, while the
+metadata retains its stable ID such as `CAP-002`. A capability contribution
+should:
 
 - Use a stable capability ID and a clear, user-facing name.
-- Declare its inputs, labels, timeout, lock scope, and expected outputs.
+- Declare its inputs, labels, timeout, lock scope, workflow reference, and
+  expected outputs.
+- Provide an independently runnable capability `WorkflowTemplate`.
 - Create uniquely named fixtures associated with a run ID.
 - Use bounded waits and explicit deadlines for asynchronous behavior.
 - Test observable behavior rather than only successful provisioning.
@@ -69,9 +75,9 @@ A capability contribution should:
 - Clean up every resource it creates, including after assertion failures.
 - Produce results using the shared JUnit, JSON, evidence, and log contract.
 
-Adding a capability should not require capability-specific changes to the core
-pipeline. If it does, explain the limitation and proposed contract change in the
-pull request.
+Adding a capability should not require changes to another capability workflow.
+If shared behavior must change, update the versioned shared contract and explain
+its compatibility impact in the pull request.
 
 ### Go code
 
@@ -96,7 +102,10 @@ pull request.
 
 ### Argo Workflows and Kubernetes manifests
 
-- Prefer reusable `WorkflowTemplate` resources over copied workflow definitions.
+- Keep each capability's independently runnable `WorkflowTemplate` inside its
+  capability module.
+- Reuse pipeline-wide templates for common lifecycle behavior instead of copying
+  credential, result-publication, or cleanup steps.
 - Define resource requests, limits, deadlines, retries, and exit handling.
 - Apply least-privilege RBAC to workflow service accounts.
 - Keep credentials in Kubernetes Secrets or the configured Host secret store.

@@ -19,7 +19,8 @@ release history.
 - Create temporary test fixtures and reliably clean them up.
 - Verify observable behavior, not only successful infrastructure provisioning.
 - Produce portable JUnit, JSON, log, and evidence outputs.
-- Allow capabilities to be added independently without redesigning the pipeline.
+- Let teams develop, submit, and validate each capability workflow independently.
+- Allow capabilities to be added without redesigning shared pipeline components.
 - Provide development and production-ready deployment references for community
   environments.
 
@@ -70,10 +71,13 @@ when a Target capability is degraded.
 | Kubernetes `client-go` and dynamic client | Accesses Kubernetes and Harvester APIs and CRDs |
 | JUnit and JSON | Provides portable test and automation results |
 | S3-compatible object storage | Retains workflow artifacts and evidence; MinIO is used by the development setup |
+| AWS S3 | Holds encrypted, lock-protected Terraform state for the development CAP-002 workflow |
 
-## Pipeline lifecycle
+## Capability workflow lifecycle
 
-Each run follows the same bounded lifecycle:
+Each independently runnable capability workflow follows the same bounded
+lifecycle. CAP-002 currently implements the Terraform provisioning and cleanup
+portion; behavioral Go assertions are added in a later milestone.
 
 1. Validate Target connectivity, versions, capacity, and required inputs.
 2. Acquire an environment lock to prevent conflicting runs.
@@ -89,36 +93,46 @@ resulting capability behaves correctly.
 
 ## First milestone: CAP-002 Tenant Space
 
-The first vertical slice creates a tenant space with a unique run ID and
-verifies:
+The first CAP-002 phase provisions a tenant space with a unique run ID and
+records the resulting identifiers for:
 
 - Rancher project creation.
 - Workload and network namespace creation.
 - Namespace-to-project labels.
-- Project quota configuration and enforcement.
+- Project quota configuration.
 - A protected zero-quota network namespace.
 - Harvester VLAN network configuration.
 - Expected project role bindings.
 - Cleanup of every resource created by the run.
 
+This phase proves the Terraform and Argo lifecycle, not the observable behavior
+of those resources. Quota enforcement, reconciliation, and negative-path
+assertions are added with the Go test layer.
+
 The initial scenario covers a tenant with quota. Tenant-without-quota and deeper
-network and RBAC scenarios can be added without changing the core pipeline.
+network and RBAC scenarios can be added without changing other capability
+workflows.
 
 ## Capability contract
 
 Each capability is an independent module:
 
 ```text
-capabilities/CAP-XXX/
+capabilities/tenant-space/
 ├── capability.yaml
+├── workflow/
+│   └── workflow-template.yaml
 ├── fixtures/
 ├── tests/
 └── evidence.yaml
 ```
 
-`capability.yaml` declares the capability ID, priority, labels, timeout,
-required inputs, lock scope, and expected outputs. Every capability publishes
-the same result contract:
+Directory names are readable capability names; `capability.yaml` retains stable
+IDs such as `CAP-002`. The metadata declares the capability ID, priority,
+labels, timeout, required inputs, lock scope, workflow reference, and expected outputs. The
+capability-owned `WorkflowTemplate` can be submitted without a suite-wide
+orchestrator, allowing teams to develop and test modules in parallel. Every
+capability publishes the same result contract:
 
 ```text
 results/
@@ -128,10 +142,12 @@ evidence/
 logs/
 ```
 
-Adding a capability should require a new module and catalog entry, not changes
-to the core pipeline.
+Adding a capability requires only a self-contained module, not changes to other
+capability workflows or a hand-maintained central catalog. A future aggregate
+workflow will discover capability metadata and execute all selected workflows
+for a complete suite run.
 
-## Planned repository layout
+## Repository layout
 
 ```text
 .
@@ -142,7 +158,7 @@ to the core pipeline.
 │   ├── development/     # Small-footprint development reference
 │   └── production/      # Production reference, added after the dev setup is proven
 ├── internal/            # Shared Go clients, assertions, locking, and evidence code
-├── pipeline/            # Workflow templates, RBAC, and pipeline configuration
+├── pipeline/            # Shared workflow components and future aggregate runner
 ├── CONTRIBUTING.md
 ├── LICENSE
 └── README.md
@@ -188,17 +204,20 @@ and development contract rather than a runnable release.
 - Submit approved workflow templates instead of arbitrary workflow definitions.
 - Use unique run IDs, execution deadlines, reserved test networks, and
   environment-level locking.
-- Keep Terraform state ephemeral and exclude sensitive values from reports.
+- Keep Terraform state encrypted and isolated from artifacts. CAP-002 uses a
+  unique S3 key per run with locking and 30-day development retention.
 
 ## Roadmap
 
 1. Establish the development Host infrastructure with Argo Workflows and MinIO.
-2. Build the reusable workflow lifecycle, runner image, result contract, and
+2. Build the shared workflow components, runner image, result contract, and
    cleanup guarantees.
-3. Implement CAP-002 Tenant Space as the first end-to-end capability.
+3. Implement CAP-002 Tenant Space as the first independently runnable workflow.
 4. Add environment locking, evidence collection, and the cleanup janitor.
-5. Document and validate a production deployment model.
-6. Add further Harvester capabilities as independent modules.
+5. Add further Harvester capabilities as independent workflows.
+6. Introduce an aggregate workflow that discovers and runs the capability set
+   for an initial suite release.
+7. Document and validate a production deployment model.
 
 The architecture proposal and design discussion are tracked in
 [GitHub Discussion #242](https://github.com/wso2/open-cloud-datacenter/discussions/242).

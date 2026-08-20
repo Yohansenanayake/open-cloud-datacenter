@@ -1,0 +1,9 @@
+aws_region  = "ap-south-1"
+bucket_name = "REPLACE_WITH_GLOBALLY_UNIQUE_BUCKET_NAME"
+
+state_prefix   = "capabilities"
+retention_days = 30
+
+tags = {
+  Environment = "development"
+}
