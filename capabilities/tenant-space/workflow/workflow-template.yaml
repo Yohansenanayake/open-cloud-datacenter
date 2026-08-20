@@ -8,6 +8,7 @@ metadata:
     testsuite.opencloud.wso2.com/capability-name: tenant-space
 spec:
   entrypoint: provision-tenant-space
+  onExit: exit-handler
   arguments:
     parameters:
       - name: rancher-url
@@ -47,10 +48,21 @@ spec:
       - name: cap-002-tenant-space
   podSpecPatch: >-
     {"securityContext":{"fsGroup":65532,"fsGroupChangePolicy":"OnRootMismatch"}}
+  volumeClaimGC:
+    strategy: OnWorkflowSuccess
+  volumeClaimTemplates:
+    - metadata:
+        name: terraform-workspace
+        labels:
+          testsuite.opencloud.wso2.com/capability-id: CAP-002
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: harvester
+        resources:
+          requests:
+            storage: 2Gi
   volumes:
-    - name: terraform-workspace
-      persistentVolumeClaim:
-        claimName: cap-002-terraform-workspace
     - name: harvester-kubeconfig
       secret:
         secretName: cap-002-target-credentials
@@ -71,6 +83,11 @@ spec:
             template: terraform-plan
         - - name: apply
             template: terraform-apply
+
+    - name: exit-handler
+      steps:
+        - - name: destroy
+            template: terraform-destroy
 
     - name: prepare
       container:
@@ -304,6 +321,40 @@ spec:
               -input=false \
               -no-color \
               "$runDir/tenant-space.tfplan"
+        env: *terraformEnvironment
+        volumeMounts: *terraformVolumeMounts
+        resources: *terraformResources
+        securityContext: *containerSecurityContext
+
+    - name: terraform-destroy
+      container:
+        image: cap-002-terraform-runner
+        imagePullPolicy: IfNotPresent
+        command: [/bin/sh]
+        args:
+          - -ceu
+          - |
+            runDir="/workspace/runs/$WORKFLOW_UID"
+            stateFile="$runDir/state/terraform.tfstate"
+
+            if [ ! -s "$stateFile" ]; then
+              echo "no Terraform state found; cleanup is not required"
+              exit 0
+            fi
+
+            terraformDir="$runDir/terraform"
+            [ -d "$terraformDir" ] || {
+              echo "Terraform state exists but the working directory is missing" >&2
+              exit 1
+            }
+
+            cd "$terraformDir"
+            terraform init -input=false -no-color -lockfile=readonly
+            terraform destroy \
+              -auto-approve \
+              -input=false \
+              -no-color
+            echo "tenant resources destroyed successfully"
         env: *terraformEnvironment
         volumeMounts: *terraformVolumeMounts
         resources: *terraformResources

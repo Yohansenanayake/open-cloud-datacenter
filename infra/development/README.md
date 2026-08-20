@@ -20,6 +20,7 @@ cluster-internal services, and Harvester-backed persistent storage. Every such
 choice must be identified as development-only in the corresponding manifest or
 values file.
 
-CAP-002 initially retains its local Terraform state on a dedicated PVC in the
-Host cluster. MinIO remains reserved for future sanitized Argo results and
-evidence; Terraform state must never be uploaded there as an artifact.
+CAP-002 stores local Terraform state on a per-workflow PVC in the Host cluster.
+Argo deletes the claim after successful exit-handler cleanup and retains it when
+the workflow fails. MinIO remains reserved for future sanitized Argo results
+and evidence; Terraform state must never be uploaded there as an artifact.

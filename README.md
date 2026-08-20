@@ -93,8 +93,8 @@ resulting capability behaves correctly.
 
 ## First milestone: CAP-002 Tenant Space
 
-The first CAP-002 phase provisions one configured development tenant and lets an
-operator inspect:
+The first CAP-002 phase provisions one configured development tenant and
+exercises:
 
 - Rancher project creation.
 - Workload and network namespace creation.
@@ -104,10 +104,11 @@ operator inspect:
 - Harvester VLAN network configuration.
 - Expected project role bindings.
 
-This phase proves only the Terraform provisioning path through Argo. It retains
-the Terraform state PVC and does not yet collect outputs or destroy the tenant.
-Output collection, cleanup, quota enforcement, reconciliation, and negative-path
-assertions are later milestones.
+This phase proves the Terraform provisioning and destruction paths through Argo.
+An exit handler always attempts cleanup, and Argo deletes the per-workflow state
+PVC after a fully successful run. Output collection, automated failed-run
+recovery, quota enforcement, reconciliation, and negative-path assertions are
+later milestones.
 
 The initial scenario covers a tenant with quota. Tenant-without-quota and deeper
 network and RBAC scenarios can be added without changing other capability
@@ -204,9 +205,9 @@ and development contract rather than a runnable release.
 - Submit approved workflow templates instead of arbitrary workflow definitions.
 - Use unique run IDs, execution deadlines, reserved test networks, and
   environment-level locking.
-- Keep Terraform state isolated from artifacts. The initial CAP-002 workflow
-  retains local state on a dedicated development PVC until automated destroy is
-  implemented.
+- Keep Terraform state isolated from artifacts. CAP-002 stores local state on a
+  per-workflow development PVC, deletes it after successful cleanup, and retains
+  it when the workflow fails.
 
 ## Roadmap
 

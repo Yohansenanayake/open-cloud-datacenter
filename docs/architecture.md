@@ -88,8 +88,9 @@ replace the capability-owned workflows.
 
 ## Target capability run lifecycle
 
-The complete lifecycle is listed below. The initial CAP-002 milestone currently
-stops after step 4 and retains its workspace PVC.
+The complete lifecycle is listed below. The initial CAP-002 milestone implements
+steps 1 through 4 and step 8. It deletes the workspace PVC after successful
+cleanup and retains it when the workflow fails.
 
 1. Validate Target connectivity, versions, capacity, and required inputs.
 2. Generate a unique run ID and acquire the required environment lock.
@@ -109,10 +110,10 @@ stops after step 4 and retains its workspace PVC.
 - Every Target resource is associated with a unique run ID and expiry policy.
 - Every external wait has an explicit deadline.
 - Cleanup must eventually run after both provisioning and assertion failures.
-  The first CAP-002 milestone stops after provisioning so the tenant can be
-  inspected; automatic destroy is the next lifecycle milestone.
+  CAP-002 invokes Terraform destroy from an unconditional exit handler.
 - Terraform state must not enter the evidence bundle. The initial CAP-002
-  workflow retains it on a dedicated Host-cluster PVC.
+  workflow stores it on a per-workflow Host-cluster PVC, deletes the claim after
+  success, and retains it after failure for recovery.
 - Evidence is redacted before publication.
 - Every capability workflow remains independently runnable.
 - A new capability does not require changes to another capability workflow.
@@ -132,7 +133,7 @@ evidence/
 logs/
 ```
 
-CAP-002 does not publish this contract in its first provisioning-only phase.
+CAP-002 does not publish this contract in its first lifecycle phase.
 Output collection is the next milestone; JUnit, behavioral-test logs, and
 broader evidence are added with the Go runner. The executable schema, retention
 rules, and evidence redaction policy will be versioned at that point.

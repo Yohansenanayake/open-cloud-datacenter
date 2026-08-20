@@ -6,7 +6,7 @@ metadata:
   title: Tenant Space
 spec:
   version: 0.1.0
-  description: Provisions a quota-enabled Harvester tenant space.
+  description: Provisions and removes a quota-enabled Harvester tenant space.
   workflowTemplate: cap-002-tenant-space
   timeout: 90m
   priority: critical

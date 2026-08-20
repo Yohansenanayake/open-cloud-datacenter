@@ -1,33 +1,36 @@
 # CAP-002: Tenant Space
 
-This first CAP-002 milestone provisions one quota-enabled tenant space through
-Terraform orchestrated by Argo Workflows. It deliberately stops after
-`terraform apply` so the created project can be inspected in Rancher and
-Harvester.
+This CAP-002 milestone provisions one quota-enabled tenant space through
+Terraform orchestrated by Argo Workflows and destroys it through an
+unconditional exit handler.
 
-Output collection, automated destroy, result artifacts, and automatic PVC
-deletion are separate follow-up milestones.
+Output collection, result artifacts, behavioral assertions, and failed-run
+recovery automation are separate follow-up milestones.
 
 ## Workflow
 
-The workflow runs four sequential steps:
+The main workflow runs four sequential steps:
 
 ```text
 prepare → terraform init → terraform plan → terraform apply
+                                                    │
+                                                    └─ always → terraform destroy
 ```
 
-All steps mount the same `cap-002-terraform-workspace` PVC. Terraform uses the
-local backend in a run-specific directory:
+Argo creates a 2 Gi `ReadWriteOnce` PVC for each workflow. All steps, including
+the exit handler, mount that same claim. Terraform uses the local backend in a
+run-specific directory:
 
 ```text
 /workspace/runs/<workflow-uid>/state/terraform.tfstate
 ```
 
-The Terraform working directory and saved plan use the same workflow UID. This
-prevents a later submission from reusing an earlier tenant's state. The PVC is
-intentionally retained after the workflow. Do not delete it while any created
-tenant exists because it contains the state needed for later cleanup. A workflow
-mutex serializes CAP-002 runs in the initial shared VLAN environment.
+The Terraform working directory and saved plan use the same workflow UID. The
+exit handler treats missing state as a safe no-op and otherwise runs
+`terraform destroy`. Argo deletes the PVC only when the complete workflow,
+including destroy, succeeds. Failed workflows retain their PVC so the state is
+available for investigation and recovery. A workflow mutex serializes CAP-002
+runs in the initial shared VLAN environment.
 
 ## Build the runner image
 
@@ -108,7 +111,14 @@ Workflow parameters are stored in the submitted Workflow and visible in Argo.
 Only non-sensitive configuration belongs in the parameter file. The Rancher
 token and Harvester kubeconfig remain in `cap-002-target-credentials`.
 
-After the workflow succeeds, verify the generated project, namespaces, quota,
-role binding, and VM network in the Target environment. Keep the PVC until the
-destroy milestone is implemented or every tenant has been removed safely using
-its retained Terraform state.
+During the run, Terraform logs show the generated project, namespaces, quota,
+role binding, and VM network being created and then removed. After a successful
+workflow, verify that the tenant resources and workflow PVC no longer exist.
+
+```bash
+kubectl -n argo get pvc
+```
+
+If the workflow fails, do not delete its PVC until the tenant has been confirmed
+absent or destroyed using the retained Terraform state. Automated recovery for
+that case is a later milestone.

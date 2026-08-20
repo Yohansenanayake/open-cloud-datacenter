@@ -55,5 +55,6 @@ execution.
 
 The first implementation is [`tenant-space`](tenant-space/), with stable ID
 `CAP-002`. Its initial phase covers Terraform provisioning through Argo using a
-shared state PVC. Output collection, cleanup, and behavioral assertions will be
-added incrementally without changing the capability's public identity.
+per-workflow state PVC and an unconditional destroy exit handler. Output
+collection, failed-run recovery, and behavioral assertions will be added
+incrementally without changing the capability's public identity.
