@@ -37,16 +37,12 @@ runs in the initial shared VLAN environment.
 The runner image carries Terraform 1.15.8 and the CAP-002 fixture:
 
 ```bash
-docker build \
-  --file pipeline/images/terraform-runner/Dockerfile \
-  --tag REGISTRY/harvester-testsuite-terraform-runner:0.1.0 \
-  .
-
-docker push REGISTRY/harvester-testsuite-terraform-runner:0.1.0
+make terraform-runner-publish \
+  RUNNER_IMAGE=REGISTRY/NAMESPACE/harvester-testsuite-terraform-runner
 ```
 
-Resolve the pushed digest and replace `newName` and `digest` in
-`workflow/kustomization.yaml`.
+The image tag defaults to `0.1.0`. Resolve the pushed digest and replace
+`newName` and `digest` in `workflow/kustomization.yaml`.
 
 ## Configure the Target
 
