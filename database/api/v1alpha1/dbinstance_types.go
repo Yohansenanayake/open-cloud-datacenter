@@ -310,6 +310,14 @@ type DBInstanceStatus struct {
 	// +optional
 	CurrentImageRevision string `json:"currentImageRevision,omitempty"`
 
+	// LastAppliedRepaveTrigger records the value of AnnotationRepaveTrigger
+	// that was last processed (accepted, rejected, or applied) — mirrors
+	// Flux's ReconcileRequestAnnotation/LastHandledReconcileAt pattern. The
+	// annotation itself is never modified by the controller; a repave is
+	// dispatched only when its current value differs from this field.
+	// +optional
+	LastAppliedRepaveTrigger string `json:"lastAppliedRepaveTrigger,omitempty"`
+
 	// RestartCount is the cumulative number of VM restarts detected or
 	// initiated by the controller liveness loop (both planned and unplanned).
 	// +optional
@@ -488,10 +496,12 @@ const (
 	// down from a later out-of-band recovery VMI.
 	AnnotationCrashLoopHaltedVMIUID = "dbaas.opencloud.wso2.com/crash-loop-halted-vmi-uid"
 
-	// AnnotationRepaveTrigger, when set to "now", triggers a repave —
-	// swapping the VM's OS disk onto the catalog's current validated
-	// revision for its stream. The controller clears the annotation once
-	// the trigger has been processed (accepted, rejected, or applied).
+	// AnnotationRepaveTrigger, when its value differs from
+	// Status.LastAppliedRepaveTrigger, triggers a repave — swapping the
+	// VM's OS disk onto the catalog's current validated revision for its
+	// stream. The controller never modifies or clears this annotation; set
+	// a fresh, unique value (e.g. an RFC3339 timestamp) to trigger a new
+	// repave, mirroring Flux's reconcile.fluxcd.io/requestedAt convention.
 	AnnotationRepaveTrigger = "dbaas.opencloud.wso2.com/repave-trigger"
 
 	// FinalizerName triggers controller-side teardown of Harvester resources.

@@ -107,7 +107,6 @@ NS="${NS:?set NS}"; ID="${ID:?set ID}"
 # explicitly overrides them (see resolve_dbname and db_exec below).
 TIMEOUT="${TIMEOUT:-900}"
 STATE="/tmp/repave-e2e.${NS}.${ID}.state"
-ANNOT="dbaas.opencloud.wso2.com/repave-trigger=now"
 FAILED=0
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -265,6 +264,25 @@ repave_reason() {
 }
 pending_delete_pvc() {
   kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.resources.pendingDeleteOSDiskPVCName}' 2>/dev/null
+}
+# annotate_repave_trigger <instance-id> — sets the repave-trigger annotation
+# to a fresh, unique value. The controller never modifies or clears this
+# annotation (Flux ReconcileRequestAnnotation style); a repave dispatches
+# only when the value differs from status.lastAppliedRepaveTrigger, so every
+# call site — including a deliberate re-trigger of the same instance — must
+# generate a new value each time, not reuse a static sentinel.
+annotate_repave_trigger() {
+  local inst="$1" val
+  val="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+  kubectl annotate dbinstance "$inst" -n "$NS" \
+    "dbaas.opencloud.wso2.com/repave-trigger=$val" --overwrite
+}
+last_applied_repave_trigger() {
+  kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.lastAppliedRepaveTrigger}' 2>/dev/null
+}
+repave_trigger_annotation() {
+  kubectl get dbinstance "$ID" -n "$NS" \
+    -o jsonpath='{.metadata.annotations.dbaas\.opencloud\.wso2\.com/repave-trigger}' 2>/dev/null
 }
 vmi_uid() {
   kubectl get vmi "$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.resources.vmName}')" \
@@ -443,7 +461,7 @@ stage2() {
     || fail "'-o wide' row does not show the drift reason"
 
   say "T3: repave — VM restarts exactly once, data PVC/connection Secret/TLS material untouched"
-  kubectl annotate dbinstance "$ID" -n "$NS" "$ANNOT" --overwrite || die "annotate failed"
+  annotate_repave_trigger "$ID" || die "annotate failed"
   wait_leave_phase "available" || die "repave never started"
   wait_phase "available" || die "repave never completed"
   echo
@@ -504,8 +522,10 @@ stage2() {
   [ -z "$pending" ] && pass "status.resources.pendingDeleteOSDiskPVCName is empty" \
     || fail "pendingDeleteOSDiskPVCName still set to '$pending' — DeletePVC recovery never completed"
 
-  [ -z "$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.metadata.annotations.dbaas\.opencloud\.wso2\.com/repave-trigger}')" ] \
-    && pass "repave-trigger annotation cleared" || fail "annotation still present"
+  local trig applied; trig=$(repave_trigger_annotation); applied=$(last_applied_repave_trigger)
+  [ -n "$trig" ] && [ "$trig" = "$applied" ] \
+    && pass "repave trigger handled (status.lastAppliedRepaveTrigger caught up: $applied)" \
+    || fail "trigger not recorded as handled (annotation=$trig, lastAppliedRepaveTrigger=$applied)"
   local post_st post_rs; post_st=$(image_drift_status); post_rs=$(image_drift_reason)
   if [ "$post_st" = "False" ] && [ "$post_rs" = "ImageUpToDate" ]; then
     pass "ImageDrift=False/ImageUpToDate after the repave"
@@ -529,9 +549,9 @@ stage2() {
       || fail "data check failed: $out"
   fi
 
-  say "T7: no-op repave (already on latest) — annotation clears, zero VM restarts"
+  say "T7: no-op repave (already on latest) — trigger handled, zero VM restarts"
   local pre_noop_vmi; pre_noop_vmi=$(vmi_uid)
-  kubectl annotate dbinstance "$ID" -n "$NS" "$ANNOT" --overwrite
+  annotate_repave_trigger "$ID"
   # No phase transition expected this time — poll briefly and confirm it
   # never leaves "available", rather than waiting for a transition that
   # (correctly) never happens.
@@ -544,8 +564,10 @@ stage2() {
     || fail "phase left available during a same-revision (no-op) repave trigger"
   [ "$(vmi_uid)" = "$pre_noop_vmi" ] && pass "VMI UID unchanged — zero VM restarts for the no-op trigger" \
     || fail "VMI UID changed on a no-op repave trigger — VM was restarted unnecessarily"
-  [ -z "$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.metadata.annotations.dbaas\.opencloud\.wso2\.com/repave-trigger}')" ] \
-    && pass "trigger annotation cleared for the no-op case too" || fail "annotation still present after no-op trigger"
+  local noop_trig noop_applied; noop_trig=$(repave_trigger_annotation); noop_applied=$(last_applied_repave_trigger)
+  [ -n "$noop_trig" ] && [ "$noop_trig" = "$noop_applied" ] \
+    && pass "no-op trigger also recorded as handled (lastAppliedRepaveTrigger caught up: $noop_applied)" \
+    || fail "no-op trigger not recorded as handled (annotation=$noop_trig, lastAppliedRepaveTrigger=$noop_applied)"
   [ "$(os_pvcs | head -1)" = "$new_pvc" ] && pass "same disk after no-op repave ($new_pvc)" \
     || fail "disk changed on same-image repave: $(os_pvcs)"
 
@@ -603,11 +625,11 @@ stage4() {
   local pre_pvc vmname
   pre_pvc=$(os_pvcs | head -1)
   vmname=$(kubectl get dbinstance "$ID" -n "$NS" -o jsonpath='{.status.resources.vmName}')
-  kubectl annotate dbinstance "$ID" -n "$NS" "$ANNOT" --overwrite || die "annotate failed"
+  annotate_repave_trigger "$ID" || die "annotate failed"
 
   # repave.go now sets RepaveInProgress=False/RepaveBlockedEOL before
-  # clearing the trigger (fixed while writing this script — previously
-  # nothing observable recorded a blocked repave at all).
+  # recording the trigger as handled (fixed while writing this script —
+  # previously nothing observable recorded a blocked repave at all).
   t=0; local rst="" rrs=""
   while [ $t -lt 90 ]; do
     rst=$(repave_status); rrs=$(repave_reason)
@@ -625,9 +647,13 @@ stage4() {
   [ "$post_vmi_phase" = "Running" ] && pass "VMI still Running ($vmname) — VM was never stopped" \
     || fail "VMI phase = '${post_vmi_phase:-<none>}', expected Running — a blocked repave must not touch the VM"
 
-  # The annotation is already cleared by repave.go's own reject path; this is
-  # a harmless no-op fallback (>/dev/null covers the "already absent" case).
-  kubectl annotate dbinstance "$ID" -n "$NS" "${ANNOT%=*}-" >/dev/null 2>&1
+  # The annotation is never modified by repave.go's reject path (it's only
+  # ever recorded, never cleared) — confirm the rejection was still tracked
+  # as handled via status.lastAppliedRepaveTrigger.
+  local eol_trig eol_applied; eol_trig=$(repave_trigger_annotation); eol_applied=$(last_applied_repave_trigger)
+  [ -n "$eol_trig" ] && [ "$eol_trig" = "$eol_applied" ] \
+    && pass "blocked repave still recorded as handled (lastAppliedRepaveTrigger caught up: $eol_applied)" \
+    || fail "blocked repave not recorded as handled (annotation=$eol_trig, lastAppliedRepaveTrigger=$eol_applied)"
   [ "$(phase)" = "available" ] && pass "instance remains available — nothing was broken, just correctly refused" \
     || fail "instance phase = $(phase), expected available (repave should never have touched it)"
 
@@ -753,7 +779,7 @@ This needs a human-timed kill — it can't be scripted reliably. Steps:
 Press Enter to trigger the repave now...
 EOF
   read -r
-  kubectl annotate dbinstance "$ID" -n "$NS" "$ANNOT" --overwrite || die "annotate failed"
+  annotate_repave_trigger "$ID" || die "annotate failed"
   echo "Repave triggered. Go kill the manager pod at the right moment, then press Enter here..."
   read -r
 
@@ -790,8 +816,8 @@ stage7() {
   wait_phase "available" 900 "$id2" || die "$id2 never became available"
 
   say "triggering repave on both instances back-to-back"
-  kubectl annotate dbinstance "$orig_id" -n "$NS" "$ANNOT" --overwrite || die "annotate $orig_id failed"
-  kubectl annotate dbinstance "$id2" -n "$NS" "$ANNOT" --overwrite || die "annotate $id2 failed"
+  annotate_repave_trigger "$orig_id" || die "annotate $orig_id failed"
+  annotate_repave_trigger "$id2" || die "annotate $id2 failed"
 
   wait_phase "available" 900 "$orig_id" || fail "$orig_id never returned to available"
   wait_phase "available" 900 "$id2" || fail "$id2 never returned to available"

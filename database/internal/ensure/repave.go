@@ -39,17 +39,22 @@ func newRepaveStep(deps Dependencies) Step { return &repaveStep{Dependencies: de
 func (*repaveStep) Name() string { return "repave" }
 
 // ensureRepave reports baked-image drift (ConditionImageDrift, report-only,
-// every pass) and applies a repave when dbaasv1.AnnotationRepaveTrigger is
-// "now": cold-halt the VM, swap the OS disk to the catalog's current
-// revision, regenerate cloud-init, and let ensurePowerState (ordered after
-// this step) restart it — same halt/apply/restart shape as ensureResize, and
-// ordered directly before it so the two never fight over the VM's power
-// state.
+// every pass) and applies a repave when dbaasv1.AnnotationRepaveTrigger's
+// value differs from Status.LastAppliedRepaveTrigger: cold-halt the VM, swap
+// the OS disk to the catalog's current revision, regenerate cloud-init, and
+// let ensurePowerState (ordered after this step) restart it — same
+// halt/apply/restart shape as ensureResize, and ordered directly before it so
+// the two never fight over the VM's power state. The annotation itself is
+// never modified by the controller (Flux ReconcileRequestAnnotation style);
+// each accept/reject/apply outcome instead records the value it processed
+// into Status.LastAppliedRepaveTrigger through the normal deferred status
+// patch, so a new repave only dispatches once the annotation is set to a
+// fresh value.
 //
 // If the catalog can't resolve a stream for databaseDefaults.osVersion (unset,
 // unknown, or not yet Validated — see resolveBakedImage), this step no-ops
-// entirely: no drift is reported and a trigger annotation is left untouched
-// for the next pass to reconsider once the catalog is validated.
+// entirely: no drift is reported and the trigger annotation is left
+// unexamined for the next pass to reconsider once the catalog is validated.
 func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// crash-safety recovery. Runs first, unconditionally,
 	// regardless of catalog state or image observability: if a prior pass
@@ -148,8 +153,11 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 			fmt.Sprintf("VM is on the current image revision %q", stream.Revision))
 	}
 
-	// --- repave dispatch: gated on the trigger annotation ---
-	if inst.Annotations[dbaasv1.AnnotationRepaveTrigger] != "now" {
+	// --- repave dispatch: gated on the trigger annotation differing from
+	// the last value this controller processed. The annotation is never
+	// modified; Status.LastAppliedRepaveTrigger is what advances instead. ---
+	triggerValue, hasTrigger := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]
+	if !hasTrigger || triggerValue == inst.Status.LastAppliedRepaveTrigger {
 		return Satisfied()
 	}
 
@@ -159,19 +167,17 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// caused itself. Without this, a repave that gets as far as stopping the
 	// VM can never finish: the next pass sees its own RepaveInProgress=True
 	// having flipped Phase to Modifying, Terminal-aborts on that self-caused
-	// change, clears the trigger, and leaves the VM halted on the old image
-	// with no automatic retry .
+	// change, records the trigger as handled, and leaves the VM halted on
+	// the old image with no automatic retry.
 	if inst.Status.Phase != dbaasv1.StatusAvailable &&
 		!inst.Status.IsConditionTrue(dbaasv1.ConditionRepaveInProgress) {
 		msg := "repave requires the instance to be Available"
-		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
-			return Transient(err)
-		}
+		inst.Status.LastAppliedRepaveTrigger = triggerValue
 		// Every other Terminal branch in this package sets a condition
 		// before returning — Result.Reason/Message are otherwise dropped
 		// entirely (reconcileInstance only reads ControllerResult/Err), so
 		// without this a blocked repave leaves no observable trace beyond
-		// the trigger annotation silently disappearing.
+		// LastAppliedRepaveTrigger silently catching up.
 		inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionFalse, dbaasv1.ReasonRepaveNotAvailable, msg)
 		return Terminal(dbaasv1.ReasonRepaveNotAvailable, msg)
 	}
@@ -182,16 +188,12 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	if !ok {
 		msg := fmt.Sprintf("engineVersion %q is not available in revision %q; migrate data before repaving",
 			inst.Spec.EngineVersion, stream.Revision)
-		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
-			return Transient(err)
-		}
+		inst.Status.LastAppliedRepaveTrigger = triggerValue
 		inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionFalse, dbaasv1.ReasonRepaveBlockedEOL, msg)
 		return Terminal(dbaasv1.ReasonRepaveBlockedEOL, msg)
 	}
 	if inst.Status.CurrentImageRevision == stream.Revision {
-		if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
-			return Transient(err)
-		}
+		inst.Status.LastAppliedRepaveTrigger = triggerValue
 		return Satisfied()
 	}
 
@@ -257,42 +259,14 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 		return res
 	}
 
-	// Clear the annotation and report Pending; the power step (ordered after
-	// this one) observes desired-running + declared-Halted and restarts on
-	// its own — no manual StartVM call needed here.
-	if err := r.clearTriggerAnnotation(ctx, inst); err != nil {
-		return Transient(err)
-	}
+	// Record the trigger as handled and report Pending; the power step
+	// (ordered after this one) observes desired-running + declared-Halted
+	// and restarts on its own — no manual StartVM call needed here.
+	inst.Status.LastAppliedRepaveTrigger = triggerValue
 	msg := fmt.Sprintf("applied repave to revision %s", stream.Revision)
 	inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionTrue, dbaasv1.ReasonRepaveApplied, msg)
 	inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonRepaveApplied, msg)
 	return Pending(dbaasv1.ReasonRepaveApplied, msg)
-}
-
-// clearTriggerAnnotation removes AnnotationRepaveTrigger once a repave has
-// either applied or been rejected. Annotations live in ObjectMeta, not
-// Status, so this is a real object Update — separate from, and issued
-// before, the single deferred status patch every other write in this file
-// participates in.
-//
-// DBInstance has a status subresource, so the API server (and the fake
-// client used in tests) ignore inst.Status in the request and return the
-// object with whatever Status was last durably persisted — which
-// client-go then decodes into inst, in place. Since nothing this Run() call
-// has done to inst.Status is durable yet (only the single deferred status
-// patch at the very end of Reconcile persists it), a bare Update here would
-// silently wipe out every Status mutation made earlier in this same pass
-// (verified empirically, not just inferred). Save and restore it around the
-// call.
-func (r *repaveStep) clearTriggerAnnotation(ctx context.Context, inst *dbaasv1.DBInstance) error {
-	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; !ok {
-		return nil
-	}
-	delete(inst.Annotations, dbaasv1.AnnotationRepaveTrigger)
-	status := inst.Status
-	err := r.Update(ctx, inst)
-	inst.Status = status
-	return err
 }
 
 // regenerateCloudInit rebuilds the cloud-init Secret from durable credential

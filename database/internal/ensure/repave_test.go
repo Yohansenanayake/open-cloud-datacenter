@@ -52,8 +52,8 @@ func newRepaveFixture(t *testing.T, rs kubevirtv1.VirtualMachineRunStrategy, rea
 	return r, inst, stub
 }
 
-func triggerRepave(inst *dbaasv1.DBInstance) {
-	inst.Annotations = map[string]string{dbaasv1.AnnotationRepaveTrigger: "now"}
+func triggerRepave(inst *dbaasv1.DBInstance, value string) {
+	inst.Annotations = map[string]string{dbaasv1.AnnotationRepaveTrigger: value}
 }
 
 func noProviderCalls(stub *stubHarvester) bool {
@@ -295,15 +295,19 @@ func TestEnsureRepaveDriftEngineVersionDroppedReportsEngineVersionEOL(t *testing
 func TestEnsureRepaveTriggerNotAvailableIsTerminal(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	inst.Status.Phase = dbaasv1.StatusModifying
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
 	if res.Outcome != OutcomeTerminal || res.Reason != dbaasv1.ReasonRepaveNotAvailable {
 		t.Fatalf("res = %+v, want Terminal/RepaveNotAvailable", res)
 	}
-	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; ok {
-		t.Fatal("trigger annotation should be cleared")
+	if v := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; v != "trigger-1" {
+		t.Fatalf("trigger annotation must never be modified by the controller, got %q", v)
+	}
+	if inst.Status.LastAppliedRepaveTrigger != "trigger-1" {
+		t.Fatalf("LastAppliedRepaveTrigger = %q, want %q — rejection must still be recorded as handled",
+			inst.Status.LastAppliedRepaveTrigger, "trigger-1")
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not touch the VM when the instance isn't Available")
@@ -322,15 +326,19 @@ func TestEnsureRepaveTriggerNotAvailableIsTerminal(t *testing.T) {
 func TestEnsureRepaveTriggerEngineVersionEOLBlockedIsTerminal(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	inst.Spec.EngineVersion = "15"
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
 	if res.Outcome != OutcomeTerminal || res.Reason != dbaasv1.ReasonRepaveBlockedEOL {
 		t.Fatalf("res = %+v, want Terminal/RepaveBlockedEOL", res)
 	}
-	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; ok {
-		t.Fatal("trigger annotation should be cleared")
+	if v := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; v != "trigger-1" {
+		t.Fatalf("trigger annotation must never be modified by the controller, got %q", v)
+	}
+	if inst.Status.LastAppliedRepaveTrigger != "trigger-1" {
+		t.Fatalf("LastAppliedRepaveTrigger = %q, want %q — rejection must still be recorded as handled",
+			inst.Status.LastAppliedRepaveTrigger, "trigger-1")
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatal("must not stop the VM for a repave that's blocked before any destructive step")
@@ -345,18 +353,40 @@ func TestEnsureRepaveTriggerEngineVersionEOLBlockedIsTerminal(t *testing.T) {
 func TestEnsureRepaveTriggerAlreadyOnTargetIsNoop(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	inst.Status.CurrentImageRevision = defaultBakedImageName
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("res = %+v, want Satisfied", res)
 	}
-	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; ok {
-		t.Fatal("trigger annotation should be cleared")
+	if v := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; v != "trigger-1" {
+		t.Fatalf("trigger annotation must never be modified by the controller, got %q", v)
+	}
+	if inst.Status.LastAppliedRepaveTrigger != "trigger-1" {
+		t.Fatalf("LastAppliedRepaveTrigger = %q, want %q — no-op must still be recorded as handled",
+			inst.Status.LastAppliedRepaveTrigger, "trigger-1")
 	}
 	if !noProviderCalls(stub) {
 		t.Fatal("no StopVM/SwapVMOSDisk calls expected for a same-revision no-op trigger")
+	}
+}
+
+// A repave is dispatched only when the annotation's value differs from what
+// was last processed — replaying the same value (e.g. a stale watch replay,
+// or an operator re-applying the same manifest) must not re-trigger it.
+func TestEnsureRepaveTriggerAlreadyHandledIsNoop(t *testing.T) {
+	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
+	triggerRepave(inst, "trigger-1")
+	inst.Status.LastAppliedRepaveTrigger = "trigger-1"
+
+	res := r.ensureRepave(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied", res)
+	}
+	if !noProviderCalls(stub) {
+		t.Fatal("no provider calls expected when the trigger has already been handled")
 	}
 }
 
@@ -364,7 +394,7 @@ func TestEnsureRepaveTriggerAlreadyOnTargetIsNoop(t *testing.T) {
 
 func TestEnsureRepaveTriggerVMRunningStopsIt(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
@@ -384,16 +414,21 @@ func TestEnsureRepaveTriggerVMRunningStopsIt(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonRepaveStopping) {
 		t.Fatalf("RepaveInProgress = %+v, want True/RepaveStopping", cond)
 	}
-	// Trigger annotation is only cleared once the repave actually applies or
-	// is rejected, not while it's merely in progress.
-	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; !ok {
-		t.Fatal("trigger annotation should remain set while stopping")
+	// LastAppliedRepaveTrigger is only recorded once the repave actually
+	// applies or is rejected, not while it's merely in progress — otherwise
+	// the gate would stop re-dispatching before the swap ever happens.
+	if v := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; v != "trigger-1" {
+		t.Fatalf("trigger annotation must never be modified by the controller, got %q", v)
+	}
+	if inst.Status.LastAppliedRepaveTrigger != "" {
+		t.Fatalf("LastAppliedRepaveTrigger = %q, want empty — must not record as handled while stopping",
+			inst.Status.LastAppliedRepaveTrigger)
 	}
 }
 
 func TestEnsureRepaveTriggerWaitsForTeardown(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{Running: true})
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
@@ -415,7 +450,7 @@ func TestEnsureRepaveTriggerWaitsForTeardown(t *testing.T) {
 func TestEnsureRepaveTriggerAppliesSwapWhenDown(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
 	convergeCredentials(t, context.Background(), r, inst) // regenerateCloudInit needs stable, already-resolved Material
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
@@ -441,8 +476,12 @@ func TestEnsureRepaveTriggerAppliesSwapWhenDown(t *testing.T) {
 		t.Fatal("PendingDeleteOSDiskPVCName should be cleared once DeletePVC succeeds")
 	}
 	wantDrift(t, inst, metav1.ConditionFalse, dbaasv1.ReasonImageUpToDate)
-	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; ok {
-		t.Fatal("trigger annotation should be cleared once applied")
+	if v := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; v != "trigger-1" {
+		t.Fatalf("trigger annotation must never be modified by the controller, got %q", v)
+	}
+	if inst.Status.LastAppliedRepaveTrigger != "trigger-1" {
+		t.Fatalf("LastAppliedRepaveTrigger = %q, want %q — applied repave must record the trigger as handled",
+			inst.Status.LastAppliedRepaveTrigger, "trigger-1")
 	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionRepaveInProgress)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(dbaasv1.ReasonRepaveApplied) {
@@ -486,7 +525,7 @@ func TestEnsureRepaveSwapAppliedVMStillDownSatisfied(t *testing.T) {
 func TestEnsureRepaveSwapErrorIsTransientNoStatusUpdate(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
 	stub.SwapVMOSDiskErr = errors.New("harvester unavailable")
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
@@ -502,6 +541,9 @@ func TestEnsureRepaveSwapErrorIsTransientNoStatusUpdate(t *testing.T) {
 	if inst.Status.Resources.PendingDeleteOSDiskPVCName != "" {
 		t.Fatal("PendingDeleteOSDiskPVCName must not be set when the swap itself never succeeded")
 	}
+	if inst.Status.LastAppliedRepaveTrigger != "" {
+		t.Fatal("LastAppliedRepaveTrigger must not update when SwapVMOSDisk fails")
+	}
 }
 
 // Decision #16: DeletePVC failing after a successful swap must still record
@@ -510,7 +552,7 @@ func TestEnsureRepaveSwapErrorIsTransientNoStatusUpdate(t *testing.T) {
 func TestEnsureRepaveDeletePVCErrorAfterSwapRecordsPendingDelete(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
 	stub.DeletePVCErr = errors.New("transient RBAC error")
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	res := r.ensureRepave(context.Background(), inst)
 
@@ -519,6 +561,9 @@ func TestEnsureRepaveDeletePVCErrorAfterSwapRecordsPendingDelete(t *testing.T) {
 	}
 	if inst.Status.Resources.PendingDeleteOSDiskPVCName == "" {
 		t.Fatal("PendingDeleteOSDiskPVCName should be set to the old PVC name even though DeletePVC failed")
+	}
+	if inst.Status.LastAppliedRepaveTrigger != "" {
+		t.Fatal("LastAppliedRepaveTrigger must not update until the repave actually completes")
 	}
 }
 
@@ -583,7 +628,7 @@ func TestEnsureRepaveContinuesAfterOwnPhaseChange(t *testing.T) {
 	ctx := context.Background()
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	convergeCredentials(t, ctx, r, inst) // regenerateCloudInit (pass 2) needs stable Material
-	triggerRepave(inst)
+	triggerRepave(inst, "trigger-1")
 
 	// Pass 1: VM running -> stop it.
 	res := r.ensureRepave(ctx, inst)
@@ -623,7 +668,11 @@ func TestEnsureRepaveContinuesAfterOwnPhaseChange(t *testing.T) {
 	if stub.SwapVMOSDiskCalls != 1 {
 		t.Fatalf("SwapVMOSDiskCalls = %d, want 1", stub.SwapVMOSDiskCalls)
 	}
-	if _, ok := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; ok {
-		t.Fatal("trigger annotation should be cleared once applied")
+	if v := inst.Annotations[dbaasv1.AnnotationRepaveTrigger]; v != "trigger-1" {
+		t.Fatalf("trigger annotation must never be modified by the controller, got %q", v)
+	}
+	if inst.Status.LastAppliedRepaveTrigger != "trigger-1" {
+		t.Fatalf("LastAppliedRepaveTrigger = %q, want %q — applied repave must record the trigger as handled",
+			inst.Status.LastAppliedRepaveTrigger, "trigger-1")
 	}
 }

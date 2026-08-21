@@ -464,6 +464,14 @@ spec:
               grafanaUrl:
                 description: GrafanaURL is the per-instance Grafana dashboard URL.
                 type: string
+              lastAppliedRepaveTrigger:
+                description: |-
+                  LastAppliedRepaveTrigger records the value of AnnotationRepaveTrigger
+                  that was last processed (accepted, rejected, or applied) — mirrors
+                  Flux's ReconcileRequestAnnotation/LastHandledReconcileAt pattern. The
+                  annotation itself is never modified by the controller; a repave is
+                  dispatched only when its current value differs from this field.
+                type: string
               lastKnownVMIUID:
                 description: |-
                   LastKnownVMIUID is the UID of the VMI last recorded by the controller.
