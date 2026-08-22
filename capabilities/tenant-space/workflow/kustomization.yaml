@@ -11,5 +11,6 @@ configurations:
 
 images:
   - name: cap-002-terraform-runner
-    newName: registry.example.invalid/harvester-testsuite-terraform-runner
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    newName: ghcr.io/yohansenanayake/harvester-testsuite
+    digest: sha256:a300088abeb7f1ad61f256c1887446b3597634ae02e544861606518d4f674e67
+    
