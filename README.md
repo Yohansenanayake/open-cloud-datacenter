@@ -122,6 +122,7 @@ Each capability is an independent module:
 ```text
 capabilities/tenant-space/
 ├── capability.yaml
+├── scripts/                  # Container step implementations
 ├── workflow/
 │   └── workflow-template.yaml
 ├── fixtures/

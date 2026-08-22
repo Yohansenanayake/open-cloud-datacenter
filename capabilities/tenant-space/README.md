@@ -68,10 +68,26 @@ whose prerequisite stage was never reached are intentionally absent. Raw
 Terraform state, the binary plan, generated variable files, credentials,
 principal IDs, and unrestricted Terraform JSON are never published.
 
-## Build the runner image
+## Runner scripts and image
 
-The runner image carries Terraform 1.15.8 and the CAP-002 fixture. Rebuild it
-after changing Terraform files, including outputs used by evidence collection:
+The Argo template defines orchestration, environment variables, mounts, and
+resource limits. The shell implementation for each container step lives under
+`scripts/`, with one script per step:
+
+```text
+scripts/
+├── prepare.sh
+├── terraform-init.sh
+├── terraform-plan.sh
+├── terraform-apply.sh
+├── collect-terraform-evidence.sh
+├── terraform-destroy.sh
+└── publish-evidence.sh
+```
+
+The runner image carries Terraform 1.15.8, the CAP-002 fixture, and these
+scripts. Rebuild it after changing either the Terraform files or a runner
+script:
 
 ```bash
 make terraform-runner-publish \

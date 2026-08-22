@@ -2,7 +2,8 @@
 
 This non-root image supplies Terraform, Git, jq, CA certificates, and a POSIX
 shell. For the initial CAP-002 milestone, it also carries the tenant-space
-Terraform fixture so the workflow does not need to clone Git at runtime.
+Terraform fixture and capability-owned runner scripts. The Argo template calls
+those scripts by their paths under `/opt/testsuite/capabilities/tenant-space/`.
 
 Build and push the image to a registry reachable from the Host cluster:
 
@@ -27,6 +28,10 @@ does not contain a default registry destination.
 Resolve the pushed digest, then replace `newName` and `digest` in
 `capabilities/tenant-space/workflow/kustomization.yaml`. The deployed workflow
 must use a digest, not a mutable tag.
+
+Rebuild and republish the image whenever either
+`capabilities/tenant-space/fixtures/terraform/` or
+`capabilities/tenant-space/scripts/` changes.
 
 Verify the local image before publishing it:
 
