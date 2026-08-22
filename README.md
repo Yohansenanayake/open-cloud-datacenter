@@ -76,8 +76,9 @@ when a Target capability is degraded.
 ## Capability workflow lifecycle
 
 The complete test suite will use the bounded lifecycle below. CAP-002 currently
-implements only configuration preparation and Terraform `init`, `plan`, and
-`apply`; each remaining stage will be added as a separate milestone.
+implements configuration preparation, Terraform provisioning, sanitized
+Terraform evidence publication, and Terraform cleanup; each remaining stage
+will be added as a separate milestone.
 
 1. Validate Target connectivity, versions, capacity, and required inputs.
 2. Acquire an environment lock to prevent conflicting runs.
@@ -105,10 +106,10 @@ exercises:
 - Expected project role bindings.
 
 This phase proves the Terraform provisioning and destruction paths through Argo.
-An exit handler always attempts cleanup, and Argo deletes the per-workflow state
-PVC after a fully successful run. Output collection, automated failed-run
-recovery, quota enforcement, reconciliation, and negative-path assertions are
-later milestones.
+An exit handler always attempts cleanup, publishes sanitized plan, applied-state,
+and cleanup evidence, and Argo deletes the per-workflow state PVC after a fully
+successful run. Automated failed-run recovery, quota enforcement,
+reconciliation, and negative-path assertions are later milestones.
 
 The initial scenario covers a tenant with quota. Tenant-without-quota and deeper
 network and RBAC scenarios can be added without changing other capability

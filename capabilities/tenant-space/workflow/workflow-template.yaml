@@ -83,11 +83,17 @@ spec:
             template: terraform-plan
         - - name: apply
             template: terraform-apply
+        - - name: collect-terraform-evidence
+            template: collect-terraform-evidence
 
     - name: exit-handler
-      steps:
-        - - name: destroy
+      dag:
+        tasks:
+          - name: destroy
             template: terraform-destroy
+          - name: publish-evidence
+            template: publish-evidence
+            depends: destroy.Succeeded || destroy.Failed || destroy.Errored
 
     - name: prepare
       container:
@@ -140,7 +146,9 @@ spec:
 
             runDir="/workspace/runs/$workflowUid"
             terraformDir="$runDir/terraform"
-            mkdir -p "$terraformDir" "$runDir/state" /workspace/home /workspace/plugin-cache
+            evidenceDir="$runDir/evidence/terraform"
+            mkdir -p "$terraformDir" "$runDir/state" "$evidenceDir" \
+              /workspace/home /workspace/plugin-cache
             rm -f "$terraformDir"/*.tf \
               "$terraformDir/.terraform.lock.hcl" \
               "$terraformDir/terraform.auto.tfvars.json"
@@ -168,6 +176,39 @@ spec:
                 group_role_bindings: $group_role_bindings
               }' >"$terraformDir/terraform.auto.tfvars.json"
 
+            terraform -chdir="$terraformDir" version -json | jq \
+              --arg workflow_name "$workflowName" \
+              --arg workflow_uid "$workflowUid" \
+              --arg project_name "$projectName" \
+              --arg target_cluster_id "$harvesterClusterId" \
+              --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{
+                schemaVersion: "testsuite.opencloud.wso2.com/v1alpha1",
+                kind: "TerraformRunMetadata",
+                generatedAt: $generated_at,
+                capabilityId: "CAP-002",
+                capabilityName: "tenant-space",
+                workflow: {
+                  name: $workflow_name,
+                  uid: $workflow_uid
+                },
+                target: {
+                  clusterId: $target_cluster_id
+                },
+                tenant: {
+                  projectName: $project_name
+                },
+                terraform: {
+                  version: .terraform_version,
+                  platform: .platform,
+                  providerSelections: .provider_selections,
+                  module: {
+                    source: "github.com/wso2/open-cloud-datacenter//modules/tenancy/tenant-space",
+                    version: "terraform/v0.2.0"
+                  }
+                }
+              }' >"$evidenceDir/metadata.json"
+
             echo "tenant project name: $projectName"
         env:
           - name: rancherUrl
@@ -188,6 +229,8 @@ spec:
             value: "{{workflow.parameters.group-role-bindings-json}}"
           - name: workflowUid
             value: "{{workflow.uid}}"
+          - name: workflowName
+            value: "{{workflow.name}}"
           - name: TF_VAR_rancher_api_token
             valueFrom:
               secretKeyRef:
@@ -269,11 +312,56 @@ spec:
           - -ceu
           - |
             runDir="/workspace/runs/$WORKFLOW_UID"
+            evidenceDir="$runDir/evidence/terraform"
+            planFile="$runDir/tenant-space.tfplan"
             cd "$runDir/terraform"
             terraform plan \
               -input=false \
               -no-color \
-              -out="$runDir/tenant-space.tfplan"
+              -out="$planFile"
+
+            planSha256="$(sha256sum "$planFile" | awk '{print $1}')"
+            generatedAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            terraform show -json "$planFile" | jq \
+              --arg plan_sha256 "$planSha256" \
+              --arg generated_at "$generatedAt" '
+                def action_category:
+                  if . == ["no-op"] then "no-op"
+                  elif (index("create") != null and index("delete") != null) then "replace"
+                  elif index("create") != null then "create"
+                  elif index("update") != null then "update"
+                  elif index("delete") != null then "delete"
+                  elif index("read") != null then "read"
+                  else "other"
+                  end;
+
+                [
+                  .resource_changes[]?
+                  | (.change.actions | action_category) as $action
+                  | select($action != "no-op")
+                  | {
+                      module: (.module_address // "root"),
+                      type,
+                      name,
+                      action: $action
+                    }
+                ] as $resources
+                | {
+                    schemaVersion: "testsuite.opencloud.wso2.com/v1alpha1",
+                    kind: "TerraformPlanSummary",
+                    generatedAt: $generated_at,
+                    planSha256: $plan_sha256,
+                    counts: {
+                      create: ([$resources[] | select(.action == "create")] | length),
+                      update: ([$resources[] | select(.action == "update")] | length),
+                      delete: ([$resources[] | select(.action == "delete")] | length),
+                      replace: ([$resources[] | select(.action == "replace")] | length),
+                      read: ([$resources[] | select(.action == "read")] | length),
+                      other: ([$resources[] | select(.action == "other")] | length)
+                    },
+                    resources: $resources
+                  }
+              ' >"$evidenceDir/plan-summary.json"
         env: &terraformEnvironment
           - name: WORKFLOW_UID
             value: "{{workflow.uid}}"
@@ -326,6 +414,127 @@ spec:
         resources: *terraformResources
         securityContext: *containerSecurityContext
 
+    - name: collect-terraform-evidence
+      container:
+        image: cap-002-terraform-runner
+        imagePullPolicy: IfNotPresent
+        command: [/bin/sh]
+        args:
+          - -ceu
+          - |
+            runDir="/workspace/runs/$WORKFLOW_UID"
+            terraformDir="$runDir/terraform"
+            evidenceDir="$runDir/evidence/terraform"
+            collectedAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            cd "$terraformDir"
+
+            projectId="$(terraform output -raw project_id)"
+            projectName="$(terraform output -raw project_name)"
+            namespaceIds="$(terraform output -json namespace_ids)"
+            networkNamespace="$(terraform output -raw network_namespace)"
+            networkNamespaceId="$(terraform output -raw network_namespace_id)"
+
+            terraform show -json | jq \
+              --arg collected_at "$collectedAt" \
+              --arg project_id "$projectId" \
+              --arg project_name "$projectName" \
+              --argjson namespace_ids "$namespaceIds" \
+              --arg network_namespace "$networkNamespace" \
+              --arg network_namespace_id "$networkNamespaceId" '
+                def modules:
+                  ., (.child_modules[]? | modules);
+
+                [.values.root_module | modules | .resources[]?] as $resources
+                | first(
+                    $resources[]
+                    | select(.address == "module.tenant_space.rancher2_project.this")
+                  ) as $project
+                | if $project == null then
+                    error("tenant project is missing from Terraform state")
+                  else
+                    {
+                      schemaVersion: "testsuite.opencloud.wso2.com/v1alpha1",
+                      kind: "TerraformAppliedResources",
+                      collectedAt: $collected_at,
+                      project: {
+                        id: $project_id,
+                        name: $project_name,
+                        clusterId: $project.values.cluster_id,
+                        projectLimit: ($project.values.resource_quota[0].project_limit[0] // null),
+                        namespaceDefaultLimit: ($project.values.resource_quota[0].namespace_default_limit[0] // null)
+                      },
+                      namespaces: {
+                        workload: $namespace_ids,
+                        network: {
+                          name: $network_namespace,
+                          id: $network_namespace_id
+                        },
+                        resources: [
+                          $resources[]
+                          | select(.type == "rancher2_namespace")
+                          | {
+                              terraformName: .name,
+                              name: .values.name,
+                              id: .values.id,
+                              quota: (.values.resource_quota[0].limit[0] // null)
+                            }
+                        ]
+                      },
+                      networks: [
+                        $resources[]
+                        | select(.type == "harvester_network")
+                        | {
+                            terraformName: .name,
+                            id: .values.id,
+                            name: .values.name,
+                            namespace: .values.namespace,
+                            vlanId: .values.vlan_id,
+                            clusterNetworkName: .values.cluster_network_name,
+                            routeMode: .values.route_mode
+                          }
+                      ],
+                      roleBindings: {
+                        tenant: [
+                          $resources[]
+                          | select(
+                              .type == "rancher2_project_role_template_binding"
+                              and .name == "this"
+                            )
+                          | {roleTemplateId: .values.role_template_id}
+                        ],
+                        sharedImageAccess: [
+                          $resources[]
+                          | select(
+                              .type == "rancher2_project_role_template_binding"
+                              and .name == "shared_image_access"
+                            )
+                          | {roleTemplateId: .values.role_template_id}
+                        ]
+                      }
+                    }
+                  end
+              ' >"$evidenceDir/applied-resources.json"
+
+            echo "sanitized Terraform apply evidence collected"
+        env:
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
+          - name: HOME
+            value: /workspace/home
+          - name: TF_PLUGIN_CACHE_DIR
+            value: /workspace/plugin-cache
+          - name: TF_IN_AUTOMATION
+            value: "1"
+          - name: TF_INPUT
+            value: "0"
+        volumeMounts:
+          - name: terraform-workspace
+            mountPath: /workspace
+          - name: tmp
+            mountPath: /tmp
+        resources: *terraformResources
+        securityContext: *containerSecurityContext
+
     - name: terraform-destroy
       container:
         image: cap-002-terraform-runner
@@ -336,26 +545,176 @@ spec:
           - |
             runDir="/workspace/runs/$WORKFLOW_UID"
             stateFile="$runDir/state/terraform.tfstate"
+            evidenceDir="$runDir/evidence/terraform"
+            cleanupFile="$evidenceDir/cleanup.json"
+            mkdir -p "$evidenceDir"
+
+            managed_resources() {
+              if [ ! -s "$stateFile" ]; then
+                printf '[]'
+                return
+              fi
+
+              jq -c '[
+                .resources[]?
+                | select(.mode == "managed")
+                | {
+                    module: (.module // "root"),
+                    type,
+                    name,
+                    instances: (.instances | length)
+                  }
+              ]' "$stateFile" 2>/dev/null || printf '[]'
+            }
+
+            write_cleanup_evidence() {
+              attempted="$1"
+              succeeded="$2"
+              exitCode="$3"
+              message="$4"
+              remainingResources="$(managed_resources)"
+              remainingCount="$(printf '%s' "$remainingResources" | jq '[.[].instances] | add // 0')"
+
+              jq -n \
+                --arg collected_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --argjson attempted "$attempted" \
+                --argjson succeeded "$succeeded" \
+                --argjson terraform_exit_code "$exitCode" \
+                --arg message "$message" \
+                --argjson managed_resources_before "$managedResourcesBefore" \
+                --argjson remaining_count "$remainingCount" \
+                --argjson remaining_resources "$remainingResources" \
+                '{
+                  schemaVersion: "testsuite.opencloud.wso2.com/v1alpha1",
+                  kind: "TerraformCleanupResult",
+                  collectedAt: $collected_at,
+                  attempted: $attempted,
+                  succeeded: $succeeded,
+                  terraformExitCode: $terraform_exit_code,
+                  message: $message,
+                  managedResourcesBefore: $managed_resources_before,
+                  managedResourcesRemaining: $remaining_count,
+                  remainingResources: $remaining_resources
+                }' >"$cleanupFile"
+            }
 
             if [ ! -s "$stateFile" ]; then
+              managedResourcesBefore=0
+              write_cleanup_evidence false true 0 "no Terraform state found; cleanup was not required"
               echo "no Terraform state found; cleanup is not required"
               exit 0
             fi
 
+            resourcesBefore="$(managed_resources)"
+            managedResourcesBefore="$(printf '%s' "$resourcesBefore" | jq '[.[].instances] | add // 0')"
+
             terraformDir="$runDir/terraform"
             [ -d "$terraformDir" ] || {
+              write_cleanup_evidence true false 1 "Terraform working directory was missing"
               echo "Terraform state exists but the working directory is missing" >&2
               exit 1
             }
 
+            set +e
             cd "$terraformDir"
             terraform init -input=false -no-color -lockfile=readonly
+            initExitCode=$?
+            if [ "$initExitCode" -ne 0 ]; then
+              write_cleanup_evidence true false "$initExitCode" "terraform init failed before destroy"
+              exit "$initExitCode"
+            fi
+
             terraform destroy \
               -auto-approve \
               -input=false \
               -no-color
+            destroyExitCode=$?
+
+            if [ "$destroyExitCode" -ne 0 ]; then
+              write_cleanup_evidence true false "$destroyExitCode" "terraform destroy failed"
+              exit "$destroyExitCode"
+            fi
+
+            remainingResources="$(managed_resources)"
+            remainingCount="$(printf '%s' "$remainingResources" | jq '[.[].instances] | add // 0')"
+            if [ "$remainingCount" -ne 0 ]; then
+              write_cleanup_evidence true false 1 "terraform destroy completed but managed resources remain in state"
+              echo "Terraform managed resources remain in state after destroy" >&2
+              exit 1
+            fi
+
+            write_cleanup_evidence true true 0 "tenant resources destroyed successfully"
             echo "tenant resources destroyed successfully"
         env: *terraformEnvironment
         volumeMounts: *terraformVolumeMounts
         resources: *terraformResources
         securityContext: *containerSecurityContext
+
+    - name: publish-evidence
+      container:
+        image: cap-002-terraform-runner
+        imagePullPolicy: IfNotPresent
+        command: [/bin/sh]
+        args:
+          - -ceu
+          - |
+            evidenceDir="/workspace/runs/$WORKFLOW_UID/evidence/terraform"
+            mkdir -p "$evidenceDir"
+
+            if [ ! -s "$evidenceDir/metadata.json" ]; then
+              jq -n \
+                --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --arg workflow_name "$WORKFLOW_NAME" \
+                --arg workflow_uid "$WORKFLOW_UID" \
+                '{
+                  schemaVersion: "testsuite.opencloud.wso2.com/v1alpha1",
+                  kind: "TerraformRunMetadata",
+                  generatedAt: $generated_at,
+                  capabilityId: "CAP-002",
+                  capabilityName: "tenant-space",
+                  workflow: {
+                    name: $workflow_name,
+                    uid: $workflow_uid
+                  },
+                  preparationCompleted: false
+                }' >"$evidenceDir/metadata.json"
+            fi
+
+            jq -n \
+              --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg workflow_status "$WORKFLOW_STATUS" \
+              '{
+                schemaVersion: "testsuite.opencloud.wso2.com/v1alpha1",
+                kind: "WorkflowResult",
+                recordedAt: $recorded_at,
+                statusBeforeExitHandler: $workflow_status
+              }' >"$evidenceDir/workflow-result.json"
+
+            for evidenceFile in "$evidenceDir"/*.json; do
+              jq -e . "$evidenceFile" >/dev/null
+            done
+
+            echo "publishing sanitized Terraform evidence"
+            for evidenceFile in "$evidenceDir"/*.json; do
+              basename "$evidenceFile"
+            done | sort
+        env:
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
+          - name: WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: WORKFLOW_STATUS
+            value: "{{workflow.status}}"
+        volumeMounts:
+          - name: terraform-workspace
+            mountPath: /workspace
+          - name: tmp
+            mountPath: /tmp
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 512Mi}
+        securityContext: *containerSecurityContext
+      outputs:
+        artifacts:
+          - name: terraform-evidence
+            path: "/workspace/runs/{{workflow.uid}}/evidence/terraform"

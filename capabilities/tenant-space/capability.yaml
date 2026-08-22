@@ -27,4 +27,5 @@ spec:
       - storage-limit
       - group-role-bindings-json
     targetCredentials: cap-002-target-credentials
-  outputs: []
+  outputs:
+    - terraform-evidence

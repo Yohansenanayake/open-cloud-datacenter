@@ -88,9 +88,10 @@ replace the capability-owned workflows.
 
 ## Target capability run lifecycle
 
-The complete lifecycle is listed below. The initial CAP-002 milestone implements
-steps 1 through 4 and step 8. It deletes the workspace PVC after successful
-cleanup and retains it when the workflow fails.
+The complete lifecycle is listed below. CAP-002 currently implements input
+validation, locking, Terraform provisioning, sanitized Terraform evidence
+publication, and unconditional Terraform cleanup. It deletes the workspace PVC
+after successful cleanup and retains it when the workflow fails.
 
 1. Validate Target connectivity, versions, capacity, and required inputs.
 2. Generate a unique run ID and acquire the required environment lock.
@@ -133,7 +134,8 @@ evidence/
 logs/
 ```
 
-CAP-002 does not publish this contract in its first lifecycle phase.
-Output collection is the next milestone; JUnit, behavioral-test logs, and
-broader evidence are added with the Go runner. The executable schema, retention
-rules, and evidence redaction policy will be versioned at that point.
+CAP-002 currently publishes the `evidence/terraform` portion of this contract:
+run metadata, a sanitized plan summary, applied-resource inventory, and cleanup
+status. JUnit, behavioral-test logs, and broader Kubernetes evidence are added
+with the Go runner. The executable schema, retention rules, and broader evidence
+redaction policy will be versioned at that point.

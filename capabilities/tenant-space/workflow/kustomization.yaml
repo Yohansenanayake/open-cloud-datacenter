@@ -12,5 +12,5 @@ configurations:
 images:
   - name: cap-002-terraform-runner
     newName: ghcr.io/yohansenanayake/harvester-testsuite
-    digest: sha256:a300088abeb7f1ad61f256c1887446b3597634ae02e544861606518d4f674e67
+    digest: sha256:c3c3dde1178ad26db39549a9550df9cd4b466352e2c72bf10069f8713e954744
     

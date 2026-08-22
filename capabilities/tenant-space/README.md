@@ -4,17 +4,22 @@ This CAP-002 milestone provisions one quota-enabled tenant space through
 Terraform orchestrated by Argo Workflows and destroys it through an
 unconditional exit handler.
 
-Output collection, result artifacts, behavioral assertions, and failed-run
-recovery automation are separate follow-up milestones.
+This phase also publishes a sanitized Terraform evidence artifact. Behavioral
+assertions, Kubernetes evidence, JUnit results, and failed-run recovery
+automation remain separate follow-up milestones.
 
 ## Workflow
 
-The main workflow runs four sequential steps:
+The main workflow provisions the fixture and captures evidence before cleanup:
 
 ```text
 prepare → terraform init → terraform plan → terraform apply
-                                                    │
-                                                    └─ always → terraform destroy
+                                                    → collect Terraform evidence
+                                                                  │
+                                                                  └─ always:
+                                                                     destroy
+                                                                       ↓
+                                                                     publish
 ```
 
 Argo creates a 2 Gi `ReadWriteOnce` PVC for each workflow. All steps, including
@@ -32,9 +37,41 @@ including destroy, succeeds. Failed workflows retain their PVC so the state is
 available for investigation and recovery. A workflow mutex serializes CAP-002
 runs in the initial shared VLAN environment.
 
+## Terraform evidence
+
+The workflow publishes an Argo output artifact named `terraform-evidence` to
+the Host namespace's default artifact repository. The development setup uses
+MinIO for this repository. Depending on how far a run progresses, the artifact
+contains:
+
+```text
+terraform/
+├── metadata.json
+├── plan-summary.json
+├── applied-resources.json
+├── cleanup.json
+└── workflow-result.json
+```
+
+- `metadata.json` identifies the workflow, Target cluster, generated tenant,
+  Terraform version, provider selections, and tenancy module version.
+- `plan-summary.json` records the saved plan's SHA-256 digest, action counts,
+  and resource types without storing planned values.
+- `applied-resources.json` records allowlisted project, namespace, quota,
+  network, and role-template information after a successful apply.
+- `cleanup.json` records whether destroy ran, its exit code, and the count and
+  types of any managed resources remaining in state.
+- `workflow-result.json` records the workflow status seen by the exit handler.
+
+The publisher runs after both successful and failed destroy attempts. Files
+whose prerequisite stage was never reached are intentionally absent. Raw
+Terraform state, the binary plan, generated variable files, credentials,
+principal IDs, and unrestricted Terraform JSON are never published.
+
 ## Build the runner image
 
-The runner image carries Terraform 1.15.8 and the CAP-002 fixture:
+The runner image carries Terraform 1.15.8 and the CAP-002 fixture. Rebuild it
+after changing Terraform files, including outputs used by evidence collection:
 
 ```bash
 make terraform-runner-publish \
@@ -109,7 +146,8 @@ token and Harvester kubeconfig remain in `cap-002-target-credentials`.
 
 During the run, Terraform logs show the generated project, namespaces, quota,
 role binding, and VM network being created and then removed. After a successful
-workflow, verify that the tenant resources and workflow PVC no longer exist.
+workflow, inspect the `terraform-evidence` artifact in the Argo UI or MinIO and
+verify that the tenant resources and workflow PVC no longer exist.
 
 ```bash
 kubectl -n argo get pvc
