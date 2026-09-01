@@ -85,13 +85,19 @@ type InfrastructureConfig struct {
 
 type HarvesterConfig struct {
 	ManagementLogicalSwitch string `konf:"managementLogicalSwitch"`
+	// ImageNamespace is the Harvester namespace that baked-image names from
+	// internal/catalog resolve against when they carry no explicit
+	// "namespace/name" prefix. Empty means ResolveVMImage falls back to
+	// "default".
+	ImageNamespace string `konf:"imageNamespace"`
 }
 
 type DatabaseDefaults struct {
-	OSImage        string `konf:"osImage"`
 	StorageClass   string `konf:"storageClass"`
 	MasterUsername string `konf:"masterUsername"`
 	Port           int    `konf:"port"`
+	// OSVersion is the internal/catalog stream key (e.g. "24.04"); platform-wide, with no per-instance override.
+	OSVersion string `konf:"osVersion"`
 }
 
 type ObservabilityConfig struct {

@@ -84,6 +84,9 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop;virtualmachines/restart,verbs=update
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=harvesterhci.io,resources=virtualmachineimages,verbs=get;list
+// persistentvolumeclaims: repave's SwapVMOSDisk/DeletePVC delete the old OS-disk
+// PVC after swapping the VM onto a new baked-image revision.
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=delete;get;list
 // External references the controller never creates: preflight only validates they
 // exist (read-only). The NAD is inline-declared by the VM, not created here.
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list

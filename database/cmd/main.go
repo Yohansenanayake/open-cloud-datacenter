@@ -128,6 +128,7 @@ func main() {
 		os.Exit(1)
 	}
 	hvClient.MgmtLogicalSwitch = cfg.Infrastructure.Harvester.ManagementLogicalSwitch
+	hvClient.DefaultImageNamespace = cfg.Infrastructure.Harvester.ImageNamespace
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,

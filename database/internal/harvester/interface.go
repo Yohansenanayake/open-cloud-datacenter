@@ -50,6 +50,45 @@ type ClientInterface interface {
 	// method. TeardownAll still deletes them by ref as the finalizer's
 	// authoritative cleanup; owner-ref GC is the backup.
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error
+
+	// SwapVMOSDisk repoints the "os-disk" volumeClaimTemplates entry to a new
+	// revision-suffixed PVC backed by newImageRef's StorageClass, and repoints
+	// the "os-disk" volume's claimName to match. Returns (oldPVCName,
+	// newPVCName, err); oldPVCName is "" if the VM was already on the target
+	// disk (idempotent re-entry).
+	SwapVMOSDisk(ctx context.Context, ns, vmName, instID, newImageRef string) (oldPVCName, newPVCName string, err error)
+
+	// DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
+	DeletePVC(ctx context.Context, ns, name string) error
+
+	// GetVMOSDiskImageID returns the Harvester ImageID ("namespace/name")
+	// recorded on the VM's current OS-disk PVC — ground truth for which
+	// baked image is actually running, used to self-heal
+	// DBInstance.Status.CurrentImageRevision independent of whether a prior
+	// status write persisted. Returns ("", nil) if not yet determinable.
+	GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error)
+
+	// GetVMOSDiskPVCName returns the claimName of the VM's current "os-disk"
+	// volume — ground truth for which PVC actually backs it, used to
+	// self-heal DBInstance.Status.Resources.OSDiskPVCName the same way
+	// GetVMOSDiskImageID self-heals CurrentImageRevision. Unlike the data
+	// disk's PVC name, this can't be recomputed deterministically once a
+	// repave has happened (it becomes revision-suffixed), so it must be
+	// observed from the live VM rather than derived. Returns ("", nil) if
+	// not yet determinable.
+	GetVMOSDiskPVCName(ctx context.Context, ns, vmName string) (string, error)
+
+	// ResolveVMImageDisplayName returns the DisplayName of the
+	// VirtualMachineImage identified by ns/name — the inverse of
+	// ResolveVMImage's own displayName-fallback lookup. GetVMOSDiskImageID
+	// observes a real Harvester object identity off the VM's live os-disk
+	// PVC annotation, but internal/catalog is keyed by the human-readable
+	// strings operators write into BakedImages; on a real cluster, imported
+	// images commonly get an auto-generated object name with that string
+	// only on DisplayName, so self-heal must translate back through this
+	// before comparing against the catalog. Returns ("", nil), not an
+	// error, if the image no longer exists.
+	ResolveVMImageDisplayName(ctx context.Context, ns, name string) (string, error)
 }
 
 // ResolvedVMImage contains the provider-neutral image fields needed to build a
@@ -81,6 +120,7 @@ type VMCreateParams struct {
 	CPUCores               int
 	MemoryMB               int
 	OSImage                string
+	OSDiskPVCName          string
 	DataVolumeRef          string
 	DataVolumeSizeGB       int
 	DataVolumeStorageClass string

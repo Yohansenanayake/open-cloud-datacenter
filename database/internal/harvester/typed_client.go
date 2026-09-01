@@ -49,6 +49,14 @@ const (
 	dataNetInterface = "data-net"
 )
 
+// GuestBootstrapCompleteMarker is the in-guest path bootstrap.sh touches once
+// the master role and its database exist, and that the readiness probe tests
+// for before trusting pg_isready. It is declared here rather than in
+// internal/credentials — which writes it — because credentials imports this
+// package, so the dependency can only point this way.
+// TestUserDataTouchesTheProbedBootstrapMarker pins the two in sync.
+const GuestBootstrapCompleteMarker = "/var/lib/dbaas/bootstrap-complete"
+
 // TypedClient manages Harvester resources through Harvester's generated
 // clientset and standard Kubernetes typed clients.
 type TypedClient struct {
@@ -57,6 +65,11 @@ type TypedClient struct {
 	KvClientset       kvclientset.Interface
 	GrafanaURL        string
 	MgmtLogicalSwitch string
+	// DefaultImageNamespace is the Harvester namespace ResolveVMImage looks
+	// in when its ref carries no explicit "ns/name" prefix. Empty means
+	// "default" (the zero value keeps existing behavior for callers that
+	// construct a TypedClient directly, e.g. in tests, without setting it).
+	DefaultImageNamespace string
 }
 
 var _ ClientInterface = (*TypedClient)(nil)
@@ -136,6 +149,9 @@ func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (v
 	vmName = VMName(p.ID)
 	if p.DataVolumeStorageClass == "" {
 		return vmName, fmt.Errorf("data volume storage class must not be empty")
+	}
+	if p.OSDiskPVCName == "" {
+		return vmName, fmt.Errorf("OS disk PVC name must not be empty")
 	}
 
 	image, err := c.ResolveVMImage(ctx, p.OSImage)
@@ -342,7 +358,11 @@ func (c *TypedClient) ResolveVMImage(ctx context.Context, ref string) (ResolvedV
 		return ResolvedVMImage{}, fmt.Errorf("%w: reference is empty", ErrVMImageReferenceInvalid)
 	}
 
-	ns, spec := "default", ref
+	ns := c.DefaultImageNamespace
+	if ns == "" {
+		ns = "default"
+	}
+	spec := ref
 	if i := strings.Index(ref, "/"); i > 0 {
 		ns, spec = ref[:i], ref[i+1:]
 	}
@@ -436,7 +456,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 
 	labels := map[string]string{dbaasv1.LabelInstance: p.ID, dbaasv1.LabelRole: "primary"}
 	templateLabels := map[string]string{dbaasv1.LabelInstance: p.ID}
-	osPVCName := fmt.Sprintf("pg-%s-os", p.ID)
+	osPVCName := p.OSDiskPVCName
 	dataPVCName := p.DataVolumeRef
 	if dataPVCName == "" {
 		dataPVCName = DataVolumeName(p.ID)
@@ -492,14 +512,26 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	vm.Spec.Template.Spec.Domain.CPU.Sockets = 1
 	vm.Spec.Template.Spec.Domain.CPU.Threads = 1
 
-	// Readiness probe: pg_isready runs inside the guest via the QEMU guest agent
-	// virtio channel — no pod-network port exposure required.
+	// Readiness probe: runs inside the guest via the QEMU guest agent virtio
+	// channel — no pod-network port exposure required.
+	//
+	// Both halves are required. pg_isready only asks whether a postmaster
+	// answers, which is true well before cloud-init has created the master
+	// role and its database — first for the throwaway cluster
+	// pg_createcluster starts, then again between the hostssl restart and the
+	// bootstrap SQL. Readiness gates DatabaseReady, which gates
+	// phase=available, so on its own it told clients "connect now" during a
+	// window where PostgreSQL answers every login with
+	// "password authentication failed" (its response for a role that does
+	// not exist yet). The marker is written by bootstrap.sh only once that
+	// SQL has succeeded — see buildUserData in internal/credentials/cloudinit.go.
 	vm.Spec.Template.Spec.ReadinessProbe = &kubevirtv1.Probe{
 		Handler: kubevirtv1.Handler{
 			Exec: &corev1.ExecAction{
 				Command: []string{
 					"/bin/sh", "-c",
-					fmt.Sprintf("pg_isready -h 127.0.0.1 -p %d -U %s -d postgres", p.Port, p.MasterUser),
+					fmt.Sprintf("test -f %s && pg_isready -h 127.0.0.1 -p %d -U %s -d postgres",
+						GuestBootstrapCompleteMarker, p.Port, p.MasterUser),
 				},
 			},
 		},
@@ -576,6 +608,197 @@ func ignoreAlreadyExists(err error) error {
 		return nil
 	}
 	return err
+}
+
+// ignoreNotFound returns nil if err is a NotFound API error, otherwise err.
+func ignoreNotFound(err error) error {
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// osDiskVolumeName is the VM disk name buildPostgresVM assigns the OS-disk
+// PVC template to (see buildPostgresVM's PVCDisk("os-disk", ...) call).
+const osDiskVolumeName = "os-disk"
+
+// currentOSDiskPVCName fetches vmName and returns its current "os-disk"
+// volume's claimName. Returns ("", nil, nil), not an error, if the VM or
+// that volume doesn't exist yet — shared by GetVMOSDiskImageID and
+// GetVMOSDiskPVCName so both self-heal helpers observe the same live state
+// through one code path.
+func (c *TypedClient) currentOSDiskPVCName(ctx context.Context, ns, vmName string) (string, *kubevirtv1.VirtualMachine, error) {
+	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil, nil
+		}
+		return "", nil, err
+	}
+
+	volIdx := -1
+	for i := range vm.Spec.Template.Spec.Volumes {
+		if vm.Spec.Template.Spec.Volumes[i].Name == osDiskVolumeName {
+			volIdx = i
+			break
+		}
+	}
+	if volIdx == -1 || vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim == nil {
+		return "", vm, nil
+	}
+	return vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName, vm, nil
+}
+
+// GetVMOSDiskImageID returns the harvesterhci.io/imageId annotation
+// ("namespace/name") Harvester stamps on the VM's current OS-disk PVC —
+// ground truth for the running image, independent of any DBInstance status
+// field. Returns ("", nil), not an error, if it can't be determined yet
+// (e.g. VM not created).
+func (c *TypedClient) GetVMOSDiskImageID(ctx context.Context, ns, vmName string) (string, error) {
+	currentPVCName, vm, err := c.currentOSDiskPVCName(ctx, ns, vmName)
+	if err != nil || currentPVCName == "" {
+		return "", err
+	}
+
+	pvcs, err := VolumeClaimTemplates(vm)
+	if err != nil {
+		return "", err
+	}
+	for _, pvc := range pvcs {
+		if pvc.Name == currentPVCName {
+			return pvc.Annotations[harvesterbuilder.AnnotationKeyImageID], nil
+		}
+	}
+	return "", nil
+}
+
+// GetVMOSDiskPVCName returns the claimName of the VM's current "os-disk"
+// volume — ground truth for which PVC actually backs it, independent of any
+// DBInstance status field. Returns ("", nil), not an error, if it can't be
+// determined yet (e.g. VM not created).
+func (c *TypedClient) GetVMOSDiskPVCName(ctx context.Context, ns, vmName string) (string, error) {
+	name, _, err := c.currentOSDiskPVCName(ctx, ns, vmName)
+	return name, err
+}
+
+// ResolveVMImageDisplayName returns the DisplayName of the
+// VirtualMachineImage identified by ns/name. See the ClientInterface doc
+// comment for why this indirection exists: GetVMOSDiskImageID's caller needs
+// to compare against internal/catalog's human-readable ImageName strings,
+// not the real (often auto-generated) object name imageID carries.
+func (c *TypedClient) ResolveVMImageDisplayName(ctx context.Context, ns, name string) (string, error) {
+	img, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineImages(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return img.Spec.DisplayName, nil
+}
+
+// SwapVMOSDisk repoints the "os-disk" volumeClaimTemplates entry to a new
+// revision-suffixed PVC backed by newImageRef's StorageClass, and repoints
+// the "os-disk" volume's claimName to match. Mirrors ResizeDataVolume's
+// read-modify-write idiom over the harvesterhci.io/volumeClaimTemplates
+// annotation, under the same RetryOnConflict.
+func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, newImageRef string) (oldPVCName, newPVCName string, err error) {
+	image, err := c.ResolveVMImage(ctx, newImageRef)
+	if err != nil {
+		return "", "", err
+	}
+	imageID := fmt.Sprintf("%s/%s", image.Namespace, image.Name)
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		oldPVCName, newPVCName = "", ""
+
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		volIdx := -1
+		for i := range vm.Spec.Template.Spec.Volumes {
+			if vm.Spec.Template.Spec.Volumes[i].Name == osDiskVolumeName {
+				volIdx = i
+				break
+			}
+		}
+		// Hard-fail rather than silently skip: updating the annotation without
+		// repointing the actual boot volume would leave the VM booting from a
+		// PVC the annotation no longer describes.
+		if volIdx == -1 {
+			return fmt.Errorf("VM %s/%s has no %q volume; refusing to update %s without repointing the boot volume",
+				ns, vmName, osDiskVolumeName, util.AnnotationVolumeClaimTemplates)
+		}
+		if vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim == nil {
+			return fmt.Errorf("VM %s/%s %q volume is not PVC-backed; refusing to swap its OS disk",
+				ns, vmName, osDiskVolumeName)
+		}
+		currentPVCName := vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName
+
+		pvcs, err := VolumeClaimTemplates(vm)
+		if err != nil {
+			return err
+		}
+		pvcIdx := -1
+		for i := range pvcs {
+			if pvcs[i].Name == currentPVCName {
+				pvcIdx = i
+				break
+			}
+		}
+		if pvcIdx == -1 {
+			return fmt.Errorf("%s on VM %s/%s has no entry named %q",
+				util.AnnotationVolumeClaimTemplates, ns, vmName, currentPVCName)
+		}
+		current := pvcs[pvcIdx]
+
+		// Idempotent no-op: already on the target StorageClass.
+		if current.Spec.StorageClassName != nil && *current.Spec.StorageClassName == image.StorageClassName {
+			newPVCName = currentPVCName
+			return nil
+		}
+
+		newPVCName = fmt.Sprintf("pg-%s-os-%s", instID, image.Name)
+		pvcs[pvcIdx] = &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        newPVCName,
+				Annotations: map[string]string{harvesterbuilder.AnnotationKeyImageID: imageID},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes:      current.Spec.AccessModes,
+				Resources:        current.Spec.Resources,
+				VolumeMode:       current.Spec.VolumeMode,
+				StorageClassName: &image.StorageClassName,
+			},
+		}
+
+		data, err := json.Marshal(pvcs)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", util.AnnotationVolumeClaimTemplates, err)
+		}
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[util.AnnotationVolumeClaimTemplates] = string(data)
+		vm.Spec.Template.Spec.Volumes[volIdx].VolumeSource.PersistentVolumeClaim.ClaimName = newPVCName
+
+		if _, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		oldPVCName = currentPVCName
+		return nil
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return oldPVCName, newPVCName, nil
+}
+
+// DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
+func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
+	return ignoreNotFound(c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{}))
 }
 
 func ptr[T any](v T) *T {

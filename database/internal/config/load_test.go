@@ -39,6 +39,9 @@ func TestLoadDefaults(t *testing.T) {
 	if got.Logging != want.Logging {
 		t.Fatalf("Logging = %+v, want %+v", got.Logging, want.Logging)
 	}
+	if got.DatabaseDefaults != want.DatabaseDefaults {
+		t.Fatalf("DatabaseDefaults = %+v, want %+v", got.DatabaseDefaults, want.DatabaseDefaults)
+	}
 	if len(got.InstanceClasses) != len(want.InstanceClasses) {
 		t.Fatalf("InstanceClasses has %d entries, want %d", len(got.InstanceClasses), len(want.InstanceClasses))
 	}
@@ -86,6 +89,7 @@ func TestEnvironmentNameNormalization(t *testing.T) {
 	clearConfigurationEnvironment(t)
 	t.Setenv("DBAAS_OBSERVABILITY__MONITORING__SCRAPE_INTERVAL", "45s")
 	t.Setenv("DBAAS_DATABASE_DEFAULTS__MASTER_USERNAME", "platform_admin")
+	t.Setenv("DBAAS_DATABASE_DEFAULTS__OS_VERSION", "22.04")
 
 	got, err := Load(flag.NewFlagSet("test", flag.ContinueOnError), nil)
 	if err != nil {
@@ -96,6 +100,9 @@ func TestEnvironmentNameNormalization(t *testing.T) {
 	}
 	if got.DatabaseDefaults.MasterUsername != "platform_admin" {
 		t.Fatalf("MasterUsername = %q, want platform_admin", got.DatabaseDefaults.MasterUsername)
+	}
+	if got.DatabaseDefaults.OSVersion != "22.04" {
+		t.Fatalf("OSVersion = %q, want 22.04", got.DatabaseDefaults.OSVersion)
 	}
 }
 

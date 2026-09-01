@@ -43,6 +43,12 @@ type BootstrapParams struct {
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
 	// server.
 	StaticNetwork *dbaasv1.NetworkConfig
+	// EngineVersion is the concrete PostgreSQL major version
+	// (internal/ensure's effectiveEngineVersion — never empty) bootstrap.sh
+	// activates: a baked image has every catalog-supported version's
+	// binaries pre-installed side by side, and bootstrap.sh drops every
+	// pre-baked cluster and creates exactly one, for this version, at boot.
+	EngineVersion string
 }
 
 // BuildCloudInit renders the cloud-init userdata and networkdata that
@@ -176,6 +182,7 @@ ssh_pwauth: true
       REPL_PASSWORD=%s
       EXPORTER_PASSWORD=%s
       MAX_CONNECTIONS=%d
+      ENGINE_VERSION=%s
       %s
   - path: /etc/ssl/certs/pg-ca.crt
     encoding: b64
@@ -196,15 +203,28 @@ ssh_pwauth: true
       set -euo pipefail
       source /etc/dbaas/bootstrap.env
 
-      # 1. Install PostgreSQL + helpers. Done here, not via cloud-init's
-      #    "packages:" directive, so it works on minimal cloud images
-      #    that don't load the package module.
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y postgresql postgresql-contrib jq qemu-guest-agent prometheus-postgres-exporter
+      # 1. Activate the requested PostgreSQL version. Every catalog-supported
+      #    version's binaries are pre-installed in the baked image
+      #    (database/images/packer/scripts/provision.sh) — drop whatever
+      #    clusters were auto-created at package-install time and create
+      #    only the one this tenant actually asked for, so boot has no
+      #    dependency on reaching apt repos over the network (the whole
+      #    point of baking) and each instance gets a guaranteed-fresh
+      #    cluster regardless of image history.
       systemctl enable --now qemu-guest-agent
-
-      PG_VER=$(pg_lsclusters -h | awk '{print $1}' | head -1)
+      # Never drop clusters once /var/lib/postgresql is the mounted,
+      # persistent pgdata disk — that would delete live tenant data. Only
+      # reset the throwaway clusters apt created on a fresh OS disk: true
+      # on a genuine first boot, and right after a repave's disk swap
+      # (which resets fstab), since in both cases this path is still the
+      # OS disk itself at this point in the script.
+      if ! findmnt -n /var/lib/postgresql >/dev/null 2>&1; then
+        for ver in $(pg_lsclusters -h | awk '{print $1}' | sort -u); do
+          pg_dropcluster --stop "$ver" main 2>/dev/null || true
+        done
+        pg_createcluster --start "${ENGINE_VERSION}" main
+      fi
+      PG_VER="${ENGINE_VERSION}"
       PG_CONF="/etc/postgresql/${PG_VER}/main"
 
       # Move PostgreSQL data onto the dedicated pgdata disk before applying
@@ -282,6 +302,26 @@ ssh_pwauth: true
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
       EOSQL
 
+      # Bootstrap-completion marker, checked by the KubeVirt readiness probe
+      # (internal/harvester/typed_client.go). pg_isready alone answers "is a
+      # postmaster listening", which goes true several steps earlier — while
+      # pg_createcluster's throwaway cluster is up, and again right after the
+      # restart above but before the role/database exist. A client that took
+      # phase=available at its word in that window got
+      # "password authentication failed for user ${MASTER_USER}", because
+      # PostgreSQL reports a missing role exactly like a wrong password.
+      #
+      # Written here, not at the end of the script: the contract is "the
+      # master role and its database are usable". Exporter setup below is the
+      # separate MonitoringReady axis and must not gate DatabaseReady.
+      #
+      # Lives on the OS disk, so it is absent on a genuine first boot and
+      # after a repave's disk swap (both of which re-run this script), and
+      # persists across a plain reboot (which does not). /var/lib/dbaas
+      # itself already exists by this point — runcmd below creates and
+      # chowns it before bootstrap.sh ever runs.
+      touch /var/lib/dbaas/bootstrap-complete
+
       cat >/etc/default/prometheus-postgres-exporter <<EOEXPORTER
       DATA_SOURCE_NAME=postgresql://postgres_exporter:${EXPORTER_PASSWORD}@127.0.0.1:${DB_PORT}/postgres?sslmode=require
       ARGS="--web.listen-address=:9187"
@@ -313,6 +353,7 @@ final_message: "DBaaS bootstrap complete for %s"
 		m.ReplPassword,
 		m.ExporterPassword,
 		p.MaxConnections,
+		shellSingleQuote(p.EngineVersion),
 		backupConfig,
 		caCertB64,
 		serverCertB64,

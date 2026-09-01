@@ -39,6 +39,7 @@ func NewDefaultSteps(deps Dependencies) []Step {
 		newCredentialsStep(deps),
 		newVMStep(deps),
 		newResizeStep(deps),
+		newRepaveStep(deps),
 		newPowerStep(deps),
 		newHealthStep(deps),
 		newConnectionSecretStep(deps),

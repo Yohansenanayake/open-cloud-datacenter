@@ -19,6 +19,7 @@ package ensure
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -52,7 +53,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	// AdminCredentialsSecretName is ensureCredentials's job (not exercised
 	// here since we call ensureVM directly).
 	refs := inst.Status.Resources
-	if refs.VMName != "pg-orders" || refs.CloudInitSecretName != "pg-orders-cloudinit" || refs.DataVolumeName != "pg-orders-data" {
+	if refs.VMName != "pg-orders" || refs.CloudInitSecretName != "pg-orders-cloudinit" || refs.DataVolumeName != "pg-orders-ordersui-data" {
 		t.Fatalf("Resources = %+v, want deterministic pg-orders names", refs)
 	}
 
@@ -60,10 +61,18 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	if a == nil {
 		t.Fatal("AppliedSpec not snapshotted")
 	}
-	if a.MasterUsername != defaultMasterUser || a.OSImage != defaultOSImage ||
+	if a.MasterUsername != defaultMasterUser ||
 		a.Port != defaultPort || a.StorageType != defaultStorageType ||
 		a.DBName != "orders" || a.NetworkRef != "tenant-a/data-net" {
 		t.Fatalf("AppliedSpec = %+v, want defaulted snapshot", a)
+	}
+	// CurrentImageRevision/OSDiskPVCName live outside AppliedSpec — they're
+	// expected to change on every repave, unlike everything checked above.
+	if inst.Status.CurrentImageRevision != defaultBakedImageName {
+		t.Fatalf("CurrentImageRevision = %q, want %q", inst.Status.CurrentImageRevision, defaultBakedImageName)
+	}
+	if inst.Status.Resources.OSDiskPVCName != "pg-orders-ordersui-os" {
+		t.Fatalf("OSDiskPVCName = %q, want pg-orders-ordersui-os", inst.Status.Resources.OSDiskPVCName)
 	}
 
 	cond := inst.Status.GetCondition(dbaasv1.ConditionVMReady)
@@ -95,6 +104,12 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 	if len(ci.Data["userdata"]) == 0 || len(ci.Data["networkdata"]) == 0 {
 		t.Fatalf("cloud-init secret has empty userdata/networkdata: %+v", ci.Data)
+	}
+	// inst.Spec.EngineVersion is unset — effectiveEngineVersion must default
+	// to defaultBakedImageName's configured DefaultEngineVersion ("17")
+	// rather than leaving bootstrap.sh's ENGINE_VERSION empty.
+	if !strings.Contains(string(ci.Data["userdata"]), "ENGINE_VERSION='17'") {
+		t.Fatalf("cloud-init userdata missing defaulted ENGINE_VERSION='17': %s", ci.Data["userdata"])
 	}
 	if refs := ci.GetOwnerReferences(); len(refs) != 1 || refs[0].Kind != "DBInstance" || refs[0].Controller == nil || !*refs[0].Controller {
 		t.Fatalf("cloud-init secret owner refs = %+v, want controller-owned", refs)
@@ -156,11 +171,46 @@ func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {
 	if inst.Status.Resources.VMName != "pg-orders" {
 		t.Fatalf("VMName not re-recorded from observation: %q", inst.Status.Resources.VMName)
 	}
-	if inst.Status.Resources.DataVolumeName != "pg-orders-data" {
+	if inst.Status.Resources.DataVolumeName != "pg-orders-ordersui-data" {
 		t.Fatalf("DataVolumeName not reconstructed: %q", inst.Status.Resources.DataVolumeName)
 	}
 	if !inst.Status.IsConditionTrue(dbaasv1.ConditionVMReady) {
 		t.Fatal("VMReady should be True when VM exists")
+	}
+}
+
+// OSDiskPVCName can't be recomputed by formula once a repave has happened
+// (it becomes revision-suffixed), unlike VMName/DataVolumeName — so if
+// status was lost/reset while the VM keeps running, this field must be
+// self-healed from live observation the same way its two siblings are.
+func TestEnsureVMSelfHealsOSDiskPVCNameWhenPresent(t *testing.T) {
+	inst := newProvisionInst()
+	stub := &stubHarvester{OSDiskPVCName: "pg-orders-ordersui-os-ubuntu-2404-postgres-v20260815"}
+	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
+
+	res := r.ensureVM(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("Outcome = %q, want Satisfied", res.Outcome)
+	}
+	if inst.Status.Resources.OSDiskPVCName != stub.OSDiskPVCName {
+		t.Fatalf("OSDiskPVCName not self-healed from observation: got %q, want %q",
+			inst.Status.Resources.OSDiskPVCName, stub.OSDiskPVCName)
+	}
+}
+
+// A transient Harvester read failure while self-healing OSDiskPVCName must
+// not report Satisfied — the field could be silently left stale/empty.
+func TestEnsureVMSelfHealOSDiskPVCNameErrorIsTransient(t *testing.T) {
+	inst := newProvisionInst()
+	boom := errors.New("boom")
+	stub := &stubHarvester{OSDiskPVCNameErr: boom}
+	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
+
+	res := r.ensureVM(context.Background(), inst)
+
+	if res.Outcome != OutcomeTransient {
+		t.Fatalf("Outcome = %q, want Transient", res.Outcome)
 	}
 }
 
@@ -184,6 +234,44 @@ func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {
 	cond := inst.Status.GetCondition(dbaasv1.ConditionVMReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonVMCreated) {
 		t.Fatalf("VMReady = %+v, want False/VMCreated", cond)
+	}
+}
+
+// Regression guard for T004: a deleted-and-recreated DBInstance (same name,
+// new UID — Kubernetes never reuses UIDs) must get disk names disjoint from
+// its previous incarnation, so a leaked old disk (TeardownAll not deleting
+// PVCs is a separate, still-open issue) can never be silently reattached
+// under a fresh Secret with a different password.
+func TestEnsureVMDiskNamesDisjointAcrossSameNameRecreate(t *testing.T) {
+	first := newProvisionInst()
+	first.UID = "11111111-1111-1111-1111-111111111111"
+	stub1 := &stubHarvester{}
+	r1 := newTestHarness(t, stub1, first)
+	convergeCredentials(t, context.Background(), r1, first)
+	if res := r1.ensureVM(context.Background(), first); res.Outcome != OutcomePending {
+		t.Fatalf("first res = %+v, want Pending", res)
+	}
+
+	second := newProvisionInst() // same Name/Namespace, fresh Status — simulates delete+recreate
+	second.UID = "22222222-2222-2222-2222-222222222222"
+	stub2 := &stubHarvester{}
+	r2 := newTestHarness(t, stub2, second)
+	convergeCredentials(t, context.Background(), r2, second)
+	if res := r2.ensureVM(context.Background(), second); res.Outcome != OutcomePending {
+		t.Fatalf("second res = %+v, want Pending", res)
+	}
+
+	if first.Status.Resources.DataVolumeName == second.Status.Resources.DataVolumeName {
+		t.Fatalf("DataVolumeName collided across recreate: both %q", first.Status.Resources.DataVolumeName)
+	}
+	if first.Status.Resources.OSDiskPVCName == second.Status.Resources.OSDiskPVCName {
+		t.Fatalf("OSDiskPVCName collided across recreate: both %q", first.Status.Resources.OSDiskPVCName)
+	}
+	if second.Status.Resources.DataVolumeName != "pg-orders-22222222-data" {
+		t.Fatalf("DataVolumeName = %q, want pg-orders-22222222-data", second.Status.Resources.DataVolumeName)
+	}
+	if second.Status.Resources.OSDiskPVCName != "pg-orders-22222222-os" {
+		t.Fatalf("OSDiskPVCName = %q, want pg-orders-22222222-os", second.Status.Resources.OSDiskPVCName)
 	}
 }
 

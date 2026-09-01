@@ -39,9 +39,9 @@ func newPowerFixture(t *testing.T, running bool, rs kubevirtv1.VirtualMachineRun
 	inst := newProvisionInst()
 	inst.Spec.Running = &running
 	inst.Status.Resources.VMName = "pg-orders"
-	inst.Status.Resources.DataVolumeName = "pg-orders-data"
+	inst.Status.Resources.DataVolumeName = "pg-orders-ordersui-data"
 	stub := &stubHarvester{Readiness: Readiness}
-	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-data", rs)
+	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-ordersui-data", rs)
 	r := newTestHarness(t, stub, inst, vm)
 	return r, inst, stub
 }

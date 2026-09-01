@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
+	harvesterbuilder "github.com/harvester/harvester/pkg/builder"
 	harvesterfake "github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
 	harvesterutil "github.com/harvester/harvester/pkg/util"
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -34,6 +35,7 @@ func testVMCreateParams() VMCreateParams {
 		CPUCores:               2,
 		MemoryMB:               4096,
 		OSImage:                "ubuntu-22.04",
+		OSDiskPVCName:          "pg-orders-os",
 		DataVolumeRef:          "pg-orders-data",
 		DataVolumeSizeGB:       20,
 		DataVolumeStorageClass: "harvester-longhorn",
@@ -67,6 +69,16 @@ func TestTypedCreatePostgresVMRequiresInjectedStorageClass(t *testing.T) {
 	}
 }
 
+func TestTypedCreatePostgresVMRequiresOSDiskPVCName(t *testing.T) {
+	params := testVMCreateParams()
+	params.OSDiskPVCName = ""
+
+	_, err := newTestTypedClient().CreatePostgresVM(context.Background(), params)
+	if err == nil || err.Error() != "OS disk PVC name must not be empty" {
+		t.Fatalf("CreatePostgresVM() error = %v, want missing OS disk PVC name error", err)
+	}
+}
+
 func TestResolveVMImage(t *testing.T) {
 	ctx := context.Background()
 	image := testTypedVMImage()
@@ -79,6 +91,45 @@ func TestResolveVMImage(t *testing.T) {
 	if resolved.Namespace != "default" || resolved.Name != image.Name ||
 		resolved.StorageClassName != image.Status.StorageClassName {
 		t.Fatalf("resolved image = %+v", resolved)
+	}
+}
+
+// A bare ref (no "ns/name" prefix) resolves against DefaultImageNamespace
+// when set, not the hardcoded "default" — lets an operator point
+// internal/catalog's namespace-less image names at a dedicated namespace
+// via config (infrastructure.harvester.imageNamespace) instead of baking a
+// namespace prefix into every catalog entry.
+func TestResolveVMImageUsesConfiguredDefaultNamespace(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	image.Namespace = "harvester-public"
+	client := newTestTypedClient(image)
+	client.DefaultImageNamespace = "harvester-public"
+
+	resolved, err := client.ResolveVMImage(ctx, image.Spec.DisplayName)
+	if err != nil {
+		t.Fatalf("ResolveVMImage returned error: %v", err)
+	}
+	if resolved.Namespace != "harvester-public" || resolved.Name != image.Name {
+		t.Fatalf("resolved image = %+v, want namespace=harvester-public", resolved)
+	}
+}
+
+// An explicit "ns/name" prefix in the ref still overrides
+// DefaultImageNamespace — per-entry opt-out stays available even when a
+// non-default namespace is configured globally.
+func TestResolveVMImageExplicitNamespacePrefixOverridesConfiguredDefault(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage() // lives in "default"
+	client := newTestTypedClient(image)
+	client.DefaultImageNamespace = "harvester-public"
+
+	resolved, err := client.ResolveVMImage(ctx, "default/"+image.Name)
+	if err != nil {
+		t.Fatalf("ResolveVMImage returned error: %v", err)
+	}
+	if resolved.Namespace != "default" || resolved.Name != image.Name {
+		t.Fatalf("resolved image = %+v, want namespace=default (explicit prefix)", resolved)
 	}
 }
 
@@ -162,6 +213,194 @@ func TestDataVolumeNameMatchesPVCTemplateAndResizeUpdatesVMTemplate(t *testing.T
 	storage = dataTemplate.Spec.Resources.Requests[corev1.ResourceStorage]
 	if got := storage.String(); got != "30Gi" {
 		t.Fatalf("Data PVC template storage after resize = %q, want 30Gi", got)
+	}
+}
+
+func TestSwapVMOSDiskProducesRevisionSuffixedPVCAndRepointsVolume(t *testing.T) {
+	ctx := context.Background()
+	oldImage := testTypedVMImage()
+	newImage := testTypedVMImage()
+	newImage.Name = "ubuntu-24.04"
+	newImage.Status.StorageClassName = "longhorn-image-ubuntu2404"
+	client := newTestTypedClient(oldImage, newImage)
+
+	if _, err := client.CreatePostgresVM(ctx, testVMCreateParams()); err != nil {
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
+	}
+
+	oldPVCName, newPVCName, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-orders", "orders", newImage.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk returned error: %v", err)
+	}
+	if oldPVCName != "pg-orders-os" {
+		t.Fatalf("oldPVCName = %q, want pg-orders-os", oldPVCName)
+	}
+	if want := "pg-orders-os-" + newImage.Name; newPVCName != want {
+		t.Fatalf("newPVCName = %q, want %q", newPVCName, want)
+	}
+
+	vm, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	if !vmVolumeUsesPVC(vm, osDiskVolumeName, newPVCName) {
+		t.Fatalf("os-disk volume does not point at %s", newPVCName)
+	}
+	templates, err := VolumeClaimTemplates(vm)
+	if err != nil {
+		t.Fatalf("volume claim templates: %v", err)
+	}
+	if findPVCTemplate(templates, oldPVCName) != nil {
+		t.Fatalf("old PVC template %s still present after swap", oldPVCName)
+	}
+	newTemplate := findPVCTemplate(templates, newPVCName)
+	if newTemplate == nil {
+		t.Fatalf("new PVC template %s not found", newPVCName)
+	}
+	if newTemplate.Spec.StorageClassName == nil || *newTemplate.Spec.StorageClassName != newImage.Status.StorageClassName {
+		t.Fatalf("new PVC template StorageClassName = %v, want %s", newTemplate.Spec.StorageClassName, newImage.Status.StorageClassName)
+	}
+	wantImageID := "default/" + newImage.Name
+	if got := newTemplate.Annotations[harvesterbuilder.AnnotationKeyImageID]; got != wantImageID {
+		t.Fatalf("new PVC template imageId annotation = %q, want %q", got, wantImageID)
+	}
+	gotImageID, err := client.GetVMOSDiskImageID(ctx, "tenant-a", "pg-orders")
+	if err != nil {
+		t.Fatalf("GetVMOSDiskImageID returned error: %v", err)
+	}
+	if gotImageID != wantImageID {
+		t.Fatalf("GetVMOSDiskImageID = %q, want %q", gotImageID, wantImageID)
+	}
+}
+
+func TestSwapVMOSDiskIsIdempotentWhenAlreadyOnTargetStorageClass(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	client := newTestTypedClient(image)
+
+	if _, err := client.CreatePostgresVM(ctx, testVMCreateParams()); err != nil {
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
+	}
+
+	// Same image the VM was already created with — no drift, should no-op.
+	oldPVCName, newPVCName, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-orders", "orders", image.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk returned error: %v", err)
+	}
+	if oldPVCName != "" {
+		t.Fatalf("oldPVCName = %q, want empty (idempotent no-op)", oldPVCName)
+	}
+	if newPVCName != "pg-orders-os" {
+		t.Fatalf("newPVCName = %q, want pg-orders-os (unchanged)", newPVCName)
+	}
+}
+
+func TestSwapVMOSDiskHardFailsWhenNoOSDiskVolume(t *testing.T) {
+	ctx := context.Background()
+	newImage := testTypedVMImage()
+	newImage.Name = "ubuntu-24.04"
+	client := newTestTypedClient(testTypedVMImage(), newImage)
+
+	bareVM := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-bare", Namespace: "tenant-a"},
+		Spec: kubevirtv1.VirtualMachineSpec{
+			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{},
+		},
+	}
+	if _, err := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Create(ctx, bareVM, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create bare VM: %v", err)
+	}
+
+	if _, _, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-bare", "bare", newImage.Name); err == nil {
+		t.Fatal("SwapVMOSDisk returned nil error, want a hard failure for a VM with no os-disk volume")
+	}
+}
+
+func TestSwapVMOSDiskDoesNotCollideAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	newImage := testTypedVMImage()
+	newImage.Name = "ubuntu-24.04"
+	client := newTestTypedClient(testTypedVMImage(), newImage)
+
+	firstParams := testVMCreateParams()
+	secondParams := testVMCreateParams()
+	secondParams.ID = "billing"
+	secondParams.OSDiskPVCName = "pg-billing-os"
+	secondParams.DataVolumeRef = "pg-billing-data"
+	secondParams.CloudInitSecretName = "pg-billing-cloudinit"
+	if _, err := client.CreatePostgresVM(ctx, firstParams); err != nil {
+		t.Fatalf("CreatePostgresVM(orders) returned error: %v", err)
+	}
+	if _, err := client.CreatePostgresVM(ctx, secondParams); err != nil {
+		t.Fatalf("CreatePostgresVM(billing) returned error: %v", err)
+	}
+
+	_, firstNewPVC, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-orders", "orders", newImage.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk(orders) returned error: %v", err)
+	}
+	_, secondNewPVC, err := client.SwapVMOSDisk(ctx, "tenant-a", "pg-billing", "billing", newImage.Name)
+	if err != nil {
+		t.Fatalf("SwapVMOSDisk(billing) returned error: %v", err)
+	}
+	if firstNewPVC == secondNewPVC {
+		t.Fatalf("both instances swapped to the same PVC name %q", firstNewPVC)
+	}
+}
+
+func TestDeletePVCIgnoresNotFound(t *testing.T) {
+	if err := newTestTypedClient().DeletePVC(context.Background(), "tenant-a", "does-not-exist"); err != nil {
+		t.Fatalf("DeletePVC returned error for a missing PVC: %v", err)
+	}
+}
+
+func TestDeletePVCDeletesExisting(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient()
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-os", Namespace: "tenant-a"}}
+	if _, err := client.KubeClient.CoreV1().PersistentVolumeClaims("tenant-a").Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed PVC: %v", err)
+	}
+
+	if err := client.DeletePVC(ctx, "tenant-a", "pg-orders-os"); err != nil {
+		t.Fatalf("DeletePVC returned error: %v", err)
+	}
+	if _, err := client.KubeClient.CoreV1().PersistentVolumeClaims("tenant-a").Get(ctx, "pg-orders-os", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("PVC should be gone after DeletePVC, got: %v", err)
+	}
+}
+
+// On a real cluster, an imported VirtualMachineImage's object name is
+// typically auto-generated (e.g. "image-c8sqv") and only its DisplayName
+// carries the human-readable string internal/catalog is keyed by
+// (testTypedVMImage's Name="ubuntu-22.04"/DisplayName="Ubuntu 22.04" already
+// models that divergence). GetVMOSDiskImageID's caller needs the DisplayName
+// to compare against the catalog — this pins that ResolveVMImageDisplayName
+// returns it, not the object name it was called with.
+func TestResolveVMImageDisplayName(t *testing.T) {
+	ctx := context.Background()
+	image := testTypedVMImage()
+	client := newTestTypedClient(image)
+
+	got, err := client.ResolveVMImageDisplayName(ctx, image.Namespace, image.Name)
+	if err != nil {
+		t.Fatalf("ResolveVMImageDisplayName returned error: %v", err)
+	}
+	if got != image.Spec.DisplayName {
+		t.Fatalf("ResolveVMImageDisplayName = %q, want %q", got, image.Spec.DisplayName)
+	}
+}
+
+// A deleted/never-imported image is "not yet determinable", same contract as
+// GetVMOSDiskImageID — not an error the caller should treat as fatal.
+func TestResolveVMImageDisplayNameReturnsEmptyOnNotFound(t *testing.T) {
+	ctx := context.Background()
+	got, err := newTestTypedClient().ResolveVMImageDisplayName(ctx, "default", "does-not-exist")
+	if err != nil {
+		t.Fatalf("ResolveVMImageDisplayName returned error for a missing image: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("ResolveVMImageDisplayName = %q, want empty for a missing image", got)
 	}
 }
 
@@ -284,8 +523,20 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if probe.Exec == nil {
 		t.Fatalf("ReadinessProbe.Exec is not set")
 	}
-	if !strings.Contains(strings.Join(probe.Exec.Command, " "), "pg_isready") {
+	cmd := strings.Join(probe.Exec.Command, " ")
+	if !strings.Contains(cmd, "pg_isready") {
 		t.Fatalf("ReadinessProbe command does not contain pg_isready: %v", probe.Exec.Command)
+	}
+	// pg_isready alone is not a bootstrap-completion signal — it passes while
+	// cloud-init is still short of creating the master role, so readiness (and
+	// through it phase=available) would invite clients to connect into a
+	// guaranteed authentication failure. Both halves must be present, and the
+	// marker must gate first so a half-bootstrapped guest never reads ready.
+	if !strings.Contains(cmd, "test -f "+GuestBootstrapCompleteMarker) {
+		t.Fatalf("ReadinessProbe must gate on %s before pg_isready: %v", GuestBootstrapCompleteMarker, probe.Exec.Command)
+	}
+	if strings.Index(cmd, GuestBootstrapCompleteMarker) > strings.Index(cmd, "pg_isready") {
+		t.Fatalf("bootstrap marker test must precede pg_isready: %v", probe.Exec.Command)
 	}
 	if probe.InitialDelaySeconds != 30 || probe.PeriodSeconds != 10 || probe.FailureThreshold != 12 {
 		t.Fatalf("ReadinessProbe timing initial=%d period=%d failure=%d, want 30/10/12",

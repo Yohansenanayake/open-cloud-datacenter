@@ -46,15 +46,18 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 	set.String("infrastructure.harvester.managementLogicalSwitch",
 		defaults.Infrastructure.Harvester.ManagementLogicalSwitch,
 		"Kube-OVN logical switch used for VM launcher management networking.")
+	set.String("infrastructure.harvester.imageNamespace",
+		defaults.Infrastructure.Harvester.ImageNamespace,
+		"Harvester namespace baked-image names resolve against when they carry no explicit ns/name prefix.")
 
-	set.String("databaseDefaults.osImage", defaults.DatabaseDefaults.OSImage,
-		"Default Harvester VM image for DBInstances.")
 	set.String("databaseDefaults.storageClass", defaults.DatabaseDefaults.StorageClass,
 		"Default storage class for DBInstances.")
 	set.String("databaseDefaults.masterUsername", defaults.DatabaseDefaults.MasterUsername,
 		"Default PostgreSQL administrator username.")
 	set.Int("databaseDefaults.port", defaults.DatabaseDefaults.Port,
 		"Default PostgreSQL port.")
+	set.String("databaseDefaults.osVersion", defaults.DatabaseDefaults.OSVersion,
+		"Default baked-image OS stream (internal/catalog key) for DBInstance provisioning and repave.")
 
 	set.String("observability.grafana.baseURL", defaults.Observability.Grafana.BaseURL,
 		"Base URL used for per-instance Grafana links.")

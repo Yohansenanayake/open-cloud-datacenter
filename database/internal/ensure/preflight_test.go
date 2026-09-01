@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
 	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
@@ -73,8 +74,8 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	if inst.Status.Resources.NADName != "tenant-a/data-net" {
 		t.Fatalf("NADName = %q, want tenant-a/data-net", inst.Status.Resources.NADName)
 	}
-	if stub.LastVMImageRef != defaultOSImage {
-		t.Fatalf("resolved image = %q, want default %q", stub.LastVMImageRef, defaultOSImage)
+	if stub.LastVMImageRef != defaultBakedImageName {
+		t.Fatalf("resolved image = %q, want default %q", stub.LastVMImageRef, defaultBakedImageName)
 	}
 	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
@@ -85,12 +86,73 @@ func TestEnsurePreflightValidSpecIsSatisfied(t *testing.T) {
 	}
 }
 
-func TestEnsurePreflightUsesConfiguredClassAndOSImageDefault(t *testing.T) {
+// An explicit, unsupported engineVersion is still rejected Terminal — only
+// an *unset* engineVersion gets the lenient default-to-highest treatment.
+func TestEnsurePreflightUnsupportedEngineVersionIsTerminal(t *testing.T) {
+	stub := &stubHarvester{}
+	r := &testHarness{Dependencies: Dependencies{Harvester: stub}}
+	inst := newProvisionInst()
+	inst.Spec.EngineVersion = "15" // not in defaultBakedImageName's ["16","17"]
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonOSImageInvalid) {
+		t.Fatalf("PreflightReady = %+v, want False/OSImageInvalid", cond)
+	}
+}
+
+// Regression guard: once an instance has been provisioned (AppliedSpec set),
+// preflight must never Terminal-reject it just because the catalog's latest
+// entry for its OS stream later drops its engineVersion — that would flip an
+// already-available instance to incompatible-parameters purely from a
+// catalog edit, with no repave ever attempted. Reporting the EOL is
+// ensureRepave's job (ImageDrift=EngineVersionEOL); preflight must stay
+// Satisfied here.
+func TestEnsurePreflightExistingInstanceEngineVersionEOLIsNotTerminal(t *testing.T) {
+	stub := &stubHarvester{}
+	r := &testHarness{Dependencies: Dependencies{Harvester: stub}}
+	inst := newProvisionInst()
+	inst.Spec.EngineVersion = "15" // not in defaultBakedImageName's ["16","17"]
+	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{NetworkRef: inst.Spec.NetworkRef, EngineVersion: inst.Spec.EngineVersion}
+	inst.Status.CurrentImageRevision = "old-revision"
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeSatisfied {
+		t.Fatalf("res = %+v, want Satisfied — an existing instance must never be rejected for a catalog-only change", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("PreflightReady = %+v, want True", cond)
+	}
+	if stub.LastVMImageRef != "" {
+		t.Fatalf("ResolveVMImage should not be called for an already-provisioned instance, got ref %q", stub.LastVMImageRef)
+	}
+}
+
+func TestEnsurePreflightUsesConfiguredClassAndOSVersionDefault(t *testing.T) {
+	const customOSVersion = "test-custom-version"
+	const customImageName = "test-custom-image"
+	catalog.BakedImages[customImageName] = catalog.BakedImageEntry{
+		ImageName:               customImageName,
+		OSVersion:               customOSVersion,
+		SupportedEngineVersions: []string{"16"},
+		DefaultEngineVersion:    "16",
+	}
+	catalog.LatestBakedImages[customOSVersion] = catalog.BakedImageStream{
+		Revision:        customImageName,
+		ValidationState: catalog.ValidationValidated,
+	}
+
 	stub := &stubHarvester{}
 	r := &testHarness{Dependencies: Dependencies{
 		Harvester: stub,
 		DatabaseDefaults: operatorconfig.DatabaseDefaults{
-			OSImage:        "custom/image",
+			OSVersion:      customOSVersion,
 			StorageClass:   "custom-storage",
 			MasterUsername: "platform_admin",
 			Port:           6432,
@@ -101,15 +163,64 @@ func TestEnsurePreflightUsesConfiguredClassAndOSImageDefault(t *testing.T) {
 	}}
 	inst := newProvisionInst()
 	inst.Spec.DBInstanceClass = "db.custom"
-	inst.Spec.OSImage = ""
 
 	res := r.ensurePreflight(context.Background(), inst)
 
 	if res.Outcome != OutcomeSatisfied {
 		t.Fatalf("Outcome = %q, want Satisfied: %+v", res.Outcome, res)
 	}
-	if stub.LastVMImageRef != "custom/image" {
-		t.Fatalf("resolved image = %q, want custom/image", stub.LastVMImageRef)
+	if stub.LastVMImageRef != customImageName {
+		t.Fatalf("resolved image = %q, want %q", stub.LastVMImageRef, customImageName)
+	}
+}
+
+// A stream that is a genuinely unknown OS version (never registered in the
+// catalog at all) cannot self-resolve — no amount of waiting fixes a typo in
+// databaseDefaults.osVersion — so it stays Terminal.
+func TestEnsurePreflightUnknownOSVersionIsTerminal(t *testing.T) {
+	r := &testHarness{Dependencies: Dependencies{
+		Harvester:        &stubHarvester{},
+		DatabaseDefaults: operatorconfig.DatabaseDefaults{OSVersion: "nonexistent-version"},
+	}}
+	inst := newProvisionInst()
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonOSImageInvalid) {
+		t.Fatalf("PreflightReady = %+v, want False/OSImageInvalid", cond)
+	}
+}
+
+// A stream that IS registered but still ValidationPending (image built, not
+// yet marked Validated — e.g. before Task 10 registers the real image) is
+// also Terminal: catalog data can only change via a rebuild+redeploy, which
+// already re-reconciles every instance on its own, so there is nothing a
+// retry timer would gain over waiting for that redeploy.
+func TestEnsurePreflightPendingCatalogStreamIsTerminal(t *testing.T) {
+	const pendingOSVersion = "test-pending-version"
+	catalog.LatestBakedImages[pendingOSVersion] = catalog.BakedImageStream{
+		Revision:        "unused-revision",
+		ValidationState: catalog.ValidationPending,
+	}
+
+	r := &testHarness{Dependencies: Dependencies{
+		Harvester:        &stubHarvester{},
+		DatabaseDefaults: operatorconfig.DatabaseDefaults{OSVersion: pendingOSVersion},
+	}}
+	inst := newProvisionInst()
+
+	res := r.ensurePreflight(context.Background(), inst)
+
+	if res.Outcome != OutcomeTerminal {
+		t.Fatalf("res = %+v, want Terminal", res)
+	}
+	cond := inst.Status.GetCondition(dbaasv1.ConditionPreflightReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonOSImageInvalid) {
+		t.Fatalf("PreflightReady = %+v, want False/OSImageInvalid", cond)
 	}
 }
 

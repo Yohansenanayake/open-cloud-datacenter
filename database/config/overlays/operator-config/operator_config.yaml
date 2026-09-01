@@ -19,5 +19,8 @@ data:
         "metrics": {
           "bindAddress": ":8443"
         }
+      },
+      "databaseDefaults": {
+        "osVersion": "22.04"
       }
     }

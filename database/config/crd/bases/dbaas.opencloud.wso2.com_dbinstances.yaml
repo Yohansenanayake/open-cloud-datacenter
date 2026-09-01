@@ -26,6 +26,13 @@ spec:
     - jsonPath: .status.endpoint.address
       name: Endpoint
       type: string
+    - jsonPath: .status.conditions[?(@.type=='ImageDrift')].status
+      name: ImageDrift
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='ImageDrift')].reason
+      name: ImageDriftReason
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -63,7 +70,7 @@ spec:
                 - implemented mutable post-create: dbInstanceClass, allocatedStorage,
                   running, deletionProtection
                 - implemented immutable post-create (modify is refused): networkRef,
-                  osImage, dbName, masterUsername, port, storageType, staticNetwork,
+                  dbName, masterUsername, port, storageType, staticNetwork,
                   vmPassword, engineVersion
                 - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
                   multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
@@ -72,8 +79,8 @@ spec:
                   apply them. See ARCHITECTURE.md for the roadmap.
 
               Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
-              vmPassword carry a CEL "self == oldSelf" rule: the other five (osImage,
-              dbName, masterUsername, port, storageType) are compared post-defaulting in
+              vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
+              masterUsername, port, storageType) are compared post-defaulting in
               immutableDrift(), so a raw CEL rule on them would be stricter than that
               check — see immutableDrift's doc comment.
             properties:
@@ -204,13 +211,6 @@ spec:
                 x-kubernetes-validations:
                 - message: networkRef is immutable after creation
                   rule: self == oldSelf
-              osImage:
-                description: |-
-                  OSImage is the Harvester VirtualMachineImage to clone for the VM's
-                  OS disk. Either "<ns>/<name>" or just "<name>" (resolved in the
-                  "default" namespace), or the image's spec.displayName.
-                  Immutable after first reconcile.
-                type: string
               port:
                 description: |-
                   Port for PostgreSQL. Default 5432.
@@ -337,8 +337,6 @@ spec:
                     type: string
                   networkRef:
                     type: string
-                  osImage:
-                    type: string
                   port:
                     type: integer
                   staticNetwork:
@@ -442,6 +440,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              currentImageRevision:
+                description: |-
+                  CurrentImageRevision is the baked image revision (internal/catalog
+                  key) the VM is currently running, updated after each successful
+                  repave. Used for drift detection — when this differs from the
+                  catalog's current revision for the instance's stream,
+                  ConditionImageDrift is set to True; when it matches, to False.
+                type: string
               endpoint:
                 description: Endpoint is populated when the database is reachable.
                 properties:
@@ -457,6 +463,14 @@ spec:
                 type: object
               grafanaUrl:
                 description: GrafanaURL is the per-instance Grafana dashboard URL.
+                type: string
+              lastAppliedRepaveTrigger:
+                description: |-
+                  LastAppliedRepaveTrigger records the value of AnnotationRepaveTrigger
+                  that was last processed (accepted, rejected, or applied) — mirrors
+                  Flux's ReconcileRequestAnnotation/LastHandledReconcileAt pattern. The
+                  annotation itself is never modified by the controller; a repave is
+                  dispatched only when its current value differs from this field.
                 type: string
               lastKnownVMIUID:
                 description: |-
@@ -479,7 +493,12 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: Phase matches RDS DBInstanceStatus strings.
+                description: |-
+                  Phase matches RDS DBInstanceStatus strings for API compatibility.
+                  It is always derived from Conditions by DerivePhaseSummary and must
+                  never be maintained as an independent controller state machine — a
+                  projection retained solely for RDS compatibility, not a second
+                  source of truth alongside Conditions.
                 type: string
               prometheusTarget:
                 description: PrometheusTarget is the scrape target for the instance's
@@ -541,6 +560,23 @@ spec:
                       NADName is the Multus NetworkAttachmentDefinition the VM's data NIC
                       attaches to. The controller does not create the NAD; this just records
                       the reference from spec.networkRef so callers can see it on the CR.
+                    type: string
+                  osDiskPVCName:
+                    description: |-
+                      OSDiskPVCName is the exact current name of the OS disk PVC:
+                      pg-<id>-os at first provision, or a revision-suffixed
+                      pg-<id>-os-<rev> after a repave. Authoritative — TeardownAll and
+                      repave's old-disk cleanup read this instead of deriving the name by
+                      string-prefix matching.
+                    type: string
+                  pendingDeleteOSDiskPVCName:
+                    description: |-
+                      PendingDeleteOSDiskPVCName is set by repave the moment SwapVMOSDisk
+                      succeeds, before DeletePVC is attempted, and cleared only once DeletePVC
+                      actually succeeds. Recorded durably so a reconcile interrupted between
+                      those two calls (anything short of a hard process kill) can retry the
+                      delete directly next pass, instead of relying on SwapVMOSDisk's
+                      idempotent no-op to (incorrectly) imply there's nothing left to clean up.
                     type: string
                   privateTLSSecretRef:
                     description: |-

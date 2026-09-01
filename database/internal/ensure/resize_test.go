@@ -36,9 +36,9 @@ func newResizeFixture(t *testing.T, class string, storageGB int, rs kubevirtv1.V
 	inst.Spec.DBInstanceClass = class
 	inst.Spec.AllocatedStorage = storageGB
 	inst.Status.Resources.VMName = "pg-orders"
-	inst.Status.Resources.DataVolumeName = "pg-orders-data"
+	inst.Status.Resources.DataVolumeName = "pg-orders-ordersui-data"
 	stub := &stubHarvester{Readiness: Readiness}
-	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-data", rs)
+	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-ordersui-data", rs)
 	r := newTestHarness(t, stub, inst, vm)
 	return r, inst, stub
 }
@@ -172,17 +172,29 @@ func TestEnsureStorageResizeAppliesStorageGrow(t *testing.T) {
 	}
 }
 
-func TestEnsureStorageResizeReconstructsMissingDataVolumeName(t *testing.T) {
-	r, inst, stub := newResizeFixture(t, "db.t3.small", 50, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
-	inst.Status.Resources.DataVolumeName = ""
+// dataVolumeNameFor always recomputes from diskIdentifierFor (Name+UID) —
+// it never trusts a stale/stray Status.Resources.DataVolumeName, empty or
+// otherwise, since there's no legacy pre-diskIdentifierFor name to preserve
+// on a live cluster (decision #20). This test sets status to a value that
+// does NOT match diskIdentifierFor's answer to prove it's ignored, not just
+// happens to agree.
+func TestEnsureStorageResizeIgnoresStaleRecordedDataVolumeName(t *testing.T) {
+	inst := newProvisionInst()
+	inst.Spec.DBInstanceClass = "db.t3.small"
+	inst.Spec.AllocatedStorage = 50
+	inst.Status.Resources.VMName = "pg-orders"
+	inst.Status.Resources.DataVolumeName = "pg-orders-stale-data"
+	stub := &stubHarvester{Readiness: harvester.VMIReadiness{}}
+	vm := shapedVM("pg-orders", "tenant-a", "db.t3.small", 20, "pg-orders-ordersui-data", kubevirtv1.RunStrategyHalted)
+	r := newTestHarness(t, stub, inst, vm)
 
 	res := r.ensureResize(context.Background(), inst)
 
 	if res.Outcome != OutcomePending || stub.ResizeDVCalls != 1 {
 		t.Fatalf("res = %+v, ResizeDVCalls = %d; want Pending and one resize", res, stub.ResizeDVCalls)
 	}
-	if stub.LastResizeDVName != "pg-orders-data" {
-		t.Fatalf("resized DataVolume = %q, want reconstructed pg-orders-data", stub.LastResizeDVName)
+	if stub.LastResizeDVName != "pg-orders-ordersui-data" {
+		t.Fatalf("resized DataVolume = %q, want reconstructed pg-orders-ordersui-data", stub.LastResizeDVName)
 	}
 }
 

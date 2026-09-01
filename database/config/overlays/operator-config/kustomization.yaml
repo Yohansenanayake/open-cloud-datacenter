@@ -3,12 +3,12 @@ kind: Kustomization
 
 # This is the single installation namespace for every namespaced resource in
 # this overlay. The namespace must exist before applying the overlay.
-namespace: dbaas-system-v2
+namespace: dbaas-system
 
 images:
-- name: ghcr.io/yohansenanayake/dbaas-controller
-  newName: ghcr.io/yohansenanayake/dbaas-controller
-  newTag: dev-b658cf2-202607290025
+- name: wso2vick/ocd-dbaas
+  newName: ghcr.io/tgcjananga/dbaas-controller
+  newTag: v20260815_1
 
 resources:
 - ../../base

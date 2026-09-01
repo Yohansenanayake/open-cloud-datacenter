@@ -19,6 +19,7 @@ package ensure
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,13 +48,24 @@ func vmNameFor(inst *dbaasv1.DBInstance) string {
 	return fmt.Sprintf("pg-%s", inst.Name)
 }
 
-// dataVolumeNameFor preserves a recorded legacy name and otherwise derives the
-// controller's deterministic data-disk PVC name.
-func dataVolumeNameFor(inst *dbaasv1.DBInstance) string {
-	if inst.Status.Resources.DataVolumeName != "" {
-		return inst.Status.Resources.DataVolumeName
+// diskIdentifierFor returns "<name>-<uid8>", used to build this instance's
+// disk PVC names. Including the UID means a deleted-and-recreated instance
+// (same name, new UID) never reattaches a disk left over from before the deletion.
+func diskIdentifierFor(inst *dbaasv1.DBInstance) string {
+	uid := strings.ReplaceAll(string(inst.UID), "-", "")
+	if len(uid) > 8 {
+		uid = uid[:8]
 	}
-	return harvester.DataVolumeName(inst.Name)
+	return fmt.Sprintf("%s-%s", inst.Name, uid)
+}
+
+// dataVolumeNameFor derives the controller's deterministic data-disk PVC
+// name. Always recomputed from diskIdentifierFor rather than trusting
+// Status.Resources.DataVolumeName — Name and UID are both immutable for the
+// object's lifetime, so this is stable across every call; no legacy name to
+// preserve pre-dates this convention on a live cluster.
+func dataVolumeNameFor(inst *dbaasv1.DBInstance) string {
+	return harvester.DataVolumeName(diskIdentifierFor(inst))
 }
 
 // ownerRefFor builds the controller owner reference the provider stamps on the
@@ -92,6 +104,18 @@ func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName
 		inst.Status.Resources.DataVolumeName = dataVolumeNameFor(inst)
+		// Unlike the two fields above, OSDiskPVCName can't be recomputed
+		// deterministically once a repave has happened (it becomes
+		// revision-suffixed) — observed from the live VM instead, the same
+		// way repave's self-heal observes CurrentImageRevision via
+		// GetVMOSDiskImageID.
+		osDiskPVCName, err := r.Harvester.GetVMOSDiskPVCName(ctx, inst.Namespace, vmName)
+		if err != nil {
+			return Transient(err)
+		}
+		if osDiskPVCName != "" {
+			inst.Status.Resources.OSDiskPVCName = osDiskPVCName
+		}
 		inst.SetCurrentCondition(dbaasv1.ConditionVMReady, metav1.ConditionTrue,
 			dbaasv1.ReasonVMPresent, "virtualmachine exists")
 		return Satisfied()
@@ -129,10 +153,27 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	if dbName == "" {
 		dbName = inst.Name
 	}
-	osImage := inst.Spec.OSImage
-	if osImage == "" {
-		osImage = defaults.OSImage
-	} // Do we need this OS Validation?
+	// Recomputed here rather than passed forward from preflight — ensureVM
+	// doesn't trust state from other steps, matching how every other input
+	// above is re-derived independently.
+	entry, stream, ok := resolveBakedImage(defaults)
+	if !ok {
+		// ensurePreflight validates this first; defensive so ensureVM alone
+		// can never create a VM against an unresolvable catalog stream.
+		msg := fmt.Sprintf("OS stream %q is not available or not validated", defaults.OSVersion)
+		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, msg)
+		return Terminal(dbaasv1.ReasonOSImageInvalid, msg)
+	}
+	engineVersion, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry)
+	if !ok {
+		// ensurePreflight validates this first; defensive so ensureVM alone
+		// can never create a VM with a cloud-init that has no concrete
+		// engine version for bootstrap.sh to activate.
+		msg := fmt.Sprintf("engineVersion %q is not available in image revision %q (supported: %v)",
+			inst.Spec.EngineVersion, stream.Revision, entry.SupportedEngineVersions)
+		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonOSImageInvalid, msg)
+		return Terminal(dbaasv1.ReasonOSImageInvalid, msg)
+	}
 	storageType := inst.Spec.StorageType
 	if storageType == "" {
 		storageType = defaults.StorageClass
@@ -140,6 +181,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 
 	dataVolumeName := dataVolumeNameFor(inst)
 	inst.Status.Resources.DataVolumeName = dataVolumeName
+	osDiskPVCName := fmt.Sprintf("pg-%s-os", diskIdentifierFor(inst))
 
 	// Material was already resolved (and its three durable Secrets created)
 	// by ensureCredentials earlier in the step order; this re-read is cheap.
@@ -162,6 +204,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		S3Config:       inst.Spec.S3BackupConfig,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork,
+		EngineVersion:  engineVersion,
 	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)
@@ -179,7 +222,8 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		Namespace:              inst.Namespace,
 		CPUCores:               classSpec.CPUCores,
 		MemoryMB:               classSpec.MemoryMB,
-		OSImage:                osImage,
+		OSImage:                entry.ImageName,
+		OSDiskPVCName:          osDiskPVCName,
 		DataVolumeRef:          dataVolumeName,
 		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
 		DataVolumeStorageClass: storageType,
@@ -201,18 +245,21 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	}
 
 	// Snapshot the immutable fields as applied; immutableDrift refuses later spec
-	// changes that drift from this snapshot.
+	// changes that drift from this snapshot. The baked image itself is tracked
+	// separately below (CurrentImageRevision), not here — it's expected to
+	// change on every repave, unlike everything in AppliedSpec.
 	inst.Status.AppliedSpec = &dbaasv1.AppliedSpec{
 		NetworkRef:     inst.Spec.NetworkRef,
-		OSImage:        osImage,
 		DBName:         dbName,
 		MasterUsername: masterUser,
-		EngineVersion:  inst.Spec.EngineVersion, // In Image Baking features, this will be removed
+		EngineVersion:  inst.Spec.EngineVersion,
 		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
 		StorageType:    storageType,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork.DeepCopy(),
 	}
+	inst.Status.CurrentImageRevision = stream.Revision
+	inst.Status.Resources.OSDiskPVCName = osDiskPVCName
 	inst.SetCurrentCondition(dbaasv1.ConditionVMReady, metav1.ConditionFalse,
 		dbaasv1.ReasonVMCreated, "created virtualmachine, waiting for it to register")
 

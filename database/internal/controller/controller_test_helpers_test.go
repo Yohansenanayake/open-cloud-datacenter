@@ -25,6 +25,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	statuspatch "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/patch"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
@@ -40,6 +42,28 @@ const (
 	crashLoopThreshold        = 3
 	redactedCloudInitUserData = "#cloud-config\n{}\n"
 )
+
+// defaultBakedImageName is the catalog-resolved image name every test in this
+// package sees for the built-in default OS version, once init() below
+// overrides the real (Pending) seed entry for that stream. This override only
+// affects this test binary — internal/catalog's own tests and internal/ensure's
+// tests run as separate binaries and never see it (mirrors the same pattern in
+// internal/ensure/steps_test_helpers_test.go).
+var defaultBakedImageName = "test-" + operatorconfig.Default().DatabaseDefaults.OSVersion + "-postgres"
+
+func init() {
+	osVersion := operatorconfig.Default().DatabaseDefaults.OSVersion
+	catalog.BakedImages[defaultBakedImageName] = catalog.BakedImageEntry{
+		ImageName:               defaultBakedImageName,
+		OSVersion:               osVersion,
+		SupportedEngineVersions: []string{"16", "17"},
+		DefaultEngineVersion:    "17",
+	}
+	catalog.LatestBakedImages[osVersion] = catalog.BakedImageStream{
+		Revision:        defaultBakedImageName,
+		ValidationState: catalog.ValidationValidated,
+	}
+}
 
 func testEnsureDependencies(r *DBInstanceReconciler) ensure.Dependencies {
 	operatorNamespace := r.OperatorNamespace

@@ -49,9 +49,6 @@ func (c Config) Validate() error {
 	if err := validateTLSFiles("server.webhook.tls", c.Server.Webhook.TLS); err != nil {
 		return err
 	}
-	if c.DatabaseDefaults.OSImage == "" {
-		return fmt.Errorf("databaseDefaults.osImage must not be empty")
-	}
 	if c.DatabaseDefaults.StorageClass == "" {
 		return fmt.Errorf("databaseDefaults.storageClass must not be empty")
 	}
@@ -60,6 +57,13 @@ func (c Config) Validate() error {
 	}
 	if c.DatabaseDefaults.Port < 1 || c.DatabaseDefaults.Port > 65535 {
 		return fmt.Errorf("databaseDefaults.port must be between 1 and 65535")
+	}
+	if strings.TrimSpace(c.DatabaseDefaults.OSVersion) == "" {
+		return fmt.Errorf("databaseDefaults.osVersion must not be empty")
+	}
+	if problems := validation.IsDNS1123Label(c.Infrastructure.Harvester.ImageNamespace); len(problems) > 0 {
+		return fmt.Errorf("infrastructure.harvester.imageNamespace %q is invalid: %s",
+			c.Infrastructure.Harvester.ImageNamespace, strings.Join(problems, ", "))
 	}
 	if c.Observability.Grafana.BaseURL != "" {
 		parsed, err := url.ParseRequestURI(c.Observability.Grafana.BaseURL)

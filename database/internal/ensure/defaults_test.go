@@ -22,8 +22,53 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
 	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 )
+
+func TestEffectiveEngineVersionExplicitSupported(t *testing.T) {
+	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}, DefaultEngineVersion: "17"}
+	version, ok := effectiveEngineVersion("16", entry)
+	if !ok || version != "16" {
+		t.Fatalf("effectiveEngineVersion(16) = (%q, %v), want (16, true)", version, ok)
+	}
+}
+
+func TestEffectiveEngineVersionExplicitUnsupported(t *testing.T) {
+	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}, DefaultEngineVersion: "17"}
+	if _, ok := effectiveEngineVersion("15", entry); ok {
+		t.Fatal("effectiveEngineVersion(15) = ok, want not ok — 15 is not in SupportedEngineVersions")
+	}
+}
+
+// Unset resolves to entry.DefaultEngineVersion — a curated field, not a
+// position/value derived from SupportedEngineVersions. The list here is
+// deliberately NOT sorted with the default last (or highest): {"16","17","18"}
+// with DefaultEngineVersion "17" proves resolution reads the explicit field
+// rather than falling back to "last element" or "max value" — either of
+// which would wrongly return "18" for this fixture.
+func TestEffectiveEngineVersionUnsetUsesConfiguredDefault(t *testing.T) {
+	entry := catalog.BakedImageEntry{
+		SupportedEngineVersions: []string{"16", "17", "18"},
+		DefaultEngineVersion:    "17",
+	}
+	version, ok := effectiveEngineVersion("", entry)
+	if !ok || version != "17" {
+		t.Fatalf("effectiveEngineVersion(\"\") = (%q, %v), want (17, true)", version, ok)
+	}
+}
+
+// A catalog entry with no DefaultEngineVersion recorded is a data-integrity
+// bug (every real BakedImageEntry must set one, enforced by
+// internal/catalog's own test) — there's nothing to default to, so this must
+// fail rather than pass an empty string through to bootstrap.sh's
+// pg_createcluster call.
+func TestEffectiveEngineVersionNoDefaultRecordedIsNotOK(t *testing.T) {
+	entry := catalog.BakedImageEntry{SupportedEngineVersions: []string{"16", "17"}}
+	if _, ok := effectiveEngineVersion("", entry); ok {
+		t.Fatal("effectiveEngineVersion with no DefaultEngineVersion = ok, want not ok")
+	}
+}
 
 func TestImmutableDriftNormalizesCreateDefaults(t *testing.T) {
 	inst := &dbaasv1.DBInstance{
@@ -32,7 +77,6 @@ func TestImmutableDriftNormalizesCreateDefaults(t *testing.T) {
 			DBInstanceClass:  "db.t3.medium",
 			AllocatedStorage: 50,
 			NetworkRef:       "default/vm-network",
-			OSImage:          "ubuntu-22.04-server-cloudimg-amd64.img",
 			DBName:           "orders",
 			MasterUsername:   "dbadmin",
 			Port:             5432,
@@ -62,7 +106,6 @@ func TestImmutableDriftDetectsActualImmutableChange(t *testing.T) {
 		Status: dbaasv1.DBInstanceStatus{
 			AppliedSpec: &dbaasv1.AppliedSpec{
 				NetworkRef:     "default/vm-network",
-				OSImage:        "ubuntu-22.04-server-cloudimg-amd64.img",
 				DBName:         "orders",
 				MasterUsername: "dbadmin",
 				Port:           5432,

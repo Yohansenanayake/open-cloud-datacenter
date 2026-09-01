@@ -26,7 +26,7 @@ import (
 //   - implemented mutable post-create: dbInstanceClass, allocatedStorage,
 //     running, deletionProtection
 //   - implemented immutable post-create (modify is refused): networkRef,
-//     osImage, dbName, masterUsername, port, storageType, staticNetwork,
+//     dbName, masterUsername, port, storageType, staticNetwork,
 //     vmPassword, engineVersion
 //   - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
 //     multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
@@ -35,8 +35,8 @@ import (
 //     apply them. See ARCHITECTURE.md for the roadmap.
 //
 // Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
-// vmPassword carry a CEL "self == oldSelf" rule: the other five (osImage,
-// dbName, masterUsername, port, storageType) are compared post-defaulting in
+// vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
+// masterUsername, port, storageType) are compared post-defaulting in
 // immutableDrift(), so a raw CEL rule on them would be stricter than that
 // check — see immutableDrift's doc comment.
 type DBInstanceSpec struct {
@@ -154,13 +154,6 @@ type DBInstanceSpec struct {
 	// +optional
 	Running *bool `json:"running,omitempty"`
 
-	// OSImage is the Harvester VirtualMachineImage to clone for the VM's
-	// OS disk. Either "<ns>/<name>" or just "<name>" (resolved in the
-	// "default" namespace), or the image's spec.displayName.
-	// Immutable after first reconcile.
-	// +optional
-	OSImage string `json:"osImage,omitempty"`
-
 	// NetworkRef is a Harvester NAD reference (namespace/name) for the VLAN
 	// network the database VM attaches to. This is the VM's only network
 	// interface: client traffic, package install during cloud-init, and the
@@ -259,7 +252,11 @@ type S3BackupConfig struct {
 
 // DBInstanceStatus defines the observed state of a DBInstance.
 type DBInstanceStatus struct {
-	// Phase matches RDS DBInstanceStatus strings.
+	// Phase matches RDS DBInstanceStatus strings for API compatibility.
+	// It is always derived from Conditions by DerivePhaseSummary and must
+	// never be maintained as an independent controller state machine — a
+	// projection retained solely for RDS compatibility, not a second
+	// source of truth alongside Conditions.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -305,6 +302,22 @@ type DBInstanceStatus struct {
 	// +optional
 	AppliedSpec *AppliedSpec `json:"appliedSpec,omitempty"`
 
+	// CurrentImageRevision is the baked image revision (internal/catalog
+	// key) the VM is currently running, updated after each successful
+	// repave. Used for drift detection — when this differs from the
+	// catalog's current revision for the instance's stream,
+	// ConditionImageDrift is set to True; when it matches, to False.
+	// +optional
+	CurrentImageRevision string `json:"currentImageRevision,omitempty"`
+
+	// LastAppliedRepaveTrigger records the value of AnnotationRepaveTrigger
+	// that was last processed (accepted, rejected, or applied) — mirrors
+	// Flux's ReconcileRequestAnnotation/LastHandledReconcileAt pattern. The
+	// annotation itself is never modified by the controller; a repave is
+	// dispatched only when its current value differs from this field.
+	// +optional
+	LastAppliedRepaveTrigger string `json:"lastAppliedRepaveTrigger,omitempty"`
+
 	// RestartCount is the cumulative number of VM restarts detected or
 	// initiated by the controller liveness loop (both planned and unplanned).
 	// +optional
@@ -335,8 +348,6 @@ type DBInstanceStatus struct {
 type AppliedSpec struct {
 	// +optional
 	NetworkRef string `json:"networkRef,omitempty"`
-	// +optional
-	OSImage string `json:"osImage,omitempty"`
 	// +optional
 	DBName string `json:"dbName,omitempty"`
 	// +optional
@@ -370,6 +381,21 @@ type ResourceRefs struct {
 	NADName string `json:"nadName,omitempty"`
 	// +optional
 	DataVolumeName string `json:"dataVolumeName,omitempty"`
+	// OSDiskPVCName is the exact current name of the OS disk PVC:
+	// pg-<id>-os at first provision, or a revision-suffixed
+	// pg-<id>-os-<rev> after a repave. Authoritative — TeardownAll and
+	// repave's old-disk cleanup read this instead of deriving the name by
+	// string-prefix matching.
+	// +optional
+	OSDiskPVCName string `json:"osDiskPVCName,omitempty"`
+	// PendingDeleteOSDiskPVCName is set by repave the moment SwapVMOSDisk
+	// succeeds, before DeletePVC is attempted, and cleared only once DeletePVC
+	// actually succeeds. Recorded durably so a reconcile interrupted between
+	// those two calls (anything short of a hard process kill) can retry the
+	// delete directly next pass, instead of relying on SwapVMOSDisk's
+	// idempotent no-op to (incorrectly) imply there's nothing left to clean up.
+	// +optional
+	PendingDeleteOSDiskPVCName string `json:"pendingDeleteOSDiskPVCName,omitempty"`
 	// +optional
 	VMName string `json:"vmName,omitempty"`
 	// AdminCredentialsSecretName is the tenant-facing Secret containing the
@@ -414,6 +440,8 @@ type ResourceRefs struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Class",type=string,JSONPath=`.spec.dbInstanceClass`
 // +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint.address`
+// +kubebuilder:printcolumn:name="ImageDrift",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].status`
+// +kubebuilder:printcolumn:name="ImageDriftReason",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].reason`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DBInstance represents a managed PostgreSQL database on Harvester HCI.
@@ -467,6 +495,14 @@ const (
 	// VMI being halted, allowing reconciliation to distinguish that VMI tearing
 	// down from a later out-of-band recovery VMI.
 	AnnotationCrashLoopHaltedVMIUID = "dbaas.opencloud.wso2.com/crash-loop-halted-vmi-uid"
+
+	// AnnotationRepaveTrigger, when its value differs from
+	// Status.LastAppliedRepaveTrigger, triggers a repave — swapping the
+	// VM's OS disk onto the catalog's current validated revision for its
+	// stream. The controller never modifies or clears this annotation; set
+	// a fresh, unique value (e.g. an RFC3339 timestamp) to trigger a new
+	// repave, mirroring Flux's reconcile.fluxcd.io/requestedAt convention.
+	AnnotationRepaveTrigger = "dbaas.opencloud.wso2.com/repave-trigger"
 
 	// FinalizerName triggers controller-side teardown of Harvester resources.
 	FinalizerName = "dbaas.opencloud.wso2.com/cleanup"
