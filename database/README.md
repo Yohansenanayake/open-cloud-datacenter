@@ -99,6 +99,7 @@ Each `DBInstance` (`dbaas.opencloud.wso2.com/v1alpha1`, namespaced) creates:
 
 | Resource | Details |
 | --- | --- |
+| Guest-state PVC | Dedicated block disk for the backup runtime, owned by the DBInstance and preserved across OS repave. See [guest-state storage](docs/guest-state-storage.md). |
 | VM (KubeVirt) | One data-net NIC bridged onto the Multus NAD in `spec.networkRef` (must already exist). DHCP by default, or `spec.staticNetwork` for VLANs without one. Address published as `status.endpoint.address`. |
 | `pg-<name>-credentials` (tenant Secret) | `admin_user` / `admin_password` only. |
 | `pg-<name>-connect` (tenant Secret) | `host`, `port`, `dbname`, `jdbcUrl`, `sslmode`, `ca.crt` — no password material. |

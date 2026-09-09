@@ -87,6 +87,8 @@ const (
 	ReasonVMPresent                   ConditionReason = "VMPresent"
 	ReasonVMCreateFailed              ConditionReason = "VMCreateFailed"
 	ReasonVMCreated                   ConditionReason = "VMCreated"
+	ReasonGuestStatePending           ConditionReason = "GuestStatePending"
+	ReasonGuestStateRecoveryRequired  ConditionReason = "GuestStateRecoveryRequired"
 	ReasonUnsupportedShrink           ConditionReason = "UnsupportedShrink"
 	ReasonShapeConverged              ConditionReason = "ShapeConverged"
 	ReasonResizeStopping              ConditionReason = "ResizeStopping"
@@ -156,6 +158,8 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonVMPresent):                   ReasonVMPresent,
 	string(ReasonVMCreateFailed):              ReasonVMCreateFailed,
 	string(ReasonVMCreated):                   ReasonVMCreated,
+	string(ReasonGuestStatePending):           ReasonGuestStatePending,
+	string(ReasonGuestStateRecoveryRequired):  ReasonGuestStateRecoveryRequired,
 	string(ReasonUnsupportedShrink):           ReasonUnsupportedShrink,
 	string(ReasonShapeConverged):              ReasonShapeConverged,
 	string(ReasonResizeStopping):              ReasonResizeStopping,

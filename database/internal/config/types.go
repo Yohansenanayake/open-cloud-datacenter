@@ -93,9 +93,12 @@ type HarvesterConfig struct {
 }
 
 type DatabaseDefaults struct {
-	StorageClass   string `konf:"storageClass"`
-	MasterUsername string `konf:"masterUsername"`
-	Port           int    `konf:"port"`
+	// GuestStateSizeGB is the initial guest-state disk capacity in GiB.
+	// Existing volumes are not resized when this default changes.
+	GuestStateSizeGB int    `konf:"guestStateSizeGB"`
+	StorageClass     string `konf:"storageClass"`
+	MasterUsername   string `konf:"masterUsername"`
+	Port             int    `konf:"port"`
 	// OSVersion is the internal/catalog stream key (e.g. "24.04"); platform-wide, with no per-instance override.
 	OSVersion string `konf:"osVersion"`
 }

@@ -49,6 +49,9 @@ func (c Config) Validate() error {
 	if err := validateTLSFiles("server.webhook.tls", c.Server.Webhook.TLS); err != nil {
 		return err
 	}
+	if c.DatabaseDefaults.GuestStateSizeGB < 1 {
+		return fmt.Errorf("databaseDefaults.guestStateSizeGB must be positive")
+	}
 	if c.DatabaseDefaults.StorageClass == "" {
 		return fmt.Errorf("databaseDefaults.storageClass must not be empty")
 	}

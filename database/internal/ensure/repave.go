@@ -304,17 +304,19 @@ func (r *repaveStep) regenerateCloudInit(ctx context.Context, inst *dbaasv1.DBIn
 		return PendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue), true
 	}
 	userdata, networkdata := credentials.BuildCloudInit(credentials.BootstrapParams{
-		ID:             inst.Name,
-		DBName:         dbName,
-		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
-		MasterUser:     masterUser,
-		MaxConnections: classSpec.MaxConnections,
-		BackupEnabled:  inst.Spec.BackupRetentionPeriod > 0,
-		BackupWindow:   inst.Spec.PreferredBackupWindow,
-		S3Config:       inst.Spec.S3BackupConfig,
-		VMPassword:     inst.Spec.VMPassword,
-		StaticNetwork:  inst.Spec.StaticNetwork,
-		EngineVersion:  engineVersion,
+		InstanceUID:      string(inst.UID),
+		GuestStatePVCUID: inst.Status.Resources.GuestStatePVCUID,
+		ID:               inst.Name,
+		DBName:           dbName,
+		Port:             specPortWithDefault(inst.Spec.Port, defaults.Port),
+		MasterUser:       masterUser,
+		MaxConnections:   classSpec.MaxConnections,
+		BackupEnabled:    inst.Spec.BackupRetentionPeriod > 0,
+		BackupWindow:     inst.Spec.PreferredBackupWindow,
+		S3Config:         inst.Spec.S3BackupConfig,
+		VMPassword:       inst.Spec.VMPassword,
+		StaticNetwork:    inst.Spec.StaticNetwork,
+		EngineVersion:    engineVersion,
 	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)

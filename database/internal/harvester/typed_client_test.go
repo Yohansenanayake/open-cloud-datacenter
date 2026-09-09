@@ -36,6 +36,7 @@ func testVMCreateParams() VMCreateParams {
 		MemoryMB:               4096,
 		OSImage:                "ubuntu-22.04",
 		OSDiskPVCName:          "pg-orders-os",
+		GuestStateVolumeRef:    "pg-orders-state",
 		DataVolumeRef:          "pg-orders-data",
 		DataVolumeSizeGB:       20,
 		DataVolumeStorageClass: "harvester-longhorn",
@@ -243,6 +244,7 @@ func TestSwapVMOSDiskProducesRevisionSuffixedPVCAndRepointsVolume(t *testing.T) 
 	if err != nil {
 		t.Fatalf("get VM: %v", err)
 	}
+	assertGuestStateDisk(t, vm)
 	if !vmVolumeUsesPVC(vm, osDiskVolumeName, newPVCName) {
 		t.Fatalf("os-disk volume does not point at %s", newPVCName)
 	}
@@ -509,6 +511,7 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if !vmVolumeUsesPVC(vm, "pgdata-disk", "pg-orders-data") {
 		t.Fatalf("pgdata-disk volume does not use PVC pg-orders-data")
 	}
+	assertGuestStateDisk(t, vm)
 	// The VM must have only the data-net interface — mgmt-net (masquerade)
 	// is removed; the readiness probe uses the QGA virtio channel instead.
 	if vmHasInterface(vm, mgmtNetInterface) {
@@ -863,4 +866,27 @@ func testTypedVMImage() *harvesterhciov1beta1.VirtualMachineImage {
 			},
 		},
 	}
+}
+
+func assertGuestStateDisk(t *testing.T, vm *kubevirtv1.VirtualMachine) {
+	t.Helper()
+	if !vmVolumeUsesPVC(vm, "guest-state", "pg-orders-state") {
+		t.Fatal("guest-state PVC missing or changed")
+	}
+	templates, err := VolumeClaimTemplates(vm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findPVCTemplate(templates, "pg-orders-state") != nil {
+		t.Fatal("guest state must not be automatically recreated by a VM template")
+	}
+	for _, disk := range vm.Spec.Template.Spec.Domain.Devices.Disks {
+		if disk.Name == "guest-state" {
+			if disk.Serial != "dbaas-state" || disk.Disk == nil || disk.Disk.Bus != kubevirtv1.DiskBusVirtio {
+				t.Fatalf("state disk: %+v", disk)
+			}
+			return
+		}
+	}
+	t.Fatal("guest-state disk missing")
 }

@@ -233,3 +233,14 @@ func clearConfigurationEnvironment(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadGuestStateSize(t *testing.T) {
+	clearConfigurationEnvironment(t)
+	got, err := Load(flag.NewFlagSet("test", flag.ContinueOnError), []string{"--databaseDefaults.guestStateSizeGB=8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DatabaseDefaults.GuestStateSizeGB != 8 {
+		t.Fatalf("size=%d", got.DatabaseDefaults.GuestStateSizeGB)
+	}
+}

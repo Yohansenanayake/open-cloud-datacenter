@@ -381,6 +381,13 @@ type ResourceRefs struct {
 	NADName string `json:"nadName,omitempty"`
 	// +optional
 	DataVolumeName string `json:"dataVolumeName,omitempty"`
+	// GuestStatePVCName and GuestStatePVCUID bind durable executor state to
+	// one PVC incarnation. OS repave must preserve this volume. A missing or
+	// replaced bound PVC requires explicit recovery, never automatic recreation.
+	// +optional
+	GuestStatePVCName string `json:"guestStatePVCName,omitempty"`
+	// +optional
+	GuestStatePVCUID string `json:"guestStatePVCUID,omitempty"`
 	// OSDiskPVCName is the exact current name of the OS disk PVC:
 	// pg-<id>-os at first provision, or a revision-suffixed
 	// pg-<id>-os-<rev> after a repave. Authoritative — TeardownAll and

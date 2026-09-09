@@ -54,6 +54,9 @@ func (d Dependencies) operatorNamespace() string { return d.OperatorNamespace }
 func (d Dependencies) databaseDefaults() operatorconfig.DatabaseDefaults {
 	defaults := d.DatabaseDefaults
 	builtIn := operatorconfig.Default().DatabaseDefaults
+	if defaults.GuestStateSizeGB == 0 {
+		defaults.GuestStateSizeGB = builtIn.GuestStateSizeGB
+	}
 	if defaults.StorageClass == "" {
 		defaults.StorageClass = builtIn.StorageClass
 	}

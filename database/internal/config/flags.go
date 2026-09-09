@@ -50,6 +50,7 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 		defaults.Infrastructure.Harvester.ImageNamespace,
 		"Harvester namespace baked-image names resolve against when they carry no explicit ns/name prefix.")
 
+	set.Int("databaseDefaults.guestStateSizeGB", defaults.DatabaseDefaults.GuestStateSizeGB, "Initial persistent guest-state disk size in GiB")
 	set.String("databaseDefaults.storageClass", defaults.DatabaseDefaults.StorageClass,
 		"Default storage class for DBInstances.")
 	set.String("databaseDefaults.masterUsername", defaults.DatabaseDefaults.MasterUsername,

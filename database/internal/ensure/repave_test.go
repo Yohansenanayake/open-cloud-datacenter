@@ -18,6 +18,7 @@ package ensure
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -449,6 +450,7 @@ func TestEnsureRepaveTriggerWaitsForTeardown(t *testing.T) {
 
 func TestEnsureRepaveTriggerAppliesSwapWhenDown(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
+	inst.Status.Resources.GuestStatePVCUID = "retained-state-pvc"
 	convergeCredentials(t, context.Background(), r, inst) // regenerateCloudInit needs stable, already-resolved Material
 	triggerRepave(inst, "trigger-1")
 
@@ -674,5 +676,23 @@ func TestEnsureRepaveContinuesAfterOwnPhaseChange(t *testing.T) {
 	if inst.Status.LastAppliedRepaveTrigger != "trigger-1" {
 		t.Fatalf("LastAppliedRepaveTrigger = %q, want %q — applied repave must record the trigger as handled",
 			inst.Status.LastAppliedRepaveTrigger, "trigger-1")
+	}
+}
+
+func TestRepavePreservesStateIdentityAndDisallowsFormatting(t *testing.T) {
+	r, inst, _ := newRepaveFixture(t, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
+	inst.Status.Resources.GuestStatePVCUID = "retained-state-pvc"
+	convergeCredentials(t, context.Background(), r, inst)
+	triggerRepave(inst, "repave-state-test")
+	if res := r.ensureRepave(context.Background(), inst); res.Reason != dbaasv1.ReasonRepaveApplied {
+		t.Fatalf("repave: %+v", res)
+	}
+	var ci corev1.Secret
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: inst.Namespace, Name: inst.Status.Resources.CloudInitSecretName}, &ci); err != nil {
+		t.Fatal(err)
+	}
+	expected := "INSTANCE_UID='" + string(inst.UID) + "'\nSTATE_PVC_UID='retained-state-pvc'\nINITIALIZE_STATE=false\n"
+	if !strings.Contains(string(ci.Data["userdata"]), base64.StdEncoding.EncodeToString([]byte(expected))) {
+		t.Fatal("repave cloud-init must retain identity without permission to initialize")
 	}
 }

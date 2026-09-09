@@ -71,3 +71,13 @@ func TestValidateRejectsInvalidImageNamespace(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateGuestStateSize(t *testing.T) {
+	for _, size := range []int{0, -1} {
+		cfg := Default()
+		cfg.DatabaseDefaults.GuestStateSizeGB = size
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "guestStateSizeGB") {
+			t.Fatalf("size %d: %v", size, err)
+		}
+	}
+}

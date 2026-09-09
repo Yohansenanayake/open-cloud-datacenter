@@ -49,10 +49,11 @@ func Default() Config {
 			},
 		},
 		DatabaseDefaults: DatabaseDefaults{
-			StorageClass:   "longhorn",
-			MasterUsername: "dbadmin",
-			Port:           5432,
-			OSVersion:      "22.04",
+			GuestStateSizeGB: 5,
+			StorageClass:     "longhorn",
+			MasterUsername:   "dbadmin",
+			Port:             5432,
+			OSVersion:        "22.04",
 		},
 		Observability: ObservabilityConfig{
 			Grafana: GrafanaConfig{BaseURL: "https://grafana.monitoring.svc"},

@@ -100,6 +100,15 @@ func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	err := r.Get(ctx, types.NamespacedName{Namespace: inst.Namespace, Name: vmName}, &vm)
 	switch {
 	case err == nil:
+		if inst.Status.Resources.GuestStatePVCName != "" || inst.Status.Resources.GuestStatePVCUID != "" || hasGuestStateDisk(&vm) {
+			inst.Status.Resources.VMName = vmName
+			if res := r.ensureGuestState(ctx, inst); res.Outcome != OutcomeSatisfied {
+				return res
+			}
+			if !guestStateAttached(&vm, inst.Status.Resources.GuestStatePVCName) {
+				return guestStateBlocked(inst, "VM does not attach the bound guest-state PVC with its expected disk serial")
+			}
+		}
 		// Observed == desired: the VM object exists. Re-record the ref for
 		// instances whose status was lost/reset (self-heal of the ref itself).
 		inst.Status.Resources.VMName = vmName
@@ -179,6 +188,10 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		storageType = defaults.StorageClass
 	}
 
+	if res := r.ensureGuestState(ctx, inst); res.Outcome != OutcomeSatisfied {
+		return res
+	}
+
 	dataVolumeName := dataVolumeNameFor(inst)
 	inst.Status.Resources.DataVolumeName = dataVolumeName
 	osDiskPVCName := fmt.Sprintf("pg-%s-os", diskIdentifierFor(inst))
@@ -194,17 +207,20 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		return PendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
 	}
 	userdata, networkdata := credentials.BuildCloudInit(credentials.BootstrapParams{
-		ID:             inst.Name,
-		DBName:         dbName,
-		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
-		MasterUser:     masterUser,
-		MaxConnections: classSpec.MaxConnections,
-		BackupEnabled:  inst.Spec.BackupRetentionPeriod > 0,
-		BackupWindow:   inst.Spec.PreferredBackupWindow,
-		S3Config:       inst.Spec.S3BackupConfig,
-		VMPassword:     inst.Spec.VMPassword,
-		StaticNetwork:  inst.Spec.StaticNetwork,
-		EngineVersion:  engineVersion,
+		InstanceUID:          string(inst.UID),
+		GuestStatePVCUID:     inst.Status.Resources.GuestStatePVCUID,
+		InitializeGuestState: inst.Status.AppliedSpec == nil && inst.Status.CurrentImageRevision == "",
+		ID:                   inst.Name,
+		DBName:               dbName,
+		Port:                 specPortWithDefault(inst.Spec.Port, defaults.Port),
+		MasterUser:           masterUser,
+		MaxConnections:       classSpec.MaxConnections,
+		BackupEnabled:        inst.Spec.BackupRetentionPeriod > 0,
+		BackupWindow:         inst.Spec.PreferredBackupWindow,
+		S3Config:             inst.Spec.S3BackupConfig,
+		VMPassword:           inst.Spec.VMPassword,
+		StaticNetwork:        inst.Spec.StaticNetwork,
+		EngineVersion:        engineVersion,
 	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)
@@ -224,6 +240,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		MemoryMB:               classSpec.MemoryMB,
 		OSImage:                entry.ImageName,
 		OSDiskPVCName:          osDiskPVCName,
+		GuestStateVolumeRef:    inst.Status.Resources.GuestStatePVCName,
 		DataVolumeRef:          dataVolumeName,
 		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
 		DataVolumeStorageClass: storageType,

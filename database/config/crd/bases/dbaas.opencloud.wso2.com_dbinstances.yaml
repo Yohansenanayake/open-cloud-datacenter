@@ -541,6 +541,14 @@ spec:
                     type: string
                   dataVolumeName:
                     type: string
+                  guestStatePVCName:
+                    description: |-
+                      GuestStatePVCName and GuestStatePVCUID bind durable executor state to
+                      one PVC incarnation. OS repave must preserve this volume. A missing or
+                      replaced bound PVC requires explicit recovery, never automatic recreation.
+                    type: string
+                  guestStatePVCUID:
+                    type: string
                   internalSecretRef:
                     description: |-
                       InternalSecretRef is "namespace/name" of the controller-private Secret

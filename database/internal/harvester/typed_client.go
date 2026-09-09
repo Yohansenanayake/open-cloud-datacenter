@@ -443,6 +443,9 @@ func DataVolumeName(id string) string {
 	return fmt.Sprintf("pg-%s-data", id)
 }
 
+// GuestStateVolumeName names a PVC owned by the DBInstance, independent of the VM.
+func GuestStateVolumeName(id string) string { return fmt.Sprintf("pg-%s-state", id) }
+
 func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretName, imageID, imageSC string, running bool) (*kubevirtv1.VirtualMachine, error) {
 	annotations := map[string]string{}
 	if c.MgmtLogicalSwitch != "" {
@@ -497,6 +500,21 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	vm, err := vmBuilder.VM()
 	if err != nil {
 		return nil, fmt.Errorf("build VM with Harvester builder helpers: %w", err)
+	}
+	// Attach an existing PVC, with no Harvester creation template. Otherwise
+	// deleting the PVC could silently produce an empty replacement queue.
+	if p.GuestStateVolumeRef != "" {
+		vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, kubevirtv1.Volume{
+			Name: "guest-state", VolumeSource: kubevirtv1.VolumeSource{
+				PersistentVolumeClaim: &kubevirtv1.PersistentVolumeClaimVolumeSource{
+					PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{ClaimName: p.GuestStateVolumeRef},
+				},
+			},
+		})
+		vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, kubevirtv1.Disk{
+			Name: "guest-state", Serial: "dbaas-state",
+			DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: kubevirtv1.DiskBusVirtio}},
+		})
 	}
 	// Post build fixes
 	vm.TypeMeta = metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"}

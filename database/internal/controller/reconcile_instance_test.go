@@ -161,7 +161,34 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 		t.Fatalf("VMReady condition = %+v, want absent before the VM step runs", cond)
 	}
 
-	// Pass 2: credentials are observed, then the absent VM is created.
+	// The PVC must be created and its API identity durably recorded before
+	// a VM can receive initialization permission.
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatal(err)
+	}
+	if result, err = runReconcileInstance(ctx, r, inst); err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("create PVC: %+v, %v", result, err)
+	}
+	var statePVC corev1.PersistentVolumeClaim
+	stateKey := types.NamespacedName{Namespace: inst.Namespace, Name: "pg-orders-ordersui-state"}
+	if err := r.Get(ctx, stateKey, &statePVC); err != nil {
+		t.Fatal(err)
+	}
+	statePVC.UID = "state-pvc-uid" // API-assigned identity, absent in fake clients.
+	if err := r.Update(ctx, &statePVC); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, key, inst); err != nil {
+		t.Fatal(err)
+	}
+	if result, err = runReconcileInstance(ctx, r, inst); err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("bind PVC: %+v, %v", result, err)
+	}
+	if stub.CreateVMCalls != 0 {
+		t.Fatal("VM created before binding persisted")
+	}
+
+	// Pass 2: the bound state PVC is observed, then the absent VM is created.
 	if err := r.Get(ctx, key, inst); err != nil {
 		t.Fatalf("refetch for pass 2: %v", err)
 	}
@@ -173,7 +200,10 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 	}
 
 	// KubeVirt "creates" the VM out of band.
-	if err := r.Create(ctx, testVM("pg-orders", "tenant-a")); err != nil {
+	vm := testVM("pg-orders", "tenant-a")
+	vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, kubevirtv1.Volume{Name: "guest-state", VolumeSource: kubevirtv1.VolumeSource{PersistentVolumeClaim: &kubevirtv1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{ClaimName: stateKey.Name}}}})
+	vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, kubevirtv1.Disk{Name: "guest-state", Serial: "dbaas-state", DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: kubevirtv1.DiskBusVirtio}}})
+	if err := r.Create(ctx, vm); err != nil {
 		t.Fatalf("create vm: %v", err)
 	}
 

@@ -121,6 +121,7 @@ type VMCreateParams struct {
 	MemoryMB               int
 	OSImage                string
 	OSDiskPVCName          string
+	GuestStateVolumeRef    string // Existing controller-owned PVC; never a VM volume-claim template.
 	DataVolumeRef          string
 	DataVolumeSizeGB       int
 	DataVolumeStorageClass string

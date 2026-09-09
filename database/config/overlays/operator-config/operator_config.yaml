@@ -21,6 +21,7 @@ data:
         }
       },
       "databaseDefaults": {
-        "osVersion": "22.04"
+        "osVersion": "22.04",
+        "guestStateSizeGB": 5
       }
     }

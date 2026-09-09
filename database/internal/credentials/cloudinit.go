@@ -30,15 +30,18 @@ import (
 // (CPU/mem/image/disks) stays with the Harvester provider and never crosses
 // into this package.
 type BootstrapParams struct {
-	ID             string
-	DBName         string
-	Port           int
-	MasterUser     string
-	MaxConnections int
-	BackupEnabled  bool
-	BackupWindow   string
-	S3Config       *dbaasv1.S3BackupConfig
-	VMPassword     string
+	InstanceUID          string
+	GuestStatePVCUID     string
+	InitializeGuestState bool // True only for initial VM provisioning, never repave.
+	ID                   string
+	DBName               string
+	Port                 int
+	MasterUser           string
+	MaxConnections       int
+	BackupEnabled        bool
+	BackupWindow         string
+	S3Config             *dbaasv1.S3BackupConfig
+	VMPassword           string
 	// StaticNetwork, when non-nil, makes the cloud-init netplan use a
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
 	// server.
@@ -139,6 +142,7 @@ func shellSingleQuote(s string) string {
 }
 
 func buildUserData(p BootstrapParams, m *Material) string {
+	stateFiles, stateCommands := guestStateCloudInit(p)
 	backupConfig := "# backups disabled"
 	if p.BackupEnabled && p.S3Config != nil {
 		backupConfig = fmt.Sprintf(
@@ -171,7 +175,7 @@ ssh_pwauth: true
 	// install from runcmd works on every flavour.
 	return fmt.Sprintf(`#cloud-config
 %swrite_files:
-  - path: /etc/dbaas/bootstrap.env
+%s  - path: /etc/dbaas/bootstrap.env
     permissions: "0600"
     content: |
       INSTANCE_ID=%s
@@ -202,7 +206,7 @@ ssh_pwauth: true
       #!/bin/bash
       set -euo pipefail
       source /etc/dbaas/bootstrap.env
-
+%s
       # 1. Activate the requested PostgreSQL version. Every catalog-supported
       #    version's binaries are pre-installed in the baked image
       #    (database/images/packer/scripts/provision.sh) — drop whatever
@@ -345,6 +349,7 @@ runcmd:
 final_message: "DBaaS bootstrap complete for %s"
 `,
 		vmUserBlock,
+		stateFiles,
 		p.ID,
 		p.DBName,
 		p.Port,
@@ -358,6 +363,7 @@ final_message: "DBaaS bootstrap complete for %s"
 		caCertB64,
 		serverCertB64,
 		serverKeyB64,
+		stateCommands,
 		p.ID,
 	)
 }

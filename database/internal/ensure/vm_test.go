@@ -36,6 +36,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	stub := &stubHarvester{}
 	r := newTestHarness(t, stub, inst)
 	convergeCredentials(t, ctx, r, inst)
+	seedGuestState(t, r, inst)
 
 	res := r.ensureVM(ctx, inst)
 
@@ -137,6 +138,7 @@ func TestEnsureVMSnapshotsVMPasswordAndStaticNetwork(t *testing.T) {
 	stub := &stubHarvester{}
 	r := newTestHarness(t, stub, inst)
 	convergeCredentials(t, context.Background(), r, inst)
+	seedGuestState(t, r, inst)
 
 	r.ensureVM(context.Background(), inst)
 
@@ -222,6 +224,7 @@ func TestEnsureVMSelfHealsAfterOutOfBandDelete(t *testing.T) {
 	stub := &stubHarvester{}
 	r := newTestHarness(t, stub, inst) // no VM object in the cluster
 	convergeCredentials(t, context.Background(), r, inst)
+	seedGuestState(t, r, inst)
 
 	res := r.ensureVM(context.Background(), inst)
 
@@ -248,6 +251,7 @@ func TestEnsureVMDiskNamesDisjointAcrossSameNameRecreate(t *testing.T) {
 	stub1 := &stubHarvester{}
 	r1 := newTestHarness(t, stub1, first)
 	convergeCredentials(t, context.Background(), r1, first)
+	seedGuestState(t, r1, first)
 	if res := r1.ensureVM(context.Background(), first); res.Outcome != OutcomePending {
 		t.Fatalf("first res = %+v, want Pending", res)
 	}
@@ -257,6 +261,7 @@ func TestEnsureVMDiskNamesDisjointAcrossSameNameRecreate(t *testing.T) {
 	stub2 := &stubHarvester{}
 	r2 := newTestHarness(t, stub2, second)
 	convergeCredentials(t, context.Background(), r2, second)
+	seedGuestState(t, r2, second)
 	if res := r2.ensureVM(context.Background(), second); res.Outcome != OutcomePending {
 		t.Fatalf("second res = %+v, want Pending", res)
 	}
@@ -280,6 +285,7 @@ func TestEnsureVMCreateErrorIsTransientAndRecordsRefs(t *testing.T) {
 	stub := &stubHarvester{CreateVMErr: errors.New("harvester unavailable")}
 	r := newTestHarness(t, stub, inst)
 	convergeCredentials(t, context.Background(), r, inst)
+	seedGuestState(t, r, inst)
 
 	res := r.ensureVM(context.Background(), inst)
 

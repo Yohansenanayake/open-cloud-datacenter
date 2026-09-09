@@ -85,8 +85,9 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=harvesterhci.io,resources=virtualmachineimages,verbs=get;list
 // persistentvolumeclaims: repave's SwapVMOSDisk/DeletePVC delete the old OS-disk
-// PVC after swapping the VM onto a new baked-image revision.
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=delete;get;list
+// PVC after swapping the VM onto a new baked-image revision. Guest-state
+// provisioning also creates DBInstance-owned PVCs and watches their lifecycle.
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=create;delete;get;list;watch
 // External references the controller never creates: preflight only validates they
 // exist (read-only). The NAD is inline-declared by the VM, not created here.
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list
@@ -290,6 +291,7 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&dbaasv1.DBInstance{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Endpoints{}).
