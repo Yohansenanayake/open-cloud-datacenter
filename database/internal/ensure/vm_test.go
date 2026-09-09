@@ -28,6 +28,7 @@ import (
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
 )
 
 func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
@@ -160,7 +161,9 @@ func TestEnsureVMSnapshotsVMPasswordAndStaticNetwork(t *testing.T) {
 func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{}
-	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
+	vm := testVM("pg-orders", "tenant-a")
+	pvc := testutil.GuestStateFixture(inst, vm)
+	r := newTestHarness(t, stub, inst, vm, pvc)
 
 	res := r.ensureVM(context.Background(), inst)
 
@@ -188,7 +191,9 @@ func TestEnsureVMSatisfiedWhenPresent(t *testing.T) {
 func TestEnsureVMSelfHealsOSDiskPVCNameWhenPresent(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{OSDiskPVCName: "pg-orders-ordersui-os-ubuntu-2404-postgres-v20260815"}
-	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
+	vm := testVM("pg-orders", "tenant-a")
+	pvc := testutil.GuestStateFixture(inst, vm)
+	r := newTestHarness(t, stub, inst, vm, pvc)
 
 	res := r.ensureVM(context.Background(), inst)
 
@@ -207,7 +212,9 @@ func TestEnsureVMSelfHealOSDiskPVCNameErrorIsTransient(t *testing.T) {
 	inst := newProvisionInst()
 	boom := errors.New("boom")
 	stub := &stubHarvester{OSDiskPVCNameErr: boom}
-	r := newTestHarness(t, stub, inst, testVM("pg-orders", "tenant-a"))
+	vm := testVM("pg-orders", "tenant-a")
+	pvc := testutil.GuestStateFixture(inst, vm)
+	r := newTestHarness(t, stub, inst, vm, pvc)
 
 	res := r.ensureVM(context.Background(), inst)
 

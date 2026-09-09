@@ -42,10 +42,8 @@ WantedBy=multi-user.target
 `
 
 func guestStateCloudInit(p BootstrapParams) (files, commands string) {
-	// Existing VMs without this disk retain their old bootstrap behavior.
-	if p.GuestStatePVCUID == "" {
-		return "", ""
-	}
+	// Every VM requires guest state. The helper rejects missing identity rather
+	// than allowing bootstrap to proceed without the persistent volume.
 	env := fmt.Sprintf("INSTANCE_UID=%s\nSTATE_PVC_UID=%s\nINITIALIZE_STATE=%t\n", shellSingleQuote(p.InstanceUID), shellSingleQuote(p.GuestStatePVCUID), p.InitializeGuestState)
 	for _, f := range []struct{ path, mode, content string }{
 		{"/etc/dbaas/guest-state.env", "0600", env},

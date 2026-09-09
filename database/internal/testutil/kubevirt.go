@@ -19,11 +19,13 @@ package testutil
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/harvester/harvester/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -61,4 +63,26 @@ func ShapedVM(name, namespace, class string, storageGB int, dataVolumeName strin
 		corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", classSpec.MemoryMB)),
 	}
 	return vm
+}
+
+// GuestStateFixture binds an existing-VM fixture to its required state PVC.
+// Callers must add the returned PVC to their fake cluster explicitly.
+func GuestStateFixture(inst *dbaasv1.DBInstance, vm *kubevirtv1.VirtualMachine) *corev1.PersistentVolumeClaim {
+	uid := strings.ReplaceAll(string(inst.UID), "-", "")
+	if len(uid) > 8 {
+		uid = uid[:8]
+	}
+	name := fmt.Sprintf("pg-%s-%s-state", inst.Name, uid)
+	pvcUID := types.UID("state-" + string(inst.UID))
+	mode := corev1.PersistentVolumeBlock
+	controller := true
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: inst.Namespace, UID: pvcUID, OwnerReferences: []metav1.OwnerReference{{APIVersion: dbaasv1.GroupVersion.String(), Kind: "DBInstance", Name: inst.Name, UID: inst.UID, Controller: &controller}}},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: &mode},
+	}
+	inst.Status.Resources.GuestStatePVCName = name
+	inst.Status.Resources.GuestStatePVCUID = string(pvcUID)
+	vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, kubevirtv1.Volume{Name: "guest-state", VolumeSource: kubevirtv1.VolumeSource{PersistentVolumeClaim: &kubevirtv1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{ClaimName: name}}}})
+	vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, kubevirtv1.Disk{Name: "guest-state", Serial: "dbaas-state", DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: kubevirtv1.DiskBusVirtio}}})
+	return pvc
 }

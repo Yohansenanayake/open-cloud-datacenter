@@ -195,3 +195,11 @@ mount_state
 		})
 	}
 }
+
+func TestGuestStateSetupIsNeverSkipped(t *testing.T) {
+	// Missing identity must reach the helper's failure check, not bypass it.
+	files, commands := guestStateCloudInit(BootstrapParams{})
+	if !strings.Contains(files, "/usr/local/sbin/dbaas-guest-state") || !strings.Contains(commands, "/usr/local/sbin/dbaas-guest-state initialize") {
+		t.Fatal("guest-state validation was skipped for missing identity")
+	}
+}

@@ -29,6 +29,7 @@ import (
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -67,7 +68,8 @@ func newLifecycleFixture(t *testing.T, running bool, stub *stubHarvester) (*DBIn
 		},
 	}
 	vm := testVM("pg-orders", "tenant-a") // shaped, runStrategy Always
-	r := newProvisionReconciler(t, stub, inst, vm)
+	pvc := testutil.GuestStateFixture(inst, vm)
+	r := newProvisionReconciler(t, stub, inst, vm, pvc)
 	convergeCredentials(t, ctx, r, inst)
 	convergeConnectionSecret(t, ctx, r, inst)
 	desiredRunning := inst.Spec.Running

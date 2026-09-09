@@ -65,7 +65,7 @@ func (r *vmStep) ensureGuestState(ctx context.Context, inst *dbaasv1.DBInstance)
 		pvc = corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: inst.Namespace, OwnerReferences: []metav1.OwnerReference{*ownerRefFor(inst)}},
 			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, // RWX to preserve VM Live Migration
 				VolumeMode:  &mode, StorageClassName: &storageClass,
 				Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", defaults.GuestStateSizeGB))}},
 			},
@@ -105,7 +105,9 @@ func (r *vmStep) ensureGuestState(ctx context.Context, inst *dbaasv1.DBInstance)
 	return Satisfied()
 }
 
-func guestStateAttached(vm *kubevirtv1.VirtualMachine, name string) bool {
+// hasValidGuestStateAttachment verifies the expected writable PVC and its
+// matching VirtIO disk with the stable guest-state serial.
+func hasValidGuestStateAttachment(vm *kubevirtv1.VirtualMachine, name string) bool {
 	if vm.Spec.Template == nil {
 		return false
 	}
@@ -121,21 +123,4 @@ func guestStateAttached(vm *kubevirtv1.VirtualMachine, name string) bool {
 		}
 	}
 	return volumeOK && diskOK
-}
-
-func hasGuestStateDisk(vm *kubevirtv1.VirtualMachine) bool {
-	if vm.Spec.Template == nil {
-		return false
-	}
-	for _, v := range vm.Spec.Template.Spec.Volumes {
-		if v.Name == "guest-state" {
-			return true
-		}
-	}
-	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
-		if d.Name == "guest-state" {
-			return true
-		}
-	}
-	return false
 }

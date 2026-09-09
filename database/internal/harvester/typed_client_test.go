@@ -890,3 +890,12 @@ func assertGuestStateDisk(t *testing.T, vm *kubevirtv1.VirtualMachine) {
 	}
 	t.Fatal("guest-state disk missing")
 }
+
+func TestTypedCreatePostgresVMRequiresGuestStatePVC(t *testing.T) {
+	params := testVMCreateParams()
+	params.GuestStateVolumeRef = ""
+	_, err := newTestTypedClient().CreatePostgresVM(context.Background(), params)
+	if err == nil || !strings.Contains(err.Error(), "guest-state PVC name must not be empty") {
+		t.Fatalf("expected missing guest-state error, got %v", err)
+	}
+}

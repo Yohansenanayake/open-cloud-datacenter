@@ -90,9 +90,8 @@ func ownerRefFor(inst *dbaasv1.DBInstance) *metav1.OwnerReference {
 // an out-of-band `kubectl delete vm` is observed as NotFound and repaired.
 //
 // Satisfied here means "the VM object exists", NOT "the VM booted": boot and
-// PostgreSQL readiness belong to ensureDatabaseHealth. This step therefore never
-// returns the timer flavor of Pending — its only Pending is the event-driven one
-// right after a create.
+// PostgreSQL readiness belong to ensureDatabaseHealth. PVC creation and identity
+// binding return timed Pending results; VM creation waits for its watch event.
 func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	vmName := vmNameFor(inst)
 
@@ -100,14 +99,12 @@ func (r *vmStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	err := r.Get(ctx, types.NamespacedName{Namespace: inst.Namespace, Name: vmName}, &vm)
 	switch {
 	case err == nil:
-		if inst.Status.Resources.GuestStatePVCName != "" || inst.Status.Resources.GuestStatePVCUID != "" || hasGuestStateDisk(&vm) {
-			inst.Status.Resources.VMName = vmName
-			if res := r.ensureGuestState(ctx, inst); res.Outcome != OutcomeSatisfied {
-				return res
-			}
-			if !guestStateAttached(&vm, inst.Status.Resources.GuestStatePVCName) {
-				return guestStateBlocked(inst, "VM does not attach the bound guest-state PVC with its expected disk serial")
-			}
+		inst.Status.Resources.VMName = vmName
+		if res := r.ensureGuestState(ctx, inst); res.Outcome != OutcomeSatisfied {
+			return res
+		}
+		if !hasValidGuestStateAttachment(&vm, inst.Status.Resources.GuestStatePVCName) {
+			return guestStateBlocked(inst, "VM does not attach the bound guest-state PVC with its expected disk serial")
 		}
 		// Observed == desired: the VM object exists. Re-record the ref for
 		// instances whose status was lost/reset (self-heal of the ref itself).

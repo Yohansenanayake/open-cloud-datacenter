@@ -63,11 +63,12 @@ operator's finalizer finishes; Kubernetes PVC protection handles any remaining
 Pod use. No state-disk deletion is added to OS repave. Future backup deletion
 and hold gates must finish before that finalizer is released.
 
-Existing VMs without a guest-state disk are left unchanged; this change does not
-hot-attach or migrate them. Recreating an already-provisioned VM without its
-state disk requires an explicit migration/recovery decision. Restores into new
-DBInstances must provision fresh state volumes and identities, never copy the
-source queue. Full restore execution is not implemented here.
+Every VM requires its bound guest-state disk. The controller is unreleased, so
+there is no compatibility or migration path for VMs without it. Missing state
+on an existing VM blocks reconciliation; it must not silently create empty
+replacement state. Restores into new DBInstances must provision fresh state
+volumes and identities, never copy the source queue. Full restore execution is
+not implemented here.
 
 Treat interrupted initialization, missing/replaced disks and stale restored
 state as recovery incidents. Preserve the disks and evidence, fence the old

@@ -153,6 +153,9 @@ func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (v
 	if p.OSDiskPVCName == "" {
 		return vmName, fmt.Errorf("OS disk PVC name must not be empty")
 	}
+	if p.GuestStateVolumeRef == "" {
+		return vmName, fmt.Errorf("guest-state PVC name must not be empty")
+	}
 
 	image, err := c.ResolveVMImage(ctx, p.OSImage)
 	if err != nil {
@@ -503,19 +506,17 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	}
 	// Attach an existing PVC, with no Harvester creation template. Otherwise
 	// deleting the PVC could silently produce an empty replacement queue.
-	if p.GuestStateVolumeRef != "" {
-		vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, kubevirtv1.Volume{
-			Name: "guest-state", VolumeSource: kubevirtv1.VolumeSource{
-				PersistentVolumeClaim: &kubevirtv1.PersistentVolumeClaimVolumeSource{
-					PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{ClaimName: p.GuestStateVolumeRef},
-				},
+	vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, kubevirtv1.Volume{
+		Name: "guest-state", VolumeSource: kubevirtv1.VolumeSource{
+			PersistentVolumeClaim: &kubevirtv1.PersistentVolumeClaimVolumeSource{
+				PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{ClaimName: p.GuestStateVolumeRef},
 			},
-		})
-		vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, kubevirtv1.Disk{
-			Name: "guest-state", Serial: "dbaas-state",
-			DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: kubevirtv1.DiskBusVirtio}},
-		})
-	}
+		},
+	})
+	vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, kubevirtv1.Disk{
+		Name: "guest-state", Serial: "dbaas-state",
+		DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: kubevirtv1.DiskBusVirtio}},
+	})
 	// Post build fixes
 	vm.TypeMeta = metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"}
 	vm.Spec.Template.ObjectMeta.Annotations = mergeStringMap(vm.Spec.Template.ObjectMeta.Annotations, annotations) // VMI/launcher-pod annotations (e.g. Kube-OVN logical switch)

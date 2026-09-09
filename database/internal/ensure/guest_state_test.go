@@ -138,3 +138,18 @@ func TestGuestStateMountMustRemainAttached(t *testing.T) {
 		t.Fatalf("VM missing its bound state disk must be blocked: %+v", res)
 	}
 }
+
+func TestExistingVMCannotBypassGuestStateWithoutStatus(t *testing.T) {
+	inst := newProvisionInst()
+	vm := testVM("pg-orders", "tenant-a")
+	r := newTestHarness(t, &stubHarvester{}, inst, vm)
+	res := r.ensureVM(context.Background(), inst)
+	if res.Outcome != OutcomeTerminal || res.Reason != dbaasv1.ReasonGuestStateRecoveryRequired {
+		t.Fatalf("VM without state must be rejected even without status refs: %+v", res)
+	}
+	var pvc corev1.PersistentVolumeClaim
+	key := types.NamespacedName{Namespace: inst.Namespace, Name: harvester.GuestStateVolumeName(diskIdentifierFor(inst))}
+	if err := r.Get(context.Background(), key, &pvc); !apierrors.IsNotFound(err) {
+		t.Fatalf("must not provision empty state for an existing VM: %v", err)
+	}
+}

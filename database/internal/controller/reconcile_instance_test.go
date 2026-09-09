@@ -112,7 +112,9 @@ func TestReconcileInstanceTransientReturnsError(t *testing.T) {
 	boom := errors.New("vmi lookup boom")
 	stub := &stubHarvester{ReadinessErr: boom}
 	// VM object present so the pass reaches the health gate.
-	r := newProvisionReconciler(t, stub, inst, testVM("pg-orders", "tenant-a"))
+	vm := testVM("pg-orders", "tenant-a")
+	pvc := testutil.GuestStateFixture(inst, vm)
+	r := newProvisionReconciler(t, stub, inst, vm, pvc)
 	convergeCredentials(t, context.Background(), r, inst)
 
 	_, err := runReconcileInstance(context.Background(), r, inst)
