@@ -15,8 +15,18 @@ spec:
         env:
         # The central Harbor this operator drives. Clients push and pull at
         # this address, so it must be the name they actually resolve.
+        #
+        # https is required. The operator sends the Harbor password as Basic
+        # Auth on every request, so an http URL puts an administrative
+        # credential on the wire in clear — and nothing visibly breaks, which is
+        # what makes it worth refusing rather than warning about.
         - name: HARBOR_URL
           value: "REPLACE_WITH_YOUR_REAL_HARBOR_URL"
+        #
+        # Development only: permits an http HARBOR_URL. The operator logs a
+        # warning on every start while this is set. Never set it anywhere real.
+        #- name: HARBOR_ALLOW_PLAINTEXT_URL
+        #  value: "true"
         # Secret in the operator's namespace holding Harbor credentials under
         # the keys "username" and "password". Create it with:
         #
@@ -48,3 +58,31 @@ spec:
       #    items:
       #    - key: ca.crt
       #      path: ca.crt
+#
+# ---------------------------------------------------------------------------
+# Reaching a Harbor on another network
+# ---------------------------------------------------------------------------
+#
+# The operator only needs an HTTP route to Harbor's API. Where the two sit on
+# the same network, nothing below applies.
+#
+# Where they do not — for example an operator on the infrastructure cluster and
+# a Harbor inside a VM on a separate VLAN — a second interface on Harbor's
+# network is usually less work than asking for a route between the two: it
+# needs a handful of addresses rather than a firewall change.
+#
+# That requires a NetworkAttachmentDefinition with an IPAM section that hands
+# out addresses. An attachment defined for virtual machines commonly has none,
+# because a VM runs its own DHCP client and a pod does not; such an attachment
+# gives the pod an interface with no address and no connectivity.
+#
+# Two things to get right:
+#   * Reserve the address range with whoever runs the network, and have it
+#     excluded from DHCP. An address handed to something else later produces
+#     intermittent failures that look nothing like a registry problem.
+#   * Do NOT set a gateway on the attachment. A second interface that claims
+#     the default route cuts the operator off from the Kubernetes API.
+#
+#metadata:
+#  annotations:
+#    k8s.v1.cni.cncf.io/networks: REPLACE_WITH_NAMESPACE/REPLACE_WITH_ATTACHMENT

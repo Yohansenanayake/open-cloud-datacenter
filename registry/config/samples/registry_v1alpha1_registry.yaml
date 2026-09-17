@@ -1,14 +1,13 @@
-# A Registry is the only resource a user creates. Apply it in any namespace:
-# the operator provisions a Harbor into that namespace if it has none yet, then
-# creates a project inside it for this Registry. Nothing has to be prepared
-# first — no label, no annotation, no pre-created object.
+# A Registry is the only resource a user creates. Applying it produces a project
+# inside the one central Harbor the platform runs, with credentials written
+# beside it. Nothing has to be prepared first — no label, no annotation, no
+# pre-created object.
 #
-# Every later Registry in this same namespace reuses that Harbor and only adds
-# another project to it. A Registry in a different namespace gets a Harbor of
-# its own.
+# The name is the project name, and project names are GLOBAL: every Registry,
+# in every namespace, shares one Harbor. A name already taken is refused, and
+# the Registry reports why. Names are first-come, first-served.
 #
-# No namespace is pinned here, because the operator treats them all alike —
-# supply one at apply time and the Harbor follows it:
+# No namespace is pinned here — supply one at apply time:
 #
 #     kubectl apply -n <your-namespace> -f registry_v1alpha1_registry.yaml
 #
@@ -16,11 +15,20 @@
 # (usually "default"), which is a real namespace owned by someone — always
 # pass -n rather than relying on the context.
 #
-# Push credentials land in the Secret named by .status.credentialsSecretName,
-# in that same namespace.
+# Two Secrets appear in the same namespace, both dockerconfigjson:
+#
+#   .status.pullSecretName   pull only — copy this one to clusters that run
+#                            the images, and name it in imagePullSecrets
+#   .status.pushSecretName   can also publish — for a build pipeline
+#
+# They are separate accounts on purpose: a pull credential ends up in many
+# hands and must not be able to overwrite the images it reads.
 #
 # Deleting this Registry deletes its Harbor project and every image in it.
-# There is no retain option — delete means delete.
+# There is no retain option — delete means delete. Any copy of these Secrets
+# made onto another cluster keeps working until then, and stops the moment the
+# Registry is deleted: pods fail their next pull with an authentication error
+# and nothing on that cluster explains why.
 apiVersion: registry.opencloud.wso2.com/v1alpha1
 kind: Registry
 metadata:

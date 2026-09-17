@@ -4,6 +4,10 @@ metadata:
   labels:
     app.kubernetes.io/name: registry
     app.kubernetes.io/managed-by: kustomize
+    # Aggregated into the built-in edit and admin roles, so a team granted edit
+    # in their namespace can manage Registries there without a bespoke binding.
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
   name: registry-editor-role
 rules:
 - apiGroups:

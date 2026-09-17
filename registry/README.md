@@ -1,24 +1,23 @@
 # registry
 
-A Kubernetes operator that gives every namespace a private container registry,
-backed by one Harbor deployment per namespace.
+A Kubernetes operator that hands a team its own project in a shared container
+registry.
 
-Applying a `Registry` in a namespace provisions Harbor into that namespace if it
-has none yet, then carves out a Harbor project and push credentials for the
-`Registry` that asked. Later `Registry` objects in the same namespace reuse that
-Harbor and only add a project to it.
+The platform runs **one** Harbor, deployed and operated outside this operator.
+Applying a `Registry` creates a project inside it, sets that project's storage
+quota, mints two robot accounts, and writes their credentials into Secrets beside
+the `Registry`. The operator installs nothing and manages no storage.
 
-Runs on any conformant Kubernetes cluster — it uses no vendor APIs. Tested on
-RKE2 v1.34.3 and kind v1.36.1.
+Runs on any conformant Kubernetes cluster — it uses no vendor APIs.
 
 ## Requirements
 
 | Requirement | Notes |
 |:---|:---|
-| An `IngressClass` | Harbor is exposed through it; name it with `INGRESS_CLASS` |
-| A `StorageClass` | Must set `allowVolumeExpansion: true` for plan upgrades to grow storage |
-| Egress from the operator and Harbor pods | The Harbor chart is pulled from `helm.goharbor.io`, images from their upstream registries |
-| A cert-manager `ClusterIssuer` | Issues per-namespace TLS for Harbor's ingress. The operator verifies Harbor's certificate, so the issuer's CA must be trusted by the manager pod |
+| A running Harbor | Reachable from the operator over HTTP(S), addressed by `HARBOR_URL` |
+| A Harbor account | Stored in a Secret in the operator's namespace; needs to create projects, quotas and robot accounts |
+| Trust in Harbor's certificate | A publicly-rooted certificate needs nothing. A private CA must be mounted into the operator pod — the client verifies, and has no skip-verification option |
+| A route to Harbor | Where the operator and Harbor sit on different networks, see `config/local/manager_local_patch.yaml.example` |
 
 ## Using it
 
@@ -36,17 +35,35 @@ kubectl apply -n acme-project-1 -f registry.yaml
 kubectl get registries -n acme-project-1 -w
 ```
 
-The namespace is not part of the manifest — every namespace is treated alike, so
-`-n` alone decides which one gets the Harbor.
+Once `Ready`, two Secrets exist in the same namespace, both
+`kubernetes.io/dockerconfigjson`:
 
-Once `Ready`, the Secret named in `.status.credentialsSecretName` holds
-`robot_username`, `robot_secret`, `registry_url`, and `project` — everything a
-CI pipeline needs to log in and push.
+| Status field | Grants | Use it for |
+|:---|:---|:---|
+| `.status.pullSecretName` | pull only | `imagePullSecrets` on the clusters that run these images |
+| `.status.pushSecretName` | pull, push, tag | a build pipeline |
 
-A `Registry` never names a Harbor deployment: the one serving it is always the
-one in its own namespace. Nothing has to be prepared first — no label, no
-annotation, no pre-created object — because the namespace already exists by the
-time a `Registry` can be created in it.
+They are separate Harbor accounts. A pull credential is copied onto every cluster
+that runs the images and ends up in many hands, so it must not be able to
+overwrite what it reads.
+
+Copying the pull Secret to another cluster means stripping the fields that tie it
+to this one — `ownerReferences`, `uid`, `resourceVersion`, `creationTimestamp`
+and `namespace`. A copied `ownerReferences` is the one that bites: the other
+cluster's garbage collector looks for an owning `Registry`, does not find one,
+and deletes the Secret.
+
+### Project names are global
+
+A `Registry` becomes the Harbor project of the same name, and every namespace
+shares one Harbor. Names are therefore first-come, first-served across the whole
+platform: a name already held by another `Registry` is refused, and the refusal
+says so. A `Registry`'s name cannot be changed, so recovery is to delete it and
+create another.
+
+The operator records which `Registry` owns each project it creates. A project it
+did not create is never adopted, even when the name is free to claim — nothing
+establishes that those images belong to the team asking for them.
 
 ## API
 
@@ -54,12 +71,10 @@ Group `registry.opencloud.wso2.com/v1alpha1`.
 
 | Kind | Scope | Created by | Purpose |
 |:---|:---|:---|:---|
-| `Registry` | Namespaced | users | One Harbor project plus its robot credentials. `plan` sets the project's storage quota |
-| `RegistryBackend` | Namespaced | the operator | One namespace's Harbor deployment, shared by every `Registry` in that namespace. Always named `harbor`. Holds deployment sizing |
+| `Registry` | Namespaced | users | One Harbor project plus its credentials. `plan` sets the project's storage quota |
 
-Several `Registry` objects may exist per namespace, each mapping to the Harbor
-project of the same name. Since a Harbor serves exactly one namespace and
-Kubernetes forbids duplicate names within one, no two can collide.
+`plan` is the only sizing concept: it sizes a project's quota. There is nothing
+to size about the Harbor deployment, because the operator does not own one.
 
 ## Configuration
 
@@ -69,87 +84,65 @@ to keep cluster-specific values out of the tracked defaults.
 
 | Variable | Required | Default | Purpose |
 |:---|:---:|:---|:---|
-| `BASE_DOMAIN` | ✅ | — | Registry URLs are `registry.<namespace>.<BASE_DOMAIN>` |
-| `STORAGE_CLASS` | | `longhorn` | StorageClass for Harbor's volumes |
-| `INGRESS_CLASS` | | `nginx` | IngressClass for Harbor's ingress |
-| `CERT_ISSUER` | | `letsencrypt-prod` | cert-manager `ClusterIssuer` |
-| `HARBOR_CHART_VERSION` | | `1.19.2` | Harbor chart version. Do not set below `1.14.1` |
-| `HARBOR_HELM_REPO` | | `https://helm.goharbor.io` | Chart repository |
+| `HARBOR_URL` | ✅ | — | Base URL of the central Harbor. Validated at startup. Also what a `Registry` reports as its push/pull address, so it must be the name clients resolve |
+| `POD_NAMESPACE` | ✅ | — | The operator's own namespace, supplied by the downward API. Where the credentials Secret is read from |
+| `HARBOR_CREDENTIALS_SECRET` | | `harbor-credentials` | Secret holding `username` and `password` |
+| `METRICS_CERT_DIR` | | — | Serving certificate for the metrics endpoint. Empty means a self-signed one only an unverifying scraper can read |
 
-> With **nip.io**, use the dash-separated form (`10-0-0-5.nip.io`). nip.io finds
-> the address by scanning for four dot-separated octets anywhere in the name, so
-> a namespace ending in a digit merges into that scan and resolves elsewhere.
+The credentials Secret is read on every reconcile, so rotating it takes effect
+without restarting the operator.
 
 ## How it works
 
-A controller-runtime operator with two reconcilers. The Custom Resource is the
-single source of truth, all work happens inside the reconcile loop, and slow
-external steps are polled with `RequeueAfter`. Leader election is on, so extra
-replicas act as hot standbys.
+A controller-runtime operator with a single reconciler. The custom resource is
+the source of truth, all work happens inside the reconcile loop, and the loop is
+level-triggered: every pass re-asserts the desired state and does nothing when it
+already holds. Leader election is on, so extra replicas act as hot standbys.
 
-**Registry** binds to the `RegistryBackend` in its own namespace — creating it
-when the namespace has none — and once Harbor is ready creates the project,
-converges its storage quota, mints a project-scoped robot account exactly once,
-and writes the credentials Secret next to the `Registry`. Every `Registry` in a
-namespace targets the same fixed backend name, so simultaneous first requests
-converge on one deployment: they attempt the identical object and the API
-server's uniqueness constraint settles the race.
+**Reconcile** resolves the project name, refuses it if it is reserved, malformed,
+or held by another `Registry`, creates the project, records ownership, converges
+the quota, mints each robot account exactly once, and writes the Secrets. The
+quota is re-applied every pass, which is both how a plan change takes effect and
+how drift is corrected.
 
-**RegistryBackend** generates and pins every Harbor credential into a Secret
-beside the pods that read it, installs Harbor with Helm into its own namespace,
-expands plan-controlled volumes, waits for the API, applies system
-configuration, and reports `Ready` with the URL. It never creates a namespace.
-Because Harbor shares the namespace with the user's own workloads, every object
-it manages there is selected by the Helm release labels, never by namespace
-alone.
+**Credentials are minted once.** The Secret's existence is what makes it
+once-only: re-minting would invalidate every copy already distributed. A robot
+left behind by an attempt that died before its Secret was written is unusable —
+its token was never stored — so it is replaced rather than failed against.
 
-**Sizing** starts at the smallest plan and grows on its own. Harbor reports both
-the storage it has promised to projects and what they consume, so the operator
-raises the deployment size once commitments approach provisioned capacity —
-`spec.plan` is a floor an administrator can raise, `status.effectivePlan` is
-what is deployed. Growth is permanent, because expanding a PersistentVolumeClaim
-cannot be undone.
+**Readiness is the Harbor check.** The pod turns Ready only once Harbor answers
+an authenticated call with the configured credentials, so an unusable Harbor
+shows up as a pod that is not Ready rather than only in logs. It is deliberately
+not a liveness check: restarting the operator would not fix a Harbor that is down.
 
-**Garbage collection** is scheduled on every reconcile. Deleting a project
-removes its manifests but leaves the blobs on disk, and those orphans belong to
-no project's quota — so without a sweep they are invisible to the capacity
-measurement above while still consuming the volume.
+**Deletion destroys data.** Deleting a `Registry` removes its Harbor project and
+every image in it, emptying the repositories first because Harbor refuses to
+delete a non-empty project. There is no retain option. The finalizer is held
+until Harbor confirms the project is gone, so an unreachable Harbor is never
+mistaken for a completed deletion.
 
-**Vulnerability scanning** runs daily against Trivy, an hour before the sweep. A
-scan records what was known when it ran, so a repeating pass is what surfaces a
-CVE published after an image was already pushed.
+Deletion also invalidates every **copy** of the credentials made onto another
+cluster. Those pods fail their next pull with an authentication error, and
+nothing on that cluster explains why — the `Registry` that would have explained
+it lives somewhere else and no longer exists.
 
-**Deletion** destroys data, and the guard rather than a policy field is what
-protects it. Deleting a `Registry` removes its Harbor project and every image in
-it, emptying the repositories first because Harbor refuses to delete a non-empty
-project. Deleting a `RegistryBackend` is **refused** while any `Registry` exists
-in its namespace; overriding that takes a deliberate annotation, which then
-cascades to those Registries first — leaving them behind would let them
-recreate the backend they depend on.
-
-```sh
-kubectl -n <ns> annotate registrybackend harbor registry.opencloud.wso2.com/force=true
-```
-
-**Upgrades** run Harbor's schema migration as a Helm pre-upgrade hook, so it
-completes before any pod rolls and a failure aborts the upgrade rather than
-half-applying it. Changing `HARBOR_CHART_VERSION` upgrades existing deployments
-on their next reconcile. Harbor states that a version upgrade migrates the
-schema and cannot be done without downtime, and that it cannot be rolled back.
+**Vulnerability scanning** is left to Harbor: projects are created with
+`auto_scan` enabled, so an image is scanned as it arrives.
 
 **Lifecycle** is phase-based (`Provisioning → Ready → Failed / Terminating`,
-empty until the first reconcile) with standard conditions, `observedGeneration`,
-and Events. Finalizers guarantee cleanup: a `Registry` holds its finalizer until
-Harbor confirms the project is gone, so an unreachable Harbor is never mistaken
-for a completed deletion.
+empty until the first reconcile) with standard conditions, `observedGeneration`
+and Events. Failures are separated into terminal ones, which retrying cannot fix
+and which stop at `Failed`, and transient ones, which requeue.
 
-**TLS** for each Harbor is issued by cert-manager through ingress annotations in
-the rendered Helm values. Each namespace's Harbor is reachable at
-`registry.<namespace>.<BASE_DOMAIN>`.
+**Access control** is plain Kubernetes RBAC. The `registry-editor-role` and
+`registry-viewer-role` ClusterRoles carry aggregation labels, so a user granted
+the built-in `edit` role in a namespace can manage `Registry` objects there with
+no further binding, and `view` can read them.
 
-**Access control** is plain Kubernetes RBAC. `registry-admin/editor/viewer`
-ClusterRoles are meant to be bound inside a user's namespaces;
-`registrybackend-admin/editor/viewer` are for platform administrators.
+Note what `edit` already implies: it grants read access to **every** Secret in
+that namespace, including these credentials. That is the intended grant — the
+team owning the namespace owns its registry credentials — but it is a namespace
+boundary, not a per-`Registry` one.
 
 ## Quickstart
 

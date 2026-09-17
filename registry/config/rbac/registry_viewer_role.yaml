@@ -4,6 +4,8 @@ metadata:
   labels:
     app.kubernetes.io/name: registry
     app.kubernetes.io/managed-by: kustomize
+    # Aggregated into the built-in view role.
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
   name: registry-viewer-role
 rules:
 - apiGroups:

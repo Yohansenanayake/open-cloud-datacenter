@@ -41,20 +41,31 @@ type HarborConfig struct {
 	// Namespace is the operator's own namespace, where CredentialsSecret
 	// lives. Supplied by the downward API.
 	Namespace string
+
+	// PlaintextURL reports that URL is http and that this was explicitly
+	// permitted. It exists so the operator can say so on every start: a
+	// cleartext Harbor works exactly like an encrypted one until someone reads
+	// the password off the wire, so nothing else would ever raise it.
+	PlaintextURL bool
 }
 
-// Load builds the operator configuration from environment variables.
+// Load builds the operator configuration from environment variables. It reads
+// HARBOR_URL and POD_NAMESPACE, both required, and validates the URL before
+// anything else runs.
+//
+// POD_NAMESPACE is where the operator itself runs, supplied by the downward
+// API. It is what lets the operator read its Harbor credentials from its own
+// namespace instead of holding Secret access across tenant namespaces.
 func Load() (*Config, error) {
 	harborURL, err := requireEnv("HARBOR_URL")
 	if err != nil {
 		return nil, err
 	}
-	if err := validateHarborURL(harborURL); err != nil {
+	allowPlaintext := envStr("HARBOR_ALLOW_PLAINTEXT_URL", "") == "true"
+	if err := validateHarborURL(harborURL, allowPlaintext); err != nil {
 		return nil, err
 	}
 
-	// The operator's own namespace, so it can read its credentials Secret
-	// without holding Secret access across tenant namespaces.
 	podNamespace, err := requireEnv("POD_NAMESPACE")
 	if err != nil {
 		return nil, err
@@ -65,6 +76,7 @@ func Load() (*Config, error) {
 			URL:               strings.TrimRight(harborURL, "/"),
 			CredentialsSecret: envStr("HARBOR_CREDENTIALS_SECRET", "harbor-credentials"),
 			Namespace:         podNamespace,
+			PlaintextURL:      allowPlaintext && strings.HasPrefix(harborURL, "http://"),
 		},
 		MetricsCertDir: envStr("METRICS_CERT_DIR", ""),
 	}, nil
@@ -73,13 +85,23 @@ func Load() (*Config, error) {
 // validateHarborURL rejects a URL that cannot address a Harbor. Catching it at
 // startup turns a silent per-Registry failure into one clear message, since
 // every reconcile would otherwise fail the same way for the same reason.
-func validateHarborURL(raw string) error {
+//
+// Plaintext http is refused unless allowPlaintext is set. The client sends the
+// Harbor password as Basic Auth on every request, so an http URL puts an
+// administrative credential on the wire in clear — and the mistake is quiet,
+// because everything keeps working. Requiring it to be asked for by name means
+// it can only happen on purpose.
+func validateHarborURL(raw string, allowPlaintext bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("HARBOR_URL %q is not a valid URL: %w", raw, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("HARBOR_URL %q must use http or https, got %q", raw, u.Scheme)
+	}
+	if u.Scheme == "http" && !allowPlaintext {
+		return fmt.Errorf("HARBOR_URL %q uses http, which sends the Harbor password in clear on every "+
+			"request; use https, or set HARBOR_ALLOW_PLAINTEXT_URL=true for a local development Harbor", raw)
 	}
 	if u.Host == "" {
 		return fmt.Errorf("HARBOR_URL %q has no host", raw)

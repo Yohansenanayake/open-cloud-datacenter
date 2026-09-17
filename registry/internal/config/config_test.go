@@ -54,6 +54,50 @@ func TestLoad(t *testing.T) {
 		t.Setenv("POD_NAMESPACE", "registry-system")
 	}
 
+	// Basic Auth over http puts the Harbor password on the wire in clear, and
+	// nothing about it looks broken — so it has to be refused by default.
+	t.Run("plaintext http is refused unless asked for by name", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("HARBOR_URL", "http://registry.example.com")
+
+		_, err := Load()
+		if err == nil {
+			t.Fatal("Load() error = nil, want an http HARBOR_URL refused")
+		}
+		if !strings.Contains(err.Error(), "HARBOR_ALLOW_PLAINTEXT_URL") {
+			t.Errorf("error = %v, want it to name the opt-in, or the refusal leaves no way forward", err)
+		}
+	})
+
+	t.Run("plaintext http is allowed once opted in, and is reported", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("HARBOR_URL", "http://registry.example.com")
+		t.Setenv("HARBOR_ALLOW_PLAINTEXT_URL", "true")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want the explicit opt-in honoured", err)
+		}
+		if !cfg.Harbor.PlaintextURL {
+			t.Error("Harbor.PlaintextURL = false; nothing else would ever surface that credentials are in clear")
+		}
+	})
+
+	// The opt-in must not weaken an https URL: a stale variable left set in an
+	// environment that later moved to https should change nothing.
+	t.Run("the opt-in does not mark an https URL as plaintext", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("HARBOR_ALLOW_PLAINTEXT_URL", "true")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Harbor.PlaintextURL {
+			t.Error("Harbor.PlaintextURL = true for an https URL")
+		}
+	})
+
 	t.Run("required vars present, defaults fill the rest", func(t *testing.T) {
 		setRequired(t)
 		cfg, err := Load()
