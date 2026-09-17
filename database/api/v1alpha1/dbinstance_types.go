@@ -29,10 +29,11 @@ import (
 //     dbName, masterUsername, port, storageType, staticNetwork,
 //     vmPassword, engineVersion
 //   - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
-//     multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
-//     backupRetentionPeriod, preferredBackupWindow. These fields exist in
-//     the schema for forward compatibility but the reconciler does not
-//     apply them. See ARCHITECTURE.md for the roadmap.
+//     multiAZ, dbParameterGroupRef, tags. These fields exist in the schema
+//     for forward compatibility but the reconciler does not apply them.
+//     See ARCHITECTURE.md for the roadmap. Backup capability is tracked
+//     separately under spec.backup once implemented — see
+//     yohan-docs/backups/harvester-vm-backup/.
 //
 // Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
 // vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
@@ -118,19 +119,6 @@ type DBInstanceSpec struct {
 	// +optional
 	StorageType string `json:"storageType,omitempty"`
 
-	// BackupRetentionPeriod in days. 0 (default) = disabled.
-	// NOT YET IMPLEMENTED: no pgBackRest install, schedule, or retention
-	// enforcement runs today. The field is recorded but inert.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	BackupRetentionPeriod int `json:"backupRetentionPeriod,omitempty"`
-
-	// PreferredBackupWindow in UTC, e.g. "02:00-03:00".
-	// NOT YET IMPLEMENTED — see BackupRetentionPeriod.
-	// +optional
-	// +kubebuilder:validation:Pattern=`^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`
-	PreferredBackupWindow string `json:"preferredBackupWindow,omitempty"`
-
 	// MultiAZ enables Patroni HA with a standby VM.
 	// NOT YET IMPLEMENTED — no standby is created.
 	// +optional
@@ -195,12 +183,6 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="vmPassword is immutable after creation"
 	VMPassword string `json:"vmPassword,omitempty"`
 
-	// S3BackupConfig for pgBackRest S3 target.
-	// NOT YET IMPLEMENTED — values are written to /etc/dbaas/bootstrap.env
-	// on the VM but no backup process consumes them.
-	// +optional
-	S3BackupConfig *S3BackupConfig `json:"s3BackupConfig,omitempty"`
-
 	// Tags are user-defined labels.
 	// NOT YET IMPLEMENTED — not propagated to child resources or dashboards.
 	// +optional
@@ -238,16 +220,6 @@ type NetworkConfig struct {
 	// +optional
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 	SearchDomains []string `json:"searchDomains,omitempty"`
-}
-
-// S3BackupConfig describes the pgBackRest S3 target.
-type S3BackupConfig struct {
-	Endpoint string `json:"endpoint"`
-	Bucket   string `json:"bucket"`
-	// +optional
-	Region string `json:"region,omitempty"`
-	// SecretRef is a K8s Secret name with accessKey + secretKey.
-	SecretRef string `json:"secretRef"`
 }
 
 // DBInstanceStatus defines the observed state of a DBInstance.

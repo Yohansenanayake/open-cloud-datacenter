@@ -73,10 +73,11 @@ spec:
                   dbName, masterUsername, port, storageType, staticNetwork,
                   vmPassword, engineVersion
                 - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
-                  multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
-                  backupRetentionPeriod, preferredBackupWindow. These fields exist in
-                  the schema for forward compatibility but the reconciler does not
-                  apply them. See ARCHITECTURE.md for the roadmap.
+                  multiAZ, dbParameterGroupRef, tags. These fields exist in the schema
+                  for forward compatibility but the reconciler does not apply them.
+                  See ARCHITECTURE.md for the roadmap. Backup capability is tracked
+                  separately under spec.backup once implemented — see
+                  yohan-docs/backups/harvester-vm-backup/.
 
               Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
               vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
@@ -97,13 +98,6 @@ spec:
                 x-kubernetes-validations:
                 - message: allocatedStorage can only grow; shrinking is not supported
                   rule: self >= oldSelf
-              backupRetentionPeriod:
-                description: |-
-                  BackupRetentionPeriod in days. 0 (default) = disabled.
-                  NOT YET IMPLEMENTED: no pgBackRest install, schedule, or retention
-                  enforcement runs today. The field is recorded but inert.
-                minimum: 0
-                type: integer
               dbInstanceClass:
                 description: |-
                   DBInstanceClass maps to VM CPU/RAM. e.g. "db.t3.medium", "db.m5.large".
@@ -218,38 +212,12 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
-              preferredBackupWindow:
-                description: |-
-                  PreferredBackupWindow in UTC, e.g. "02:00-03:00".
-                  NOT YET IMPLEMENTED — see BackupRetentionPeriod.
-                pattern: ^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$
-                type: string
               running:
                 default: true
                 description: |-
                   Running controls the VM power state. false = stopped (storage preserved).
                   Mutable: toggling sets KubeVirt spec.running on the underlying VM.
                 type: boolean
-              s3BackupConfig:
-                description: |-
-                  S3BackupConfig for pgBackRest S3 target.
-                  NOT YET IMPLEMENTED — values are written to /etc/dbaas/bootstrap.env
-                  on the VM but no backup process consumes them.
-                properties:
-                  bucket:
-                    type: string
-                  endpoint:
-                    type: string
-                  region:
-                    type: string
-                  secretRef:
-                    description: SecretRef is a K8s Secret name with accessKey + secretKey.
-                    type: string
-                required:
-                - bucket
-                - endpoint
-                - secretRef
-                type: object
               staticNetwork:
                 description: |-
                   StaticNetwork, when set, configures the VM's data NIC with a static

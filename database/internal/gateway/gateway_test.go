@@ -272,10 +272,9 @@ func TestModifyInstance(t *testing.T) {
 	h, c := newHandler(t, sampleInstance("orders"))
 
 	rec := do(t, h, http.MethodPatch, "/dbinstances/orders", map[string]any{
-		"dbInstanceClass":       "db.m5.large",
-		"allocatedStorage":      200,
-		"backupRetentionPeriod": 14,
-		"running":               false,
+		"dbInstanceClass":  "db.m5.large",
+		"allocatedStorage": 200,
+		"running":          false,
 	})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("PATCH: got %d, want 202 (body: %s)", rec.Code, rec.Body)
@@ -286,9 +285,6 @@ func TestModifyInstance(t *testing.T) {
 	}
 	if inst.Spec.AllocatedStorage != 200 {
 		t.Errorf("AllocatedStorage: got %d, want 200", inst.Spec.AllocatedStorage)
-	}
-	if inst.Spec.BackupRetentionPeriod != 14 {
-		t.Errorf("BackupRetentionPeriod: got %d, want 14", inst.Spec.BackupRetentionPeriod)
 	}
 	if inst.Spec.Running == nil || *inst.Spec.Running {
 		t.Errorf("Running: got %v, want false", inst.Spec.Running)
