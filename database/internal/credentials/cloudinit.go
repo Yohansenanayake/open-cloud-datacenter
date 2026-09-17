@@ -35,9 +35,6 @@ type BootstrapParams struct {
 	Port           int
 	MasterUser     string
 	MaxConnections int
-	BackupEnabled  bool
-	BackupWindow   string
-	S3Config       *dbaasv1.S3BackupConfig
 	VMPassword     string
 	// StaticNetwork, when non-nil, makes the cloud-init netplan use a
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
@@ -139,17 +136,6 @@ func shellSingleQuote(s string) string {
 }
 
 func buildUserData(p BootstrapParams, m *Material) string {
-	backupConfig := "# backups disabled"
-	if p.BackupEnabled && p.S3Config != nil {
-		backupConfig = fmt.Sprintf(
-			"S3_ENDPOINT=%s\n      S3_BUCKET=%s\n      S3_REGION=%s\n      S3_SECRET_REF=%s",
-			shellSingleQuote(p.S3Config.Endpoint),
-			shellSingleQuote(p.S3Config.Bucket),
-			shellSingleQuote(p.S3Config.Region),
-			shellSingleQuote(p.S3Config.SecretRef),
-		)
-	}
-
 	vmUserBlock := ""
 	if p.VMPassword != "" {
 		vmUserBlock = fmt.Sprintf(`password: %s
@@ -183,7 +169,6 @@ ssh_pwauth: true
       EXPORTER_PASSWORD=%s
       MAX_CONNECTIONS=%d
       ENGINE_VERSION=%s
-      %s
   - path: /etc/ssl/certs/pg-ca.crt
     encoding: b64
     permissions: "0644"
@@ -354,7 +339,6 @@ final_message: "DBaaS bootstrap complete for %s"
 		m.ExporterPassword,
 		p.MaxConnections,
 		shellSingleQuote(p.EngineVersion),
-		backupConfig,
 		caCertB64,
 		serverCertB64,
 		serverKeyB64,
