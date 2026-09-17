@@ -43,6 +43,45 @@ help: ## Display this help.
 
 ##@ Development
 
+# Keep runtime qualification on the guest's declared toolchain, not the host Go.
+BACKUP_GO_TOOLCHAIN := go1.25.7
+PROTOC_GEN_GO_VERSION := v1.36.10
+BACKUP_PROTOC_VERSION := 33.0
+BACKUP_PROTOC_SHA256 := d99c011b799e9e412064244f0be417e5d76c9b6ace13a2ac735330fa7d57ad8f
+
+.PHONY: test-backup-integration backup-protobuf-tools
+test-backup-integration: ## Qualify backup dependencies against disposable local services (requires Docker).
+	@fixture_dir="$$(mktemp -d /tmp/dbaas-runtime.XXXXXX)"; \
+	trap 'rm -rf "$$fixture_dir"' EXIT; \
+	GOTOOLCHAIN=$(BACKUP_GO_TOOLCHAIN) CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=readonly -tags=backupintegration -trimpath -o "$$fixture_dir/runtime" ./test/integration/backup/runtimehelper; \
+	GOTOOLCHAIN=$(BACKUP_GO_TOOLCHAIN) BACKUP_RUNTIME_HELPER="$$fixture_dir/runtime" go test -mod=readonly -tags=backupintegration -count=1 -timeout=8m -v ./test/integration/backup
+
+backup-protobuf-tools: ## Install pinned Protobuf tools for guest contracts (Linux amd64).
+	mkdir -p "$(LOCALBIN)"
+	@test "$$(uname -sm)" = "Linux x86_64" || { echo 'Pinned protoc archive requires Linux amd64'; exit 1; }
+	@archive="$$(mktemp /tmp/dbaas-protoc.XXXXXX)"; \
+	trap 'rm -f "$$archive"' EXIT; \
+	curl -fsSL --retry 3 "https://github.com/protocolbuffers/protobuf/releases/download/v$(BACKUP_PROTOC_VERSION)/protoc-$(BACKUP_PROTOC_VERSION)-linux-x86_64.zip" -o "$$archive"; \
+	echo "$(BACKUP_PROTOC_SHA256)  $$archive" | sha256sum -c -; \
+	unzip -oq "$$archive" -d "$(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)"
+	GOTOOLCHAIN=$(BACKUP_GO_TOOLCHAIN) GOBIN="$(LOCALBIN)" go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	"$(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)/bin/protoc" --version
+	"$(LOCALBIN)/protoc-gen-go" --version
+
+.PHONY: generate-guest-protocol check-guest-protocol
+generate-guest-protocol: ## Generate guest Protobuf code using the pinned installed tools.
+	@test "$$($(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)/bin/protoc --version)" = "libprotoc $(BACKUP_PROTOC_VERSION)" || { echo 'Run make backup-protobuf-tools'; exit 1; }
+	@test "$$($(LOCALBIN)/protoc-gen-go --version)" = "protoc-gen-go $(PROTOC_GEN_GO_VERSION)" || { echo 'Run make backup-protobuf-tools'; exit 1; }
+	"$(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)/bin/protoc" --proto_path=. --proto_path="$(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)/include" --plugin=protoc-gen-go="$(LOCALBIN)/protoc-gen-go" --go_out=. --go_opt=paths=source_relative internal/guestprotocol/v1/guest.proto
+
+check-guest-protocol: ## Verify generated guest code is reproducible without changing it.
+	@generated_dir="$$(mktemp -d /tmp/dbaas-protocol.XXXXXX)"; \
+	trap 'rm -rf "$$generated_dir"' EXIT; \
+	test "$$($(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)/bin/protoc --version)" = "libprotoc $(BACKUP_PROTOC_VERSION)"; \
+	test "$$($(LOCALBIN)/protoc-gen-go --version)" = "protoc-gen-go $(PROTOC_GEN_GO_VERSION)"; \
+	"$(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)/bin/protoc" --proto_path=. --proto_path="$(LOCALBIN)/backup-protoc-$(BACKUP_PROTOC_VERSION)/include" --plugin=protoc-gen-go="$(LOCALBIN)/protoc-gen-go" --go_out="$$generated_dir" --go_opt=paths=source_relative internal/guestprotocol/v1/guest.proto; \
+	diff -u internal/guestprotocol/v1/guest.pb.go "$$generated_dir/internal/guestprotocol/v1/guest.pb.go"
+
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
