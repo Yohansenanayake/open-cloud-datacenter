@@ -24,7 +24,9 @@ func TestCreateHarborProject(t *testing.T) {
 	}{
 		{"newly created", http.StatusCreated, false},
 		{"200 is undocumented for this endpoint, so it is an error", http.StatusOK, true},
-		{"already existed (409 conflict) — idempotent by design", http.StatusConflict, false},
+		// A shared Harbor makes 409 a question of ownership, not an idempotent
+		// no-op: the caller has to look at who owns the project before using it.
+		{"already existed (409 conflict) — reported, not swallowed", http.StatusConflict, true},
 		{"harbor rejected the request", http.StatusBadRequest, true},
 	}
 	for _, tt := range tests {
@@ -40,6 +42,11 @@ func TestCreateHarborProject(t *testing.T) {
 			err := cli.CreateHarborProject(context.Background(), "acme-project", 5*1024*1024*1024)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("CreateHarborProject() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			// A conflict must be distinguishable, or the caller cannot tell
+			// "someone else owns this name" from "Harbor is broken".
+			if tt.statusCode == http.StatusConflict && !errors.Is(err, ErrProjectExists) {
+				t.Errorf("CreateHarborProject() error = %v, want it to wrap ErrProjectExists", err)
 			}
 			if !tt.wantErr {
 				if gotBody["project_name"] != "acme-project" {
@@ -245,7 +252,7 @@ func TestEnsureProjectRobotAccount(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(wantRobot)
 		})
-		robot, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot")
+		robot, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot", AccessPush)
 		if err != nil {
 			t.Fatalf("EnsureProjectRobotAccount() error = %v", err)
 		}
@@ -282,7 +289,7 @@ func TestEnsureProjectRobotAccount(t *testing.T) {
 				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			}
 		})
-		robot, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot")
+		robot, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot", AccessPush)
 		if err != nil {
 			t.Fatalf("EnsureProjectRobotAccount() error = %v", err)
 		}
@@ -308,7 +315,7 @@ func TestEnsureProjectRobotAccount(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusConflict)
 		})
-		_, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot")
+		_, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot", AccessPush)
 		if err == nil {
 			t.Fatal("EnsureProjectRobotAccount() returned nil error when the conflicting " +
 				"account was not visible; the conflict must not be silently swallowed")

@@ -14,11 +14,13 @@ import (
 
 // Registry requests a container registry for the namespace it is created in.
 //
-// The Harbor serving a Registry is the one in its own namespace, derived from
-// metadata.namespace and never declared in the spec — so a Registry cannot
-// reference another namespace's Harbor, because there is no field to point
-// elsewhere. The namespace's first Registry causes a Harbor deployment to be
-// provisioned; later ones reuse it and only add a Harbor project.
+// Every Registry, in every namespace, becomes a project inside one central
+// Harbor that the operator does not deploy or own. A Registry names no Harbor:
+// there is no field to point at one, so a Registry cannot reach another
+// tenant's registry by configuration.
+//
+// Project names are therefore global. A name already held by another Registry
+// is refused rather than shared — see status.harborProject.
 type Registry struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -58,9 +60,15 @@ type RegistryStatus struct {
 	// RegistryURL is the Harbor URL to log in and push to.
 	RegistryURL string `json:"registryURL,omitempty"`
 
-	// CredentialsSecretName is the Secret in this namespace holding the robot
-	// username and token for this registry.
-	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
+	// PullSecretName is the Secret in this namespace holding pull-only
+	// credentials, in kubernetes.io/dockerconfigjson form. This is the one to
+	// copy onto clusters that run these images.
+	PullSecretName string `json:"pullSecretName,omitempty"`
+
+	// PushSecretName is the Secret in this namespace holding credentials that
+	// can also publish images, in kubernetes.io/dockerconfigjson form. It
+	// belongs to a build pipeline, not to a workload.
+	PushSecretName string `json:"pushSecretName,omitempty"`
 
 	// Message describes the current phase, including why it is not Ready.
 	Message string `json:"message,omitempty"`

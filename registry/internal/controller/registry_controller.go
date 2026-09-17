@@ -2,8 +2,11 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -27,6 +30,10 @@ import (
 )
 
 const registryFinalizer = "registry.opencloud.wso2.com/registry-cleanup"
+
+// labelRegistry marks a Secret as belonging to a Registry, so the pair a
+// Registry owns can be listed without parsing names.
+const labelRegistry = "registry.opencloud.wso2.com/registry"
 
 // RegistryReconciler serves one Registry: a project inside the central Harbor,
 // with credentials written to a Secret beside the Registry.
@@ -122,7 +129,10 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.transient(ctx, &cr, "check Harbor project", err)
 	}
 
-	if err := cli.CreateHarborProject(ctx, projectName, quotaBytes); err != nil {
+	// A 409 here means the name was claimed between the check above and now, or
+	// that this reconcile is resuming after the project was created but the
+	// status write never landed. ensureOwnership tells those apart.
+	if err := cli.CreateHarborProject(ctx, projectName, quotaBytes); err != nil && !errors.Is(err, harbor.ErrProjectExists) {
 		return r.transient(ctx, &cr, "create Harbor project", err)
 	}
 
@@ -135,46 +145,85 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if proj.ProjectID == 0 {
 		return r.transient(ctx, &cr, "get Harbor project", fmt.Errorf("Harbor returned a project with no project_id for %q", projectName))
 	}
+
+	// 2d. Record or confirm ownership before handing out any credential. This is
+	// the check that keeps one Registry from being given a robot on another's
+	// images.
+	if err := r.ensureOwnership(ctx, cli, &cr, proj.ProjectID, projectName); err != nil {
+		if errors.Is(err, errProjectNameTaken) {
+			return r.fail(ctx, &cr, "claim Harbor project", err)
+		}
+		return r.transient(ctx, &cr, "record project ownership", err)
+	}
+
 	if err := cli.EnsureProjectQuota(ctx, proj.ProjectID, quotaBytes); err != nil {
 		// Transient, not terminal — a quota-below-usage rejection can resolve
 		// once images are removed or the plan changes again.
 		return r.transient(ctx, &cr, "set project quota", err)
 	}
 
-	// 3. Mint the robot account once and keep its credentials in a Secret.
-	credName := credentialsSecretName(&cr)
-	if err := r.ensureCredentials(ctx, &cr, cli, projectName, registryURL, credName); err != nil {
+	// 3. Mint the robot accounts once and keep their credentials in Secrets.
+	if err := r.ensureCredentials(ctx, &cr, cli, projectName, registryURL); err != nil {
 		return r.transient(ctx, &cr, "provision credentials", err)
 	}
 
 	// 4. Ready.
+	pullName, pushName := pullSecretName(&cr), pushSecretName(&cr)
 	if err := r.patchStatus(ctx, req.NamespacedName, func(s *registryv1alpha1.RegistryStatus) {
 		s.Phase = phaseReady
 		s.ObservedGeneration = cr.Generation
 		s.HarborProject = projectName
 		s.RegistryURL = registryURL
-		s.CredentialsSecretName = credName
+		s.PullSecretName = pullName
+		s.PushSecretName = pushName
 		s.Message = fmt.Sprintf("registry %q ready", projectName)
 		setReady(&s.Conditions, cr.Generation, metav1.ConditionTrue, reasonReady, "registry ready")
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.Recorder.Eventf(&cr, nil, corev1.EventTypeNormal, reasonReady, actionProvision,
-		"registry ready; credentials in Secret %s", credName)
+		"registry ready; pull credentials in Secret %s, push credentials in Secret %s", pullName, pushName)
 
 	// Steady-state: re-check for drift (project deleted out-of-band, etc.).
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// ensureCredentials mints a project robot account only if the credentials
-// Secret does not already exist, then writes an owned Secret. The Secret's
-// presence is what makes this once-only: re-minting would invalidate
-// credentials already in use. When it is absent, any robot from a previous
-// half-finished attempt is unusable — its secret was never stored — so
-// EnsureProjectRobotAccount replaces it rather than failing against it.
-func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registryv1alpha1.Registry, cli *harbor.Client, projectName, registryURL, credName string) error {
-	// 1. check if secret already available
-	key := client.ObjectKey{Namespace: cr.Namespace, Name: credName}
+// ensureCredentials provisions both credential Secrets for a Registry: one that
+// can only pull, and one that can also push.
+//
+// They are separate accounts on purpose. A pull Secret is copied onto every
+// cluster that runs the images and ends up in many hands, so it must not be
+// able to publish; a push Secret belongs to a build pipeline. One credential
+// doing both would mean any workload able to read its own pull Secret could
+// overwrite the images it pulls.
+func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registryv1alpha1.Registry, cli *harbor.Client, projectName, registryURL string) error {
+	for _, c := range []struct {
+		secretName string
+		robotName  string
+		access     harbor.RobotAccess
+	}{
+		{pullSecretName(cr), robotAccountName(cr, harbor.AccessPull), harbor.AccessPull},
+		{pushSecretName(cr), robotAccountName(cr, harbor.AccessPush), harbor.AccessPush},
+	} {
+		if err := r.ensureCredential(ctx, cr, cli, projectName, registryURL, c.secretName, c.robotName, c.access); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureCredential mints one project robot account only if its Secret does not
+// already exist, then writes an owned Secret.
+//
+// The Secret's presence is what makes this once-only: re-minting would
+// invalidate credentials already in use, including every copy made onto another
+// cluster. When it is absent, any robot from a previous half-finished attempt is
+// unusable — its secret was never stored — so EnsureProjectRobotAccount replaces
+// it rather than failing against it.
+func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv1alpha1.Registry, cli *harbor.Client,
+	projectName, registryURL, secretName, robotName string, access harbor.RobotAccess) error {
+
+	key := client.ObjectKey{Namespace: cr.Namespace, Name: secretName}
 	var existing corev1.Secret
 	if err := r.Get(ctx, key, &existing); err == nil {
 		return nil // already provisioned
@@ -182,20 +231,30 @@ func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registry
 		return err
 	}
 
-	robot, err := cli.EnsureProjectRobotAccount(ctx, projectName, robotAccountName(cr))
+	robot, err := cli.EnsureProjectRobotAccount(ctx, projectName, robotName, access)
 	if err != nil {
-		return fmt.Errorf("create robot account: %w", err)
+		return fmt.Errorf("create robot account %q: %w", robotName, err)
+	}
+
+	dockerConfig, err := dockerConfigJSON(registryURL, robot.Name, robot.Secret)
+	if err != nil {
+		return err
 	}
 
 	sec := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: credName, Namespace: cr.Namespace},
-		Type:       corev1.SecretTypeOpaque,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: cr.Namespace,
+			Labels: map[string]string{
+				labelRegistry: cr.Name,
+			},
+		},
+		// dockerconfigjson, not Opaque: a Secret in this shape can be named in a
+		// pod's imagePullSecrets and read by docker login as-is. An Opaque Secret
+		// with custom keys has to be converted by hand before either will use it.
+		Type: corev1.SecretTypeDockerConfigJson,
 		Data: map[string][]byte{
-			"robot_username": []byte(robot.Name),
-			"robot_secret":   []byte(robot.Secret),
-			"registry_url":   []byte(registryURL),
-			"project":        []byte(projectName),
-			"robot_id":       []byte(fmt.Sprintf("%d", robot.ID)),
+			corev1.DockerConfigJsonKey: dockerConfig,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cr, sec, r.Scheme); err != nil {
@@ -205,6 +264,28 @@ func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registry
 		return err
 	}
 	return nil
+}
+
+// dockerConfigJSON renders credentials in the shape kubelet and docker expect.
+//
+// registryURL carries a scheme so that status and events show a usable address,
+// but a docker config is keyed by host alone: leaving the scheme in produces a
+// Secret that silently never matches the registry it was minted for.
+func dockerConfigJSON(registryURL, username, secret string) ([]byte, error) {
+	host := registryURL
+	if u, err := url.Parse(registryURL); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	cfg := map[string]any{
+		"auths": map[string]any{
+			host: map[string]string{
+				"username": username,
+				"password": secret,
+				"auth":     base64.StdEncoding.EncodeToString([]byte(username + ":" + secret)),
+			},
+		},
+	}
+	return json.Marshal(cfg)
 }
 
 // handleDelete runs the Registry finalizer: the Harbor project and every image
@@ -361,14 +442,13 @@ var errProjectNameTaken = errors.New("harbor project name already taken")
 // credentials on someone else's images. Refusing is the safe direction, and it
 // stays correct once ownership is recorded explicitly.
 func (r *RegistryReconciler) claimProjectName(ctx context.Context, cli *harbor.Client, cr *registryv1alpha1.Registry, projectName string) error {
-	// Operator add projectName as status also after projcet provisioned. So if cr.Status.HarborProject == projectName
-	// means already provisioned project i  before cycle
-	// This checked since if not added like that operator would give already taken error for good project
+	// status.harborProject is written only once the project is really ours, so
+	// its presence short-circuits the check on every later reconcile.
 	if cr.Status.HarborProject == projectName {
 		return nil // already ours
 	}
 
-	_, err := cli.GetProject(ctx, projectName)
+	proj, err := cli.GetProject(ctx, projectName)
 	switch {
 	case errors.Is(err, harbor.ErrProjectNotFound):
 		return nil // free to claim
@@ -378,9 +458,59 @@ func (r *RegistryReconciler) claimProjectName(ctx context.Context, cli *harbor.C
 		return fmt.Errorf("check whether project %q exists: %w", projectName, err)
 	}
 
-	return fmt.Errorf("%w: %q already exists in the registry. Registry names are "+
-		"global across every namespace and cluster, so rename this Registry",
-		errProjectNameTaken, projectName)
+	// The project exists. It is only a conflict if it belongs to someone else:
+	// a reconcile that died between creating the project and writing status
+	// finds its own project here, and must be able to carry on.
+	owner, err := cli.OwnerOf(ctx, proj.ProjectID)
+	if err != nil {
+		return fmt.Errorf("check who owns project %q: %w", projectName, err)
+	}
+	if owner == registryOwnerRef(cr) {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %q already exists in the registry and belongs to %s. Registry "+
+		"names are global across every namespace, so rename this Registry",
+		errProjectNameTaken, projectName, describeOwner(owner))
+}
+
+// ensureOwnership records this Registry as the owner of a project it just
+// created, or confirms an existing marker still names it.
+//
+// An unmarked project is refused rather than adopted: it was created outside the
+// operator, so nothing establishes that its images belong to this tenant.
+func (r *RegistryReconciler) ensureOwnership(ctx context.Context, cli *harbor.Client, cr *registryv1alpha1.Registry,
+	projectID int64, projectName string) error {
+
+	owner, err := cli.OwnerOf(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	switch owner {
+	case registryOwnerRef(cr):
+		return nil // already ours
+	case "":
+		return cli.SetOwner(ctx, projectID, registryOwnerRef(cr))
+	default:
+		return fmt.Errorf("%w: %q belongs to %s", errProjectNameTaken, projectName, describeOwner(owner))
+	}
+}
+
+// registryOwnerRef identifies a Registry inside Harbor. Namespace and name are
+// enough: every Registry lives on one cluster, so there is no cluster component
+// to record.
+func registryOwnerRef(cr *registryv1alpha1.Registry) string {
+	return cr.Namespace + "/" + cr.Name
+}
+
+// describeOwner renders an owner reference for a user-facing message. An empty
+// marker means the project was not created by this operator at all, which is a
+// different problem from a name held by another team.
+func describeOwner(owner string) string {
+	if owner == "" {
+		return "no Registry — it was created directly in Harbor"
+	}
+	return "Registry " + owner
 }
 
 // maxProjectNameLen is Harbor's documented limit for project_name.
@@ -439,19 +569,31 @@ func harborProjectName(cr *registryv1alpha1.Registry) string {
 	return strings.ToLower(cr.Name)
 }
 
-// credentialsSecretName returns the Secret holding this Registry's robot credentials.
-func credentialsSecretName(cr *registryv1alpha1.Registry) string {
-	return "registry-credentials-" + cr.Name
+// pullSecretName returns the Secret carrying pull-only credentials. This is the
+// one copied onto clusters that run the images.
+func pullSecretName(cr *registryv1alpha1.Registry) string {
+	return cr.Name + "-pull"
 }
 
-// robotAccountName returns the robot account name for a Registry. Harbor
+// pushSecretName returns the Secret carrying credentials that can also publish.
+func pushSecretName(cr *registryv1alpha1.Registry) string {
+	return cr.Name + "-push"
+}
+
+// robotAccountName returns the robot account name for one access level. Harbor
 // prefixes it with "robot$<project>+", so the suffix is kept short.
-func robotAccountName(cr *registryv1alpha1.Registry) string {
+//
+// The access level is part of the name because the two accounts live in the
+// same project and would otherwise collide.
+func robotAccountName(cr *registryv1alpha1.Registry, access harbor.RobotAccess) string {
 	s := strings.ToLower(cr.Name)
 	if len(s) > 12 {
 		s = s[:12]
 	}
-	return "ci-" + s
+	if access == harbor.AccessPull {
+		return "pull-" + s
+	}
+	return "push-" + s
 }
 
 // projectQuotaGi maps a plan to a registry's Harbor storage quota in gibibytes.

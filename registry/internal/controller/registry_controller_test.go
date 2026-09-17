@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -103,9 +105,9 @@ func TestHarborCredentials_ReadsFromTheOperatorNamespace(t *testing.T) {
 // costs the same debugging effort once per Registry.
 func TestHarborCredentials_ErrorsNameTheProblem(t *testing.T) {
 	tests := []struct {
-		name    string
-		objs    []client.Object
-		wantIn  string
+		name   string
+		objs   []client.Object
+		wantIn string
 	}{
 		{
 			name:   "secret missing entirely",
@@ -196,6 +198,61 @@ func TestHarborProjectName_ReservedNamesAreRejected(t *testing.T) {
 	}
 }
 
+// A pull Secret is copied onto every cluster that runs these images, so it must
+// be usable as-is in imagePullSecrets — which requires the dockerconfigjson
+// shape and the host without a scheme.
+func TestDockerConfigJSON_IsUsableAsAnImagePullSecret(t *testing.T) {
+	raw, err := dockerConfigJSON("https://registry.example.com", "robot$web+pull-web", "tok")
+	if err != nil {
+		t.Fatalf("dockerConfigJSON() error = %v", err)
+	}
+
+	var cfg struct {
+		Auths map[string]struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+			Auth     string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal docker config: %v", err)
+	}
+
+	entry, ok := cfg.Auths["registry.example.com"]
+	if !ok {
+		t.Fatalf("auths keys = %v, want the bare host; a scheme here never matches the registry", keysOf(cfg.Auths))
+	}
+	if entry.Username != "robot$web+pull-web" || entry.Password != "tok" {
+		t.Errorf("auths entry = %q/%q, want the robot credentials", entry.Username, entry.Password)
+	}
+	want := base64.StdEncoding.EncodeToString([]byte("robot$web+pull-web:tok"))
+	if entry.Auth != want {
+		t.Errorf("auth = %q, want %q; docker reads this field, not username/password", entry.Auth, want)
+	}
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// The two Secrets must be different accounts: a pull credential that could also
+// push would let any workload holding it overwrite the images it consumes.
+func TestRobotAccountName_PullAndPushAreDistinctAccounts(t *testing.T) {
+	cr := registryIn("team-a", "web")
+	pull := robotAccountName(cr, harbor.AccessPull)
+	push := robotAccountName(cr, harbor.AccessPush)
+	if pull == push {
+		t.Fatalf("robotAccountName() = %q for both access levels; they would collide in Harbor", pull)
+	}
+	if pullSecretName(cr) == pushSecretName(cr) {
+		t.Error("pull and push Secrets resolve to the same name")
+	}
+}
+
 func TestProjectQuotaBytes(t *testing.T) {
 	for plan, wantGi := range map[string]int64{"starter": 5, "professional": 20, "enterprise": 100} {
 		got, err := projectQuotaBytes(plan)
@@ -264,10 +321,21 @@ func TestHandleDelete_KeepsFinalizerWhenHarborIsUnreachable(t *testing.T) {
 	}
 }
 
-// harborStub serves the project lookup claimProjectName makes.
-func harborStub(t *testing.T, status int) *harbor.Client {
+// harborStub serves the project lookup and the ownership marker that
+// claimProjectName reads. owner is the Registry recorded against the project;
+// empty means the project carries no marker at all.
+func harborStub(t *testing.T, status int, owner string) *harbor.Client {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v2.0/labels") {
+			w.WriteHeader(http.StatusOK)
+			if owner == "" {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"name":"registry.opencloud.wso2.com.owner","description":"` + owner + `"}]`))
+			return
+		}
 		w.WriteHeader(status)
 		if status == http.StatusOK {
 			_, _ = w.Write([]byte(`{"project_id":7}`))
@@ -283,7 +351,7 @@ func TestClaimProjectName_RefusesANameAlreadyInUse(t *testing.T) {
 	r := newRegistryReconciler(t, newFakeClient(t))
 	cr := registryIn("team-b", "web")
 
-	err := r.claimProjectName(context.Background(), harborStub(t, http.StatusOK), cr, "web")
+	err := r.claimProjectName(context.Background(), harborStub(t, http.StatusOK, "team-a/web"), cr, "web")
 	if err == nil {
 		t.Fatal("claimProjectName() error = nil, want the taken name refused")
 	}
@@ -302,7 +370,7 @@ func TestClaimProjectName_AllowsAFreeName(t *testing.T) {
 	r := newRegistryReconciler(t, newFakeClient(t))
 	cr := registryIn("team-a", "web")
 
-	if err := r.claimProjectName(context.Background(), harborStub(t, http.StatusNotFound), cr, "web"); err != nil {
+	if err := r.claimProjectName(context.Background(), harborStub(t, http.StatusNotFound, ""), cr, "web"); err != nil {
 		t.Errorf("claimProjectName() error = %v, want a free name accepted", err)
 	}
 }
@@ -315,8 +383,36 @@ func TestClaimProjectName_SkipsTheCheckForANameItAlreadyHolds(t *testing.T) {
 	cr.Status.HarborProject = "web"
 
 	// Harbor would report the project exists; holding the claim must win.
-	if err := r.claimProjectName(context.Background(), harborStub(t, http.StatusOK), cr, "web"); err != nil {
+	if err := r.claimProjectName(context.Background(), harborStub(t, http.StatusOK, "team-a/web"), cr, "web"); err != nil {
 		t.Errorf("claimProjectName() error = %v, want the Registry's own project accepted", err)
+	}
+}
+
+// A reconcile that died between creating the project and writing status finds
+// its own project on the next pass. Without the ownership marker it would
+// refuse that project forever and the Registry could never reach Ready.
+func TestClaimProjectName_ResumesAgainstItsOwnProject(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cr := registryIn("team-a", "web")
+
+	cli := harborStub(t, http.StatusOK, "team-a/web")
+	if err := r.claimProjectName(context.Background(), cli, cr, "web"); err != nil {
+		t.Errorf("claimProjectName() error = %v, want the Registry's own project accepted", err)
+	}
+}
+
+// A project with no marker was created outside the operator. Adopting it would
+// hand this Registry credentials on images nobody has said belong to it.
+func TestClaimProjectName_RefusesAnUnmarkedProject(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cr := registryIn("team-a", "web")
+
+	err := r.claimProjectName(context.Background(), harborStub(t, http.StatusOK, ""), cr, "web")
+	if !errors.Is(err, errProjectNameTaken) {
+		t.Fatalf("claimProjectName() error = %v, want an unmarked project refused", err)
+	}
+	if !strings.Contains(err.Error(), "created directly in Harbor") {
+		t.Errorf("error = %v, want it to say the project was not created by the operator", err)
 	}
 }
 
@@ -326,7 +422,7 @@ func TestClaimProjectName_UnreachableHarborIsNotReportedAsTaken(t *testing.T) {
 	r := newRegistryReconciler(t, newFakeClient(t))
 	cr := registryIn("team-a", "web")
 
-	err := r.claimProjectName(context.Background(), harborStub(t, http.StatusInternalServerError), cr, "web")
+	err := r.claimProjectName(context.Background(), harborStub(t, http.StatusInternalServerError, ""), cr, "web")
 	if err == nil {
 		t.Fatal("claimProjectName() error = nil, want the failure surfaced")
 	}

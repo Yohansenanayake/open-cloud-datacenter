@@ -70,9 +70,17 @@ func (c *Client) VerifyAccess(ctx context.Context) error {
 	return c.get(ctx, "/api/v2.0/users/current", &out, http.StatusOK)
 }
 
+// ErrProjectExists reports that Harbor already holds a project under this name.
+// Callers decide whether that project is theirs; see OwnerOf.
+var ErrProjectExists = errors.New("harbor project already exists")
+
 // CreateHarborProject creates a Harbor project with an initial storage quota
-// (bytes; -1 = unlimited). 409 (already exists) is treated as success; a
-// project's quota is changed afterward via EnsureProjectQuota.
+// (bytes; -1 = unlimited). A project's quota is changed afterward via
+// EnsureProjectQuota.
+//
+// 409 is reported as ErrProjectExists rather than swallowed: on a shared Harbor
+// the existing project usually belongs to someone else, and minting a robot
+// against it would hand one tenant credentials on another's images.
 func (c *Client) CreateHarborProject(ctx context.Context, projectName string, storageLimitBytes int64) error {
 	body := map[string]interface{}{
 		"project_name":  projectName,
@@ -83,13 +91,70 @@ func (c *Client) CreateHarborProject(ctx context.Context, projectName string, st
 			"prevent_vul": "false",
 		},
 	}
-	return c.do(ctx, "POST", "/api/v2.0/projects", body, nil,
-		http.StatusCreated, http.StatusConflict)
+	err := c.do(ctx, "POST", "/api/v2.0/projects", body, nil, http.StatusCreated)
+	var se *StatusError
+	if errors.As(err, &se) && se.StatusCode == http.StatusConflict {
+		return fmt.Errorf("%w: %s", ErrProjectExists, projectName)
+	}
+	return err
 }
 
 // Project is the subset of Harbor's project object this client needs.
 type Project struct {
 	ProjectID int64 `json:"project_id"`
+}
+
+// ownerLabelName marks a project as created by this operator and records which
+// Registry it belongs to.
+//
+// A project-scoped label is used rather than project metadata because Harbor
+// whitelists metadata keys and rejects anything else with "invalid key", so a
+// marker stored there cannot exist. A label is a first-class object that
+// survives upgrades, and its description carries the owner reference.
+const ownerLabelName = "registry.opencloud.wso2.com.owner"
+
+// SetOwner records which Registry owns a project. It is idempotent: an owner
+// already recorded is left alone rather than duplicated, so a retried reconcile
+// changes nothing.
+func (c *Client) SetOwner(ctx context.Context, projectID int64, owner string) error {
+	current, err := c.OwnerOf(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if current == owner {
+		return nil
+	}
+	if current != "" {
+		return fmt.Errorf("project %d is already owned by %q", projectID, current)
+	}
+
+	body := map[string]interface{}{
+		"name":        ownerLabelName,
+		"description": owner,
+		"scope":       "p",
+		"project_id":  projectID,
+	}
+	return c.do(ctx, "POST", "/api/v2.0/labels", body, nil,
+		http.StatusCreated, http.StatusOK)
+}
+
+// OwnerOf returns the Registry recorded as owning a project, or "" when no
+// marker is present — which means the project was not created by this operator.
+func (c *Client) OwnerOf(ctx context.Context, projectID int64) (string, error) {
+	var labels []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	path := fmt.Sprintf("/api/v2.0/labels?scope=p&project_id=%d&page_size=%d", projectID, pageSize)
+	if err := c.get(ctx, path, &labels, http.StatusOK); err != nil {
+		return "", fmt.Errorf("read owner of project %d: %w", projectID, err)
+	}
+	for _, l := range labels {
+		if l.Name == ownerLabelName {
+			return l.Description, nil
+		}
+	}
+	return "", nil
 }
 
 // ErrProjectNotFound lets callers distinguish a genuine 404 from any other
@@ -143,6 +208,36 @@ func (c *Client) EnsureProjectQuota(ctx context.Context, projectID, storageLimit
 	return nil
 }
 
+// RobotAccess is the permission set granted to a project robot account.
+type RobotAccess int
+
+const (
+	// AccessPull can read images and nothing else. It is what a workload needs
+	// to start a container, and what a Secret copied onto a cluster should carry.
+	AccessPull RobotAccess = iota
+
+	// AccessPush can additionally publish images and tags. Deletion is not
+	// granted: destroying images is the Registry owner's decision, taken by
+	// deleting the Registry, not something a leaked build credential should do.
+	AccessPush
+)
+
+// harborAccess renders the permission set as Harbor's robot access list.
+func (a RobotAccess) harborAccess() []map[string]string {
+	pull := []map[string]string{
+		{"resource": "repository", "action": "pull"},
+		{"resource": "artifact", "action": "read"},
+	}
+	if a == AccessPull {
+		return pull
+	}
+	return append(pull,
+		map[string]string{"resource": "repository", "action": "push"},
+		map[string]string{"resource": "tag", "action": "create"},
+		map[string]string{"resource": "scan", "action": "create"},
+	)
+}
+
 // robotFullName is how Harbor names a project-scoped robot: the account created
 // for robotName inside projectName is listed and addressed only in this form.
 func robotFullName(projectName, robotName string) string {
@@ -157,8 +252,8 @@ func robotFullName(projectName, robotName string) string {
 // precisely the state a failed credentials-Secret write leaves behind, so a
 // conflict here means the previous attempt died mid-way: replace the orphan
 // rather than failing forever against it.
-func (c *Client) EnsureProjectRobotAccount(ctx context.Context, projectName, robotName string) (*RobotAccount, error) {
-	robot, err := c.createProjectRobotAccount(ctx, projectName, robotName)
+func (c *Client) EnsureProjectRobotAccount(ctx context.Context, projectName, robotName string, access RobotAccess) (*RobotAccount, error) {
+	robot, err := c.createProjectRobotAccount(ctx, projectName, robotName, access)
 	if err == nil {
 		return robot, nil
 	}
@@ -178,7 +273,7 @@ func (c *Client) EnsureProjectRobotAccount(ctx context.Context, projectName, rob
 	if delErr := c.DeleteRobot(ctx, id); delErr != nil {
 		return nil, delErr
 	}
-	return c.createProjectRobotAccount(ctx, projectName, robotName)
+	return c.createProjectRobotAccount(ctx, projectName, robotName, access)
 }
 
 // findProjectRobotID returns the ID of the project robot named robotName, or 0
@@ -220,7 +315,7 @@ func (c *Client) DeleteRobot(ctx context.Context, id int64) error {
 // pass, so a bounded lifetime would silently break every pipeline holding these
 // credentials once it elapsed; the account is instead revoked by deleting the
 // Registry that owns it.
-func (c *Client) createProjectRobotAccount(ctx context.Context, projectName, robotName string) (*RobotAccount, error) {
+func (c *Client) createProjectRobotAccount(ctx context.Context, projectName, robotName string, access RobotAccess) (*RobotAccount, error) {
 	body := map[string]interface{}{
 		"name":     robotName,
 		"duration": -1,
@@ -229,16 +324,7 @@ func (c *Client) createProjectRobotAccount(ctx context.Context, projectName, rob
 			{
 				"kind":      "project",
 				"namespace": projectName,
-				"access": []map[string]string{
-					{"resource": "repository", "action": "push"},
-					{"resource": "repository", "action": "pull"},
-					{"resource": "repository", "action": "delete"},
-					{"resource": "artifact", "action": "read"},
-					{"resource": "artifact", "action": "delete"},
-					{"resource": "tag", "action": "create"},
-					{"resource": "tag", "action": "delete"},
-					{"resource": "scan", "action": "create"},
-				},
+				"access":    access.harborAccess(),
 			},
 		},
 	}
