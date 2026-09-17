@@ -14,7 +14,7 @@ Runs on any conformant Kubernetes cluster — it uses no vendor APIs.
 
 | Requirement | Notes |
 |:---|:---|
-| A running Harbor | Reachable from the operator over HTTP(S), addressed by `HARBOR_URL` |
+| A running Harbor | Reachable from the operator over HTTPS, addressed by `HARBOR_URL`. Plain HTTP is refused unless `HARBOR_ALLOW_PLAINTEXT_URL=true` |
 | A Harbor account | Stored in a Secret in the operator's namespace; needs to create projects, quotas and robot accounts |
 | Trust in Harbor's certificate | A publicly-rooted certificate needs nothing. A private CA must be mounted into the operator pod — the client verifies, and has no skip-verification option |
 | A route to Harbor | Where the operator and Harbor sit on different networks, see `config/local/manager_local_patch.yaml.example` |
@@ -87,6 +87,7 @@ to keep cluster-specific values out of the tracked defaults.
 | `HARBOR_URL` | ✅ | — | Base URL of the central Harbor. Validated at startup. Also what a `Registry` reports as its push/pull address, so it must be the name clients resolve |
 | `POD_NAMESPACE` | ✅ | — | The operator's own namespace, supplied by the downward API. Where the credentials Secret is read from |
 | `HARBOR_CREDENTIALS_SECRET` | | `harbor-credentials` | Secret holding `username` and `password` |
+| `HARBOR_ALLOW_PLAINTEXT_URL` | | `false` | Permits an `http://` `HARBOR_URL`. The Harbor password travels as Basic Auth on every request, so this sends it in clear — for a throwaway cluster only |
 | `METRICS_CERT_DIR` | | — | Serving certificate for the metrics endpoint. Empty means a self-signed one only an unverifying scraper can read |
 
 The credentials Secret is read on every reconcile, so rotating it takes effect

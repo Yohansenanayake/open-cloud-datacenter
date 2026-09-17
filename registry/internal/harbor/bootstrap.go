@@ -40,7 +40,14 @@ type RobotAccount struct {
 	ID     int64  `json:"id"`
 }
 
-// NewClient returns a Harbor client that verifies the server certificate.
+// NewClient returns a Harbor client that verifies the server certificate and
+// follows no redirects.
+//
+// Every request carries the Harbor password as Basic Auth, and Go's default
+// policy keeps that header across a redirect that stays on the same host —
+// including one from https to http, which would put the password on the wire in
+// cleartext. Harbor's API answers directly, so a redirect is a misconfiguration
+// worth reporting rather than following.
 func NewClient(baseURL, username, password string) *Client {
 	return &Client{
 		baseURL:  baseURL,
@@ -50,6 +57,10 @@ func NewClient(baseURL, username, password string) *Client {
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+			},
+			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+				return fmt.Errorf("refused redirect to %s: Harbor's API is expected to answer directly",
+					req.URL.Redacted())
 			},
 		},
 	}

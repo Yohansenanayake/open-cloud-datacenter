@@ -448,3 +448,250 @@ func TestValidateProjectName(t *testing.T) {
 		}
 	}
 }
+
+// harborProjectStub serves what deleteHarborProject reads: the project lookup,
+// its ownership marker, an empty repository listing, and the delete itself. It
+// records every request so a test can assert what was and was not called.
+func harborProjectStub(t *testing.T, owner string) (baseURL string, requests *[]string) {
+	t.Helper()
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v2.0/labels"):
+			w.WriteHeader(http.StatusOK)
+			if owner == "" {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"name":"registry.opencloud.wso2.com.owner","description":"` + owner + `"}]`))
+		case strings.HasSuffix(r.URL.Path, "/repositories"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"project_id":7}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &seen
+}
+
+// deleteReconciler is a reconciler pointed at stubURL with credentials in place,
+// for the finalizer path.
+func deleteReconciler(t *testing.T, stubURL string, objs ...client.Object) *RegistryReconciler {
+	t.Helper()
+	objs = append(objs, harborCredsSecret(map[string][]byte{
+		config.HarborUsernameKey: []byte("admin"),
+		config.HarborPasswordKey: []byte("s3cret"),
+	}))
+	r := newRegistryReconciler(t, newFakeClient(t, objs...))
+	r.HarborCfg.URL = stubURL
+	return r
+}
+
+func called(requests []string, want string) bool {
+	for _, req := range requests {
+		if req == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDeleteHarborProject_DeletesAProjectItOwns(t *testing.T) {
+	reg := registryIn("acme-project-1", "web")
+	reg.Status.HarborProject = "web"
+	url, requests := harborProjectStub(t, "acme-project-1/web")
+
+	r := deleteReconciler(t, url, reg)
+	if err := r.deleteHarborProject(context.Background(), reg, testLogger()); err != nil {
+		t.Fatalf("deleteHarborProject() error = %v", err)
+	}
+	if !called(*requests, "DELETE /api/v2.0/projects/web") {
+		t.Errorf("requests = %v, want the project this Registry owns to be deleted", *requests)
+	}
+}
+
+// A name recorded in status can be held by a different project later: one
+// deleted and recreated in Harbor belongs to whoever created it, and deleting it
+// would destroy another tenant's images.
+func TestDeleteHarborProject_LeavesAProjectItNoLongerOwnsAlone(t *testing.T) {
+	for _, owner := range []string{"team-b/web", ""} {
+		t.Run("owner="+owner, func(t *testing.T) {
+			reg := registryIn("acme-project-1", "web")
+			reg.Status.HarborProject = "web"
+			url, requests := harborProjectStub(t, owner)
+
+			r := deleteReconciler(t, url, reg)
+			if err := r.deleteHarborProject(context.Background(), reg, testLogger()); err != nil {
+				t.Fatalf("deleteHarborProject() error = %v, want the finalizer released", err)
+			}
+			if called(*requests, "DELETE /api/v2.0/projects/web") {
+				t.Errorf("requests = %v, want no delete against a project owned by %q", *requests, owner)
+			}
+		})
+	}
+}
+
+// Marking is only allowed on a project this reconcile created. Adopting an
+// unmarked project that was already there would hand this Registry a robot
+// account and a quota on images created outside the operator.
+func TestEnsureOwnership(t *testing.T) {
+	cases := []struct {
+		name    string
+		owner   string
+		created bool
+		wantErr error
+	}{
+		{"marks a project it just created", "", true, nil},
+		{"refuses an unmarked project it did not create", "", false, errProjectNameTaken},
+		{"accepts its own marker", "acme-project-1/web", false, nil},
+		{"refuses a foreign marker", "team-b/web", false, errProjectNameTaken},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRegistryReconciler(t, newFakeClient(t))
+			cr := registryIn("acme-project-1", "web")
+
+			err := r.ensureOwnership(context.Background(), harborStub(t, http.StatusOK, tc.owner), cr, 7, "web", tc.created)
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("ensureOwnership() error = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ensureOwnership() error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// harborRobotStub answers the robot-account creation ensureCredential makes.
+func harborRobotStub(t *testing.T) (cli *harbor.Client, requests *[]string) {
+	t.Helper()
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1,"name":"robot$web+pull-web","secret":"fresh"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return harbor.NewClient(srv.URL, "admin", "s3cret"), &seen
+}
+
+// docker and the kubelet match a credential by host, so a Secret still keyed to
+// an address the operator no longer drives authenticates nothing.
+func TestEnsureCredential_ReplacesACredentialKeyedToAnotherHost(t *testing.T) {
+	cr := registryIn("acme-project-1", "web")
+	stale, err := dockerConfigJSON("https://old.example.com", "robot$web+pull-web", "stale")
+	if err != nil {
+		t.Fatalf("dockerConfigJSON() error = %v", err)
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pull", Namespace: cr.Namespace},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: stale},
+	}
+	r := newRegistryReconciler(t, newFakeClient(t, cr, sec))
+	cli, requests := harborRobotStub(t)
+
+	if err := r.ensureCredential(context.Background(), cr, cli, "web",
+		"https://new.example.com", "web-pull", "pull-web", harbor.AccessPull); err != nil {
+		t.Fatalf("ensureCredential() error = %v", err)
+	}
+	if !called(*requests, "POST /api/v2.0/robots") {
+		t.Errorf("requests = %v, want a robot minted for the current address", *requests)
+	}
+
+	var updated corev1.Secret
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: cr.Namespace, Name: "web-pull"}, &updated); err != nil {
+		t.Fatalf("get Secret: %v", err)
+	}
+	if got := credentialHost(&updated); got != "new.example.com" {
+		t.Errorf("credential host = %q, want new.example.com", got)
+	}
+}
+
+// The steady state must not mint a new robot on every reconcile: a credential
+// already keyed to the current address is left exactly as it is.
+func TestEnsureCredential_LeavesACurrentCredentialAlone(t *testing.T) {
+	cr := registryIn("acme-project-1", "web")
+	current, err := dockerConfigJSON(testHarborURL, "robot$web+pull-web", "keep")
+	if err != nil {
+		t.Fatalf("dockerConfigJSON() error = %v", err)
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pull", Namespace: cr.Namespace},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: current},
+	}
+	r := newRegistryReconciler(t, newFakeClient(t, cr, sec))
+	cli, requests := harborRobotStub(t)
+
+	if err := r.ensureCredential(context.Background(), cr, cli, "web",
+		testHarborURL, "web-pull", "pull-web", harbor.AccessPull); err != nil {
+		t.Fatalf("ensureCredential() error = %v", err)
+	}
+	if len(*requests) != 0 {
+		t.Errorf("requests = %v, want none for a credential already keyed to this address", *requests)
+	}
+
+	var unchanged corev1.Secret
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: cr.Namespace, Name: "web-pull"}, &unchanged); err != nil {
+		t.Fatalf("get Secret: %v", err)
+	}
+	if string(unchanged.Data[corev1.DockerConfigJsonKey]) != string(current) {
+		t.Error("credential was rewritten although its host still matches")
+	}
+}
+
+func TestCredentialHost(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"reads the single auths entry", []byte(`{"auths":{"registry.example.com":{"username":"u"}}}`), "registry.example.com"},
+		{"unreadable JSON reports no host", []byte(`not json`), ""},
+		{"absent entry reports no host", []byte(`{"auths":{}}`), ""},
+		{"several entries report no host", []byte(`{"auths":{"a.example.com":{},"b.example.com":{}}}`), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sec := &corev1.Secret{Data: map[string][]byte{corev1.DockerConfigJsonKey: tc.data}}
+			if got := credentialHost(sec); got != tc.want {
+				t.Errorf("credentialHost() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A Secret's type is immutable, so one of the wrong type has to be replaced:
+// docker config bytes inside an Opaque Secret are read by nothing.
+func TestEnsureCredential_ReplacesASecretOfTheWrongType(t *testing.T) {
+	cr := registryIn("acme-project-1", "web")
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pull", Namespace: cr.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"username": []byte("robot$web+pull-web")},
+	}
+	r := newRegistryReconciler(t, newFakeClient(t, cr, sec))
+	cli, _ := harborRobotStub(t)
+
+	if err := r.ensureCredential(context.Background(), cr, cli, "web",
+		testHarborURL, "web-pull", "pull-web", harbor.AccessPull); err != nil {
+		t.Fatalf("ensureCredential() error = %v", err)
+	}
+
+	var replaced corev1.Secret
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: cr.Namespace, Name: "web-pull"}, &replaced); err != nil {
+		t.Fatalf("get Secret: %v", err)
+	}
+	if replaced.Type != corev1.SecretTypeDockerConfigJson {
+		t.Errorf("Secret type = %q, want %q", replaced.Type, corev1.SecretTypeDockerConfigJson)
+	}
+	if credentialHost(&replaced) != dockerConfigHost(testHarborURL) {
+		t.Errorf("credential host = %q, want %q", credentialHost(&replaced), dockerConfigHost(testHarborURL))
+	}
+}

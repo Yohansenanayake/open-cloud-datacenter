@@ -9,6 +9,13 @@ metadata:
   namespace: registry-system
 spec:
   template:
+    # A second interface on Harbor's network, where the operator has no route to
+    # it — see "Reaching a Harbor on another network" at the end of this file.
+    # Multus reads this annotation from the Pod, so it belongs on the pod
+    # template; on the Deployment's own metadata it attaches nothing.
+    #metadata:
+    #  annotations:
+    #    k8s.v1.cni.cncf.io/networks: REPLACE_WITH_NAMESPACE/REPLACE_WITH_ATTACHMENT
     spec:
       containers:
       - name: manager
@@ -83,6 +90,5 @@ spec:
 #   * Do NOT set a gateway on the attachment. A second interface that claims
 #     the default route cuts the operator off from the Kubernetes API.
 #
-#metadata:
-#  annotations:
-#    k8s.v1.cni.cncf.io/networks: REPLACE_WITH_NAMESPACE/REPLACE_WITH_ATTACHMENT
+# Uncomment the annotation under spec.template near the top of this file, and
+# name the attachment there as <namespace>/<name>.
