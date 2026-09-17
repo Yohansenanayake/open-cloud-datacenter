@@ -131,9 +131,14 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// A 409 here means the name was claimed between the check above and now, or
 	// that this reconcile is resuming after the project was created but the
-	// status write never landed. ensureOwnership tells those apart.
-	if err := cli.CreateHarborProject(ctx, projectName, quotaBytes); err != nil && !errors.Is(err, harbor.ErrProjectExists) {
-		return r.transient(ctx, &cr, "create Harbor project", err)
+	// status write never landed. created tells those apart for ensureOwnership,
+	// which may only mark a project this reconcile made itself.
+	created := true
+	if err := cli.CreateHarborProject(ctx, projectName, quotaBytes); err != nil {
+		if !errors.Is(err, harbor.ErrProjectExists) {
+			return r.transient(ctx, &cr, "create Harbor project", err)
+		}
+		created = false
 	}
 
 	// 2c. Converge the quota every reconcile — this is how a plan change takes
@@ -149,7 +154,7 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// 2d. Record or confirm ownership before handing out any credential. This is
 	// the check that keeps one Registry from being given a robot on another's
 	// images.
-	if err := r.ensureOwnership(ctx, cli, &cr, proj.ProjectID, projectName); err != nil {
+	if err := r.ensureOwnership(ctx, cli, &cr, proj.ProjectID, projectName, created); err != nil {
 		if errors.Is(err, errProjectNameTaken) {
 			return r.fail(ctx, &cr, "claim Harbor project", err)
 		}
@@ -225,12 +230,19 @@ func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv
 
 	key := client.ObjectKey{Namespace: cr.Namespace, Name: secretName}
 	var existing corev1.Secret
-	if err := r.Get(ctx, key, &existing); err == nil {
-		return nil // already provisioned
-	} else if !apierrors.IsNotFound(err) {
-		return err
+	getErr := r.Get(ctx, key, &existing)
+	switch {
+	case getErr == nil && credentialHost(&existing) == dockerConfigHost(registryURL):
+		return nil // already provisioned for this address
+	case getErr != nil && !apierrors.IsNotFound(getErr):
+		return getErr
 	}
 
+	// A Secret keyed by a different host was minted for an address the operator
+	// no longer drives: docker and the kubelet match credentials by host, so it
+	// authenticates nothing now. The robot is minted again against the Harbor in
+	// HARBOR_URL, which is correct whether that address is a new name for the
+	// same Harbor or a different one.
 	robot, err := cli.EnsureProjectRobotAccount(ctx, projectName, robotName, access)
 	if err != nil {
 		return fmt.Errorf("create robot account %q: %w", robotName, err)
@@ -260,10 +272,28 @@ func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv
 	if err := controllerutil.SetControllerReference(cr, sec, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
+	// A Secret's type cannot be changed, so one of the wrong type is replaced
+	// rather than updated: writing a docker config into an Opaque Secret leaves
+	// something no pod and no docker login will read.
+	exists := getErr == nil
+	if exists && existing.Type != corev1.SecretTypeDockerConfigJson {
+		if err := r.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		exists = false
 	}
-	return nil
+
+	if !exists {
+		if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		return nil
+	}
+
+	// Only the credential changes: labels and the owner reference were set when
+	// the Secret was created.
+	existing.Data = sec.Data
+	return r.Update(ctx, &existing)
 }
 
 // dockerConfigJSON renders credentials in the shape kubelet and docker expect.
@@ -272,13 +302,9 @@ func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv
 // but a docker config is keyed by host alone: leaving the scheme in produces a
 // Secret that silently never matches the registry it was minted for.
 func dockerConfigJSON(registryURL, username, secret string) ([]byte, error) {
-	host := registryURL
-	if u, err := url.Parse(registryURL); err == nil && u.Host != "" {
-		host = u.Host
-	}
 	cfg := map[string]any{
 		"auths": map[string]any{
-			host: map[string]string{
+			dockerConfigHost(registryURL): map[string]string{
 				"username": username,
 				"password": secret,
 				"auth":     base64.StdEncoding.EncodeToString([]byte(username + ":" + secret)),
@@ -286,6 +312,34 @@ func dockerConfigJSON(registryURL, username, secret string) ([]byte, error) {
 		},
 	}
 	return json.Marshal(cfg)
+}
+
+// dockerConfigHost is the key a docker config entry is stored under: the host
+// alone, since that is what docker and the kubelet match a credential by.
+func dockerConfigHost(registryURL string) string {
+	if u, err := url.Parse(registryURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return registryURL
+}
+
+// credentialHost returns the host a credentials Secret holds an entry for, or
+// "" when it holds none that can be read. Anything unreadable reports "" so the
+// caller replaces it rather than trusting a credential it cannot inspect.
+func credentialHost(sec *corev1.Secret) string {
+	var cfg struct {
+		Auths map[string]json.RawMessage `json:"auths"`
+	}
+	if err := json.Unmarshal(sec.Data[corev1.DockerConfigJsonKey], &cfg); err != nil {
+		return ""
+	}
+	if len(cfg.Auths) != 1 {
+		return ""
+	}
+	for host := range cfg.Auths {
+		return host
+	}
+	return ""
 }
 
 // handleDelete runs the Registry finalizer: the Harbor project and every image
@@ -332,6 +386,28 @@ func (r *RegistryReconciler) deleteHarborProject(ctx context.Context, cr *regist
 	cli, err := r.harborClient(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Only a project this Registry still owns may be destroyed. status records a
+	// name, and a name outlives the project it was recorded for: one deleted and
+	// recreated in Harbor belongs to whoever made it, and deleting that would
+	// destroy another tenant's images. The ownership marker is what ties the
+	// project to this Registry, so it is checked here as well as on the way in.
+	proj, err := cli.GetProject(ctx, projectName)
+	if errors.Is(err, harbor.ErrProjectNotFound) {
+		return nil // already gone
+	}
+	if err != nil {
+		return fmt.Errorf("get Harbor project %s: %w", projectName, err)
+	}
+	owner, err := cli.OwnerOf(ctx, proj.ProjectID)
+	if err != nil {
+		return fmt.Errorf("check who owns project %s: %w", projectName, err)
+	}
+	if owner != registryOwnerRef(cr) {
+		log.Info("leaving Harbor project in place: it no longer belongs to this Registry",
+			"project", projectName, "owner", describeOwner(owner))
+		return nil
 	}
 
 	// Harbor refuses to delete a project that still holds repositories (412),
@@ -477,19 +553,22 @@ func (r *RegistryReconciler) claimProjectName(ctx context.Context, cli *harbor.C
 // ensureOwnership records this Registry as the owner of a project it just
 // created, or confirms an existing marker still names it.
 //
-// An unmarked project is refused rather than adopted: it was created outside the
-// operator, so nothing establishes that its images belong to this tenant.
+// created says whether this reconcile is the one that created the project, and
+// only then may an unmarked project be marked. A project that was already there
+// and carries no marker was created outside the operator, so nothing establishes
+// that its images belong to this tenant: marking it would hand this Registry a
+// robot account and a quota on someone else's images.
 func (r *RegistryReconciler) ensureOwnership(ctx context.Context, cli *harbor.Client, cr *registryv1alpha1.Registry,
-	projectID int64, projectName string) error {
+	projectID int64, projectName string, created bool) error {
 
 	owner, err := cli.OwnerOf(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	switch owner {
-	case registryOwnerRef(cr):
+	switch {
+	case owner == registryOwnerRef(cr):
 		return nil // already ours
-	case "":
+	case owner == "" && created:
 		return cli.SetOwner(ctx, projectID, registryOwnerRef(cr))
 	default:
 		return fmt.Errorf("%w: %q belongs to %s", errProjectNameTaken, projectName, describeOwner(owner))

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -466,4 +467,33 @@ func TestVerifyAccess(t *testing.T) {
 			t.Error("VerifyAccess() error = nil, want an error on 401 — an unauthenticated ping would have passed here")
 		}
 	})
+}
+
+// Every request carries the Harbor password as Basic Auth, and Go keeps that
+// header across a same-host redirect — including https to http. A redirect is
+// refused rather than followed, so the password never reaches the target.
+func TestNewClient_RefusesRedirects(t *testing.T) {
+	var targetHits int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"username":"admin"}`))
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	err := NewClient(redirector.URL, "test-user", "test-admin-pass").VerifyAccess(context.Background())
+	if err == nil {
+		t.Fatal("VerifyAccess() error = nil, want the redirect refused")
+	}
+	if !strings.Contains(err.Error(), "refused redirect") {
+		t.Errorf("error = %v, want it to name the refused redirect", err)
+	}
+	if targetHits != 0 {
+		t.Errorf("redirect target received %d requests, want 0; credentials must not follow a redirect", targetHits)
+	}
 }

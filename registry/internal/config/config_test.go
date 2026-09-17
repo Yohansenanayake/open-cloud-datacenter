@@ -49,9 +49,12 @@ func TestRequireEnv(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	// Load requires both to be set; each subtest overrides from this baseline.
+	// The plaintext opt-in is pinned off so a value inherited from the
+	// environment cannot make the tests that assert a refusal pass silently.
 	setRequired := func(t *testing.T) {
 		t.Setenv("HARBOR_URL", "https://registry.example.com")
 		t.Setenv("POD_NAMESPACE", "registry-system")
+		t.Setenv("HARBOR_ALLOW_PLAINTEXT_URL", "false")
 	}
 
 	// Basic Auth over http puts the Harbor password on the wire in clear, and

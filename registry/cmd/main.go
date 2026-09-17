@@ -84,6 +84,12 @@ func main() {
 		logger.Fatal("failed to add readyz check", zap.Error(err))
 	}
 
+	// Nothing else would ever raise this: a cleartext Harbor behaves exactly
+	// like an encrypted one until someone reads the password off the wire.
+	if cfg.Harbor.PlaintextURL {
+		logger.Warn("HARBOR_URL uses http, so the Harbor password is sent in clear on every request; " +
+			"this is only appropriate for a local development Harbor")
+	}
 	logger.Info("starting registry operator", zap.String("harbor", cfg.Harbor.URL))
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		logger.Fatal("controller manager error", zap.Error(err))
