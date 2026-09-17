@@ -10,6 +10,3 @@ resources:
 - registry_admin_role.yaml
 - registry_editor_role.yaml
 - registry_viewer_role.yaml
-- registrybackend_admin_role.yaml
-- registrybackend_editor_role.yaml
-- registrybackend_viewer_role.yaml

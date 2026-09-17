@@ -13,31 +13,34 @@ spec:
       containers:
       - name: manager
         env:
-        # With nip.io, use the dash-separated form (e.g. 10-0-0-5.nip.io); the
-        # dotted form mis-resolves for namespaces ending in a digit.
-        - name: BASE_DOMAIN
-          value: "REPLACE_WITH_YOUR_REAL_BASE_DOMAIN"
-        - name: STORAGE_CLASS
-          value: "REPLACE_WITH_YOUR_REAL_STORAGE_CLASS"
-        # The operator verifies Harbor's certificate, so this issuer's CA must
-        # be trusted by the manager pod. A publicly-rooted issuer needs nothing
-        # further; a private CA needs the mount below, or every reconcile stops
-        # at "waiting for Harbor to accept API requests".
-        - name: CERT_ISSUER
-          value: "REPLACE_WITH_YOUR_REAL_CLUSTER_ISSUER"
-        # Uncomment for a private CA. SSL_CERT_DIR takes a colon-separated list
-        # and replaces the default search path, so it must name the image's own
-        # directory too — dropping /etc/ssl/certs would leave the operator
-        # unable to verify the public Harbor chart repository.
+        # The central Harbor this operator drives. Clients push and pull at
+        # this address, so it must be the name they actually resolve.
+        - name: HARBOR_URL
+          value: "REPLACE_WITH_YOUR_REAL_HARBOR_URL"
+        # Secret in the operator's namespace holding Harbor credentials under
+        # the keys "username" and "password". Create it with:
+        #
+        #   kubectl -n registry-system create secret generic harbor-credentials \
+        #     --from-literal=username=<user> --from-literal=password=<pass>
+        #
+        #- name: HARBOR_CREDENTIALS_SECRET
+        #  value: "harbor-credentials"
+        #
+        # The operator verifies Harbor's certificate. A publicly-rooted
+        # certificate needs nothing further; one from a private CA needs the
+        # mount below, or every reconcile stops at "did not accept the
+        # configured credentials" and the pod stays NotReady.
+        #
+        # SSL_CERT_DIR takes a colon-separated list and REPLACES the default
+        # search path, so it must name the image's own directory too — dropping
+        # /etc/ssl/certs would leave the operator unable to verify anything else.
         #- name: SSL_CERT_DIR
         #  value: /etc/ssl/certs:/etc/harbor-ca
         #volumeMounts:
         #- name: harbor-ca
         #  mountPath: /etc/harbor-ca
         #  readOnly: true
-      # The Secret cert-manager writes for the issuer above, or any ConfigMap
-      # holding its CA. Merged by name with the volumes in
-      # config/manager/manager.yaml, so listing it here does not drop those.
+      # The Secret cert-manager writes for that CA, or any ConfigMap holding it.
       #volumes:
       #- name: harbor-ca
       #  secret:

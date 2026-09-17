@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -56,57 +55,5 @@ func TestSetReady_OnlyBumpsTransitionTimeOnActualStatusChange(t *testing.T) {
 	setReady(&conds, 3, metav1.ConditionTrue, reasonReady, "Harbor is running")
 	if conds[0].LastTransitionTime.Equal(&firstTransition) {
 		t.Error("LastTransitionTime did not change on a real status transition (False -> True)")
-	}
-}
-
-func TestGenPassword(t *testing.T) {
-	pass, err := genPassword()
-	if err != nil {
-		t.Fatalf("genPassword() error = %v", err)
-	}
-	if !strings.HasPrefix(pass, "Aa1") {
-		t.Errorf("genPassword() = %q, want prefix %q (guarantees upper/lower/digit for Harbor's complexity policy)", pass, "Aa1")
-	}
-	if len(pass) <= len("Aa1") {
-		t.Errorf("genPassword() = %q, too short — random suffix missing", pass)
-	}
-}
-
-func TestGenPassword_Unique(t *testing.T) {
-	seen := make(map[string]bool)
-	for i := 0; i < 100; i++ {
-		p, err := genPassword()
-		if err != nil {
-			t.Fatalf("genPassword() error = %v", err)
-		}
-		if seen[p] {
-			t.Fatalf("genPassword() produced a duplicate on iteration %d: %q", i, p)
-		}
-		seen[p] = true
-	}
-}
-
-func TestGenAlphaNum_ExactLength(t *testing.T) {
-	for _, n := range []int{16, 32, 1, 0} {
-		s, err := genAlphaNum(n)
-		if err != nil {
-			t.Fatalf("genAlphaNum(%d) error = %v", n, err)
-		}
-		if len(s) != n {
-			t.Errorf("genAlphaNum(%d) has length %d, want %d", n, len(s), n)
-		}
-	}
-}
-
-func TestGenAlphaNum_OnlyUsesAllowedCharacters(t *testing.T) {
-	const allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	s, err := genAlphaNum(64)
-	if err != nil {
-		t.Fatalf("genAlphaNum(64) error = %v", err)
-	}
-	for _, r := range s {
-		if !strings.ContainsRune(allowed, r) {
-			t.Fatalf("genAlphaNum(64) produced disallowed character %q in %q", r, s)
-		}
 	}
 }

@@ -2,26 +2,58 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	registryv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/registry/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/registry/internal/config"
+	"github.com/wso2/open-cloud-datacenter/crds/registry/internal/harbor"
+)
+
+const (
+	testHarborNS  = "registry-system"
+	testCredsName = "harbor-credentials"
+	testHarborURL = "https://registry.example.com"
 )
 
 // testLogger is a discarding logger for functions that take one.
 func testLogger() logr.Logger { return logr.Discard() }
+
+func newTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(s); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := registryv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add registry scheme: %v", err)
+	}
+	return s
+}
 
 func newRegistryReconciler(t *testing.T, fc client.WithWatch) *RegistryReconciler {
 	return &RegistryReconciler{
 		Client:   fc,
 		Scheme:   newTestScheme(t),
 		Recorder: events.NewFakeRecorder(64),
+		HarborCfg: config.HarborConfig{
+			URL:               testHarborURL,
+			CredentialsSecret: testCredsName,
+			Namespace:         testHarborNS,
+		},
 	}
 }
 
@@ -32,170 +64,150 @@ func registryIn(namespace, name string) *registryv1alpha1.Registry {
 	}
 }
 
+// harborCredsSecret is the Secret the operator authenticates to Harbor with.
+func harborCredsSecret(data map[string][]byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testCredsName, Namespace: testHarborNS},
+		Data:       data,
+	}
+}
+
 func newFakeClient(t *testing.T, objs ...client.Object) client.WithWatch {
 	return fake.NewClientBuilder().
 		WithScheme(newTestScheme(t)).
-		WithStatusSubresource(&registryv1alpha1.Registry{}, &registryv1alpha1.RegistryBackend{}).
+		WithStatusSubresource(&registryv1alpha1.Registry{}).
 		WithObjects(objs...).
 		Build()
 }
 
-func listBackends(t *testing.T, fc client.WithWatch) []registryv1alpha1.RegistryBackend {
-	t.Helper()
-	var l registryv1alpha1.RegistryBackendList
-	if err := fc.List(context.Background(), &l); err != nil {
-		t.Fatalf("list backends: %v", err)
-	}
-	return l.Items
-}
-
-// A namespace's first Registry has to bring Harbor into being, since nobody
-// creates a backend by hand.
-func TestBindBackend_FirstRegistryProvisionsHarbor(t *testing.T) {
-	reg := registryIn("acme-project-1", "web")
-	fc := newFakeClient(t, reg)
+// The operator authenticates with credentials from its own namespace, so a
+// tenant namespace is never read to reach Harbor.
+func TestHarborCredentials_ReadsFromTheOperatorNamespace(t *testing.T) {
+	fc := newFakeClient(t, harborCredsSecret(map[string][]byte{
+		config.HarborUsernameKey: []byte("robot$system"),
+		config.HarborPasswordKey: []byte("s3cret"),
+	}))
 	r := newRegistryReconciler(t, fc)
 
-	backend, res, err := r.bindBackend(context.Background(), reg)
+	user, pass, err := r.harborCredentials(context.Background())
 	if err != nil {
-		t.Fatalf("bindBackend() error = %v", err)
+		t.Fatalf("harborCredentials() error = %v", err)
 	}
-	if backend != nil {
-		t.Error("bindBackend() returned a backend on the pass that created it; Harbor is not ready yet")
-	}
-	if res.RequeueAfter == 0 {
-		t.Error("bindBackend() did not requeue while Harbor provisions")
-	}
-
-	backends := listBackends(t, fc)
-	if len(backends) != 1 {
-		t.Fatalf("got %d backends, want exactly 1", len(backends))
-	}
-	got := backends[0]
-	if got.Name != backendName {
-		t.Errorf("backend name = %q, want %q", got.Name, backendName)
-	}
-	if got.Namespace != "acme-project-1" {
-		t.Errorf("backend namespace = %q, want the Registry's own namespace", got.Namespace)
-	}
-	if got.Spec.Plan != "starter" {
-		t.Errorf("backend plan = %q, want the smallest plan", got.Spec.Plan)
-	}
-	if !got.Spec.Autoscale.Enabled {
-		t.Error("autoscale should be enabled on an operator-created backend")
+	if user != "robot$system" || pass != "s3cret" {
+		t.Errorf("harborCredentials() = %q/%q, want robot$system/s3cret", user, pass)
 	}
 }
 
-// The requirement this design exists for: a second Registry in a namespace that
-// already has Harbor must only add a project to it, never provision a second
-// deployment.
-func TestBindBackend_SecondRegistryInSameNamespaceReusesHarbor(t *testing.T) {
-	existing := readyBackend("acme-project-1")
-	reg := registryIn("acme-project-1", "api")
-	fc := newFakeClient(t, existing, registryIn("acme-project-1", "web"), reg)
-	r := newRegistryReconciler(t, fc)
-
-	backend, _, err := r.bindBackend(context.Background(), reg)
-	if err != nil {
-		t.Fatalf("bindBackend() error = %v", err)
+// A malformed or absent Secret must produce a message naming what is wrong.
+// Every Registry fails the same way for the same reason, so a vague error here
+// costs the same debugging effort once per Registry.
+func TestHarborCredentials_ErrorsNameTheProblem(t *testing.T) {
+	tests := []struct {
+		name    string
+		objs    []client.Object
+		wantIn  string
+	}{
+		{
+			name:   "secret missing entirely",
+			objs:   nil,
+			wantIn: testCredsName,
+		},
+		{
+			name:   "username key absent",
+			objs:   []client.Object{harborCredsSecret(map[string][]byte{config.HarborPasswordKey: []byte("p")})},
+			wantIn: config.HarborUsernameKey,
+		},
+		{
+			name:   "password key absent",
+			objs:   []client.Object{harborCredsSecret(map[string][]byte{config.HarborUsernameKey: []byte("u")})},
+			wantIn: config.HarborPasswordKey,
+		},
 	}
-	if backend == nil {
-		t.Fatal("bindBackend() returned nil for a Ready backend")
-	}
-	if backend.Namespace != "acme-project-1" || backend.Name != backendName {
-		t.Errorf("bound to %s/%s, want the namespace's existing Harbor", backend.Namespace, backend.Name)
-	}
-	if n := len(listBackends(t, fc)); n != 1 {
-		t.Errorf("got %d backends, want 1 — a second Registry must not provision another Harbor", n)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRegistryReconciler(t, newFakeClient(t, tt.objs...))
+			if _, _, err := r.harborCredentials(context.Background()); err == nil {
+				t.Fatal("harborCredentials() error = nil, want an error")
+			} else if !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("error = %v, want it to mention %q", err, tt.wantIn)
+			}
+		})
 	}
 }
 
-// The other half of the same rule: a different namespace is a different Harbor,
-// even when one is already running next door.
-func TestBindBackend_DifferentNamespaceGetsItsOwnHarbor(t *testing.T) {
-	fc := newFakeClient(t, readyBackend("acme-project-1"), registryIn("acme-project-2", "web"))
-	r := newRegistryReconciler(t, fc)
+// Readiness must report a Harbor the operator cannot authenticate to. Failing
+// to read credentials is exactly that case, and is reachable without a server.
+func TestCheckHarborAccess_ReportsUnusableCredentials(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+	if err := r.CheckHarborAccess(context.Background()); err == nil {
+		t.Fatal("CheckHarborAccess() error = nil, want an error when the credentials Secret is missing")
+	}
+}
 
-	reg := registryIn("acme-project-2", "web")
-	if _, _, err := r.bindBackend(context.Background(), reg); err != nil {
-		t.Fatalf("bindBackend() error = %v", err)
+// The cached result is what keeps a readiness probe polled every few seconds
+// from becoming steady load on Harbor.
+func TestCheckHarborAccess_ReusesTheCachedResult(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+
+	first := r.CheckHarborAccess(context.Background())
+	if first == nil {
+		t.Fatal("expected the first check to fail with no credentials Secret")
 	}
 
-	backends := listBackends(t, fc)
-	if len(backends) != 2 {
-		t.Fatalf("got %d backends, want 2 — each namespace gets its own Harbor", len(backends))
+	// Supplying the Secret now must NOT change the answer until the TTL lapses.
+	if err := r.Create(context.Background(), harborCredsSecret(map[string][]byte{
+		config.HarborUsernameKey: []byte("u"),
+		config.HarborPasswordKey: []byte("p"),
+	})); err != nil {
+		t.Fatalf("create credentials Secret: %v", err)
 	}
-	seen := map[string]bool{}
-	for _, b := range backends {
-		if b.Name != backendName {
-			t.Errorf("backend %s/%s does not use the fixed name %q", b.Namespace, b.Name, backendName)
+	second := r.CheckHarborAccess(context.Background())
+	if second == nil || second.Error() != first.Error() {
+		t.Errorf("CheckHarborAccess() = %v, want the cached %v; the cache is not being used", second, first)
+	}
+}
+
+// Project names are the Registry's own name, which is unique only within one
+// namespace. Two Registries in different namespaces resolve to the SAME Harbor
+// project — with one shared Harbor that is a cross-tenant collision, and it is
+// what project ownership verification has to close.
+func TestHarborProjectName_IsNotUniqueAcrossNamespaces(t *testing.T) {
+	a := harborProjectName(registryIn("team-a", "web"))
+	b := harborProjectName(registryIn("team-b", "web"))
+	if a != b {
+		t.Fatalf("harborProjectName() = %q and %q; expected both to be %q", a, b, "web")
+	}
+	if a != "web" {
+		t.Errorf("harborProjectName() = %q, want web", a)
+	}
+}
+
+func TestHarborProjectName_ReservedNamesAreRejected(t *testing.T) {
+	if !reservedProjectNames[harborProjectName(registryIn("acme-project-1", "library"))] {
+		t.Error(`a Registry named "library" resolves to Harbor's public built-in project and must be refused`)
+	}
+	if !reservedProjectNames[harborProjectName(registryIn("acme-project-1", "LIBRARY"))] {
+		t.Error("the reserved-name check must survive case folding, since harborProjectName lowercases")
+	}
+	for _, ok := range []string{"web", "api", "libraries", "my-library"} {
+		if reservedProjectNames[harborProjectName(registryIn("acme-project-1", ok))] {
+			t.Errorf("%q is not reserved and must be allowed", ok)
 		}
-		if seen[b.Namespace] {
-			t.Errorf("namespace %s has more than one backend", b.Namespace)
+	}
+}
+
+func TestProjectQuotaBytes(t *testing.T) {
+	for plan, wantGi := range map[string]int64{"starter": 5, "professional": 20, "enterprise": 100} {
+		got, err := projectQuotaBytes(plan)
+		if err != nil {
+			t.Fatalf("projectQuotaBytes(%q) error = %v", plan, err)
 		}
-		seen[b.Namespace] = true
-	}
-}
-
-// Isolation: the backend is addressed by the Registry's own namespace, so a
-// Registry can never resolve to another namespace's Harbor.
-func TestBindBackend_CannotReachAnotherNamespacesHarbor(t *testing.T) {
-	a := readyBackend("ns-a")
-	b := readyBackend("ns-b")
-	reg := registryIn("ns-b", "web")
-
-	fc := newFakeClient(t, a, b, reg)
-	r := newRegistryReconciler(t, fc)
-
-	backend, _, err := r.bindBackend(context.Background(), reg)
-	if err != nil {
-		t.Fatalf("bindBackend() error = %v", err)
-	}
-	if backend == nil {
-		t.Fatal("bindBackend() returned nil")
-	}
-	if backend.Namespace != "ns-b" {
-		t.Errorf("Registry in ns-b bound to Harbor in %q — cross-namespace binding", backend.Namespace)
-	}
-}
-
-// Two Registries in one namespace racing their first reconcile must still end
-// up with a single Harbor; the fixed name lets the API server settle it.
-func TestBindBackend_ConcurrentFirstRegistriesCreateOneHarbor(t *testing.T) {
-	regA := registryIn("acme-project-1", "web")
-	regB := registryIn("acme-project-1", "api")
-	fc := newFakeClient(t, regA, regB)
-	r := newRegistryReconciler(t, fc)
-
-	if _, _, err := r.bindBackend(context.Background(), regA); err != nil {
-		t.Fatalf("first bindBackend() error = %v", err)
-	}
-	// The second sees the object the first created and must adopt it rather than
-	// erroring on AlreadyExists.
-	if _, _, err := r.bindBackend(context.Background(), regB); err != nil {
-		t.Fatalf("second bindBackend() error = %v, want it to adopt the existing backend", err)
-	}
-	if n := len(listBackends(t, fc)); n != 1 {
-		t.Errorf("got %d backends, want exactly 1", n)
-	}
-}
-
-// Harbor treats a create of an existing project as success, so two Registries
-// resolving to one project name would silently share images. Each Harbor serves
-// one namespace, where Kubernetes already forbids duplicate names.
-func TestHarborProjectName_UniqueWithinANamespace(t *testing.T) {
-	if got := harborProjectName(registryIn("acme-project-1", "web")); got != "web" {
-		t.Errorf("harborProjectName() = %q, want web", got)
-	}
-
-	// Only same-namespace registries share a Harbor, so only they can collide.
-	seen := map[string]string{}
-	for _, name := range []string{"web", "api", "docs"} {
-		got := harborProjectName(registryIn("acme-project-1", name))
-		if prev, dup := seen[got]; dup {
-			t.Errorf("%s and %s collide on Harbor project %q", name, prev, got)
+		if want := wantGi * 1024 * 1024 * 1024; got != want {
+			t.Errorf("projectQuotaBytes(%q) = %d, want %d", plan, got, want)
 		}
-		seen[got] = name
+	}
+	if _, err := projectQuotaBytes("gigantic"); err == nil {
+		t.Error("projectQuotaBytes() error = nil, want an unknown plan rejected")
 	}
 }
 
@@ -223,57 +235,120 @@ func TestHandleDelete_RegistryWithoutProjectReleasesImmediately(t *testing.T) {
 	}
 }
 
-// registriesForBackend feeds the watch that wakes Registries when Harbor comes
-// up. It must cover the namespace's Registries and nothing else — including the
-// ones that have never bound, which are exactly the ones waiting on it.
-func TestRegistriesForBackend_OnlyItsOwnNamespace(t *testing.T) {
-	backend := readyBackend("ns-a")
-	fc := newFakeClient(t, backend,
-		registryIn("ns-a", "web"),
-		registryIn("ns-a", "api"),
-		registryIn("ns-b", "web"))
-	r := newRegistryReconciler(t, fc)
+// An unreachable Harbor must keep the finalizer rather than release it, or
+// images a user asked to destroy are silently left behind.
+func TestHandleDelete_KeepsFinalizerWhenHarborIsUnreachable(t *testing.T) {
+	reg := registryIn("acme-project-1", "web")
+	reg.Finalizers = []string{registryFinalizer}
+	reg.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	reg.Status.HarborProject = "web"
 
-	reqs := r.registriesForBackend(context.Background(), backend)
-	if len(reqs) != 2 {
-		t.Fatalf("got %d requests, want 2 (only ns-a's Registries)", len(reqs))
+	// No credentials Secret, so the Harbor client cannot even be built.
+	r := newRegistryReconciler(t, newFakeClient(t, reg))
+
+	res, err := r.handleDelete(context.Background(), reg, testLogger())
+	if err == nil {
+		t.Fatal("handleDelete() error = nil, want the failure surfaced for backoff")
 	}
-	for _, req := range reqs {
-		if req.Namespace != "ns-a" {
-			t.Errorf("enqueued %s, which is not served by the ns-a backend", req.NamespacedName)
+	if res.RequeueAfter == 0 {
+		t.Error("handleDelete() did not requeue; an unreachable Harbor must be retried")
+	}
+	found := false
+	for _, f := range reg.Finalizers {
+		if f == registryFinalizer {
+			found = true
 		}
+	}
+	if !found {
+		t.Error("finalizer was removed while the Harbor project may still exist")
 	}
 }
 
-// Harbor ships a built-in project named "library" and it is PUBLIC.
-// CreateHarborProject treats 409 as success, so without a guard a Registry
-// named "library" would adopt that project, mint a push robot against it, and
-// report Ready — publishing the namespace's images world-readable. The project
-// name is the Registry's own name, so this is a name a user can just pick.
-func TestHarborProjectName_ReservedNamesAreRejected(t *testing.T) {
-	if !reservedProjectNames[harborProjectName(registryIn("acme-project-1", "library"))] {
-		t.Error(`a Registry named "library" resolves to Harbor's public built-in project and must be refused`)
-	}
-	if !reservedProjectNames[harborProjectName(registryIn("acme-project-1", "LIBRARY"))] {
-		t.Error("the reserved-name check must survive case folding, since harborProjectName lowercases")
-	}
-	for _, ok := range []string{"web", "api", "libraries", "my-library"} {
-		if reservedProjectNames[harborProjectName(registryIn("acme-project-1", ok))] {
-			t.Errorf("%q is not reserved and must be allowed", ok)
+// harborStub serves the project lookup claimProjectName makes.
+func harborStub(t *testing.T, status int) *harbor.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = w.Write([]byte(`{"project_id":7}`))
 		}
+	}))
+	t.Cleanup(srv.Close)
+	return harbor.NewClient(srv.URL, "u", "p")
+}
+
+// Project names are global: the first Registry to claim one holds it, and a
+// second Registry anywhere must be refused rather than share the project.
+func TestClaimProjectName_RefusesANameAlreadyInUse(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cr := registryIn("team-b", "web")
+
+	err := r.claimProjectName(context.Background(), harborStub(t, http.StatusOK), cr, "web")
+	if err == nil {
+		t.Fatal("claimProjectName() error = nil, want the taken name refused")
+	}
+	if !errors.Is(err, errProjectNameTaken) {
+		t.Errorf("error = %v, want it to wrap errProjectNameTaken so the caller can fail terminally", err)
+	}
+	if !strings.Contains(err.Error(), "web") {
+		t.Errorf("error = %v, want it to name the conflicting project", err)
+	}
+	if !strings.Contains(err.Error(), "global") {
+		t.Errorf("error = %v, want it to say names are global, or the refusal reads as a bug", err)
 	}
 }
 
-// readyBackend builds a namespace's backend in the state a Registry can bind to.
-func readyBackend(namespace string) *registryv1alpha1.RegistryBackend {
-	return &registryv1alpha1.RegistryBackend{
-		ObjectMeta: metav1.ObjectMeta{Name: backendName, Namespace: namespace},
-		Spec:       registryv1alpha1.RegistryBackendSpec{Plan: "starter"},
-		Status: registryv1alpha1.RegistryBackendStatus{
-			Phase:           phaseReady,
-			EffectivePlan:   "starter",
-			AdminSecretName: backendName + "-harbor-admin",
-			RegistryURL:     "https://registry." + namespace + ".example.com",
-		},
+func TestClaimProjectName_AllowsAFreeName(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cr := registryIn("team-a", "web")
+
+	if err := r.claimProjectName(context.Background(), harborStub(t, http.StatusNotFound), cr, "web"); err != nil {
+		t.Errorf("claimProjectName() error = %v, want a free name accepted", err)
+	}
+}
+
+// Without this the second reconcile would reject the project the first one
+// created, and no Registry would ever reach Ready.
+func TestClaimProjectName_SkipsTheCheckForANameItAlreadyHolds(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cr := registryIn("team-a", "web")
+	cr.Status.HarborProject = "web"
+
+	// Harbor would report the project exists; holding the claim must win.
+	if err := r.claimProjectName(context.Background(), harborStub(t, http.StatusOK), cr, "web"); err != nil {
+		t.Errorf("claimProjectName() error = %v, want the Registry's own project accepted", err)
+	}
+}
+
+// A Harbor that cannot answer says nothing about whether the name is free, so
+// it must be retryable rather than reported to the user as "name taken".
+func TestClaimProjectName_UnreachableHarborIsNotReportedAsTaken(t *testing.T) {
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cr := registryIn("team-a", "web")
+
+	err := r.claimProjectName(context.Background(), harborStub(t, http.StatusInternalServerError), cr, "web")
+	if err == nil {
+		t.Fatal("claimProjectName() error = nil, want the failure surfaced")
+	}
+	if errors.Is(err, errProjectNameTaken) {
+		t.Error("an unreachable Harbor was reported as a taken name; this would fail the Registry terminally instead of retrying")
+	}
+}
+
+func TestValidateProjectName(t *testing.T) {
+	valid := []string{"web", "my-registry", "my.registry", "my_registry", "a1", "team-a.web"}
+	for _, name := range valid {
+		if err := validateProjectName(name); err != nil {
+			t.Errorf("validateProjectName(%q) error = %v, want it accepted", name, err)
+		}
+	}
+
+	// "a--b" is a legal Kubernetes object name but not a legal Harbor project
+	// name, which is why this check is not a formality.
+	invalid := []string{"a--b", "-web", "web-", ".web", "Web", "", strings.Repeat("a", maxProjectNameLen+1)}
+	for _, name := range invalid {
+		if err := validateProjectName(name); err == nil {
+			t.Errorf("validateProjectName(%q) error = nil, want it rejected", name)
+		}
 	}
 }

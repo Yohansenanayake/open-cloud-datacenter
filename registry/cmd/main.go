@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,7 +16,6 @@ import (
 	registryv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/registry/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/registry/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/registry/internal/controller"
-	"github.com/wso2/open-cloud-datacenter/crds/registry/internal/helm"
 )
 
 var scheme = runtime.NewScheme()
@@ -25,7 +26,7 @@ func init() {
 	utilruntime.Must(registryv1alpha1.AddToScheme(scheme))
 }
 
-// main starts the controller manager and both reconcilers.
+// main starts the controller manager and the Registry reconciler.
 func main() {
 	logger, _ := zap.NewProduction()
 	defer func() { _ = logger.Sync() }()
@@ -34,11 +35,6 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Fatal("failed to load config", zap.Error(err))
-	}
-
-	helmDeployer, err := helm.NewDeployer(cfg.Helm, logger)
-	if err != nil {
-		logger.Fatal("failed to create helm deployer", zap.Error(err))
 	}
 
 	// Leader election is ON so that running multiple replicas yields exactly
@@ -65,33 +61,30 @@ func main() {
 		logger.Fatal("failed to create controller manager", zap.Error(err))
 	}
 
-	if err := (&controller.RegistryBackendReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("registrybackend"),
-		Helm:     helmDeployer,
-		HelmCfg:  cfg.Helm,
-	}).SetupWithManager(mgr); err != nil {
-		logger.Fatal("failed to setup RegistryBackend controller", zap.Error(err))
+	registryReconciler := &controller.RegistryReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("registry"),
+		HarborCfg: cfg.Harbor,
 	}
-
-	if err := (&controller.RegistryReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("registry"),
-		HelmCfg:  cfg.Helm,
-	}).SetupWithManager(mgr); err != nil {
+	if err := registryReconciler.SetupWithManager(mgr); err != nil {
 		logger.Fatal("failed to setup Registry controller", zap.Error(err))
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Fatal("failed to add healthz check", zap.Error(err))
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	// Readiness reports whether the central Harbor is reachable and accepts the
+	// operator's credentials, so an unusable Harbor surfaces as a pod that is
+	// not Ready rather than only in logs. It is deliberately not a liveness
+	// check: retrying is correct behaviour, and a restart would fix nothing.
+	if err := mgr.AddReadyzCheck("harbor", func(req *http.Request) error {
+		return registryReconciler.CheckHarborAccess(req.Context())
+	}); err != nil {
 		logger.Fatal("failed to add readyz check", zap.Error(err))
 	}
 
-	logger.Info("starting registry operator")
+	logger.Info("starting registry operator", zap.String("harbor", cfg.Harbor.URL))
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		logger.Fatal("controller manager error", zap.Error(err))
 	}
