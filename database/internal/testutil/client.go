@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubevirtv1 "kubevirt.io/api/core/v1"
@@ -37,6 +38,7 @@ func NewScheme(t testing.TB) *runtime.Scheme {
 		kubevirtv1.AddToScheme,
 		corev1.AddToScheme,
 		monitoringv1.AddToScheme,
+		coordinationv1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			t.Fatalf("add scheme: %v", err)

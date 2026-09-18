@@ -96,6 +96,9 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// Snapshot-hold/restore-hold coordination (internal/backup) — plain Lease
+// objects, no custom coordination CRD (yohan-docs/backups/harvester-vm-backup/).
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main entry point called by controller-runtime.
 func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
