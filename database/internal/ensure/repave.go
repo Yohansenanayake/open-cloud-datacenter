@@ -27,10 +27,17 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/backup"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/catalog"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
+
+// repaveSnapshotHoldHolder identifies repave as a holder of the snapshot-hold
+// lease (backup.SnapshotHoldName) — the same lease a snapshot creation
+// acquires, so the two exclude each other through one shared lock rather
+// than two independent mechanisms (yohan-docs/backups/harvester-vm-backup/).
+const repaveSnapshotHoldHolder = "repave"
 
 type repaveStep struct{ Dependencies }
 
@@ -197,6 +204,22 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 		return Satisfied()
 	}
 
+	// Acquire the snapshot-hold lease before touching the VM or its OS disk.
+	// Idempotent across passes: a repave already holding it just confirms
+	// that below. If a snapshot holds it instead, wait rather than racing a
+	// Harvester VirtualMachineBackup that may be reading this VM's disks
+	// right now.
+	acquired, err := backup.Acquire(ctx, r.Client, inst.Namespace, backup.SnapshotHoldName(inst.UID), repaveSnapshotHoldHolder, ownerRefFor(inst), nil)
+	if err != nil {
+		return Transient(err)
+	}
+	if !acquired.Acquired {
+		msg := fmt.Sprintf("waiting for an in-progress snapshot (%s) to finish before repaving", acquired.HolderIdentity)
+		inst.SetCurrentCondition(dbaasv1.ConditionRepaveInProgress, metav1.ConditionTrue, dbaasv1.ReasonRepaveWaitingForSnapshotHold, msg)
+		inst.SetCurrentCondition(dbaasv1.ConditionDatabaseReady, metav1.ConditionFalse, dbaasv1.ReasonRepaveWaitingForSnapshotHold, msg)
+		return PendingAfter(dbaasv1.ReasonRepaveWaitingForSnapshotHold, msg, powerRequeue)
+	}
+
 	var vm kubevirtv1.VirtualMachine
 	if err := r.Get(ctx, types.NamespacedName{Namespace: inst.Namespace, Name: vmNameFor(inst)}, &vm); err != nil {
 		return Transient(err)
@@ -257,6 +280,15 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 
 	if res, stop := r.regenerateCloudInit(ctx, inst, engineVersion); stop {
 		return res
+	}
+
+	// The disruptive part of repave is done — release the snapshot-hold
+	// lease now rather than waiting for full readiness. Kept held across
+	// the Transient/Pending returns above on purpose: releasing on a
+	// transient hiccup only to immediately re-acquire on retry would open a
+	// race window for no benefit.
+	if err := backup.Release(ctx, r.Client, inst.Namespace, backup.SnapshotHoldName(inst.UID), repaveSnapshotHoldHolder); err != nil {
+		return Transient(err)
 	}
 
 	// Record the trigger as handled and report Pending; the power step
