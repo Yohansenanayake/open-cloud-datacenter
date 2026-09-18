@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -40,6 +41,8 @@ import (
 // masterUsername, port, storageType) are compared post-defaulting in
 // immutableDrift(), so a raw CEL rule on them would be stricter than that
 // check — see immutableDrift's doc comment.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.backup) == has(oldSelf.backup)",message="backup cannot be added or removed after creation"
 type DBInstanceSpec struct {
 	// DBInstanceClass maps to VM CPU/RAM. e.g. "db.t3.medium", "db.m5.large".
 	// Mutable: changing the class on an Available instance resizes the VM.
@@ -187,7 +190,86 @@ type DBInstanceSpec struct {
 	// NOT YET IMPLEMENTED — not propagated to child resources or dashboards.
 	// +optional
 	Tags map[string]string `json:"tags,omitempty"`
+
+	// Backup opts the instance into backup capability: automated daily
+	// snapshots (configurable below) and named manual snapshots via
+	// DBSnapshot. Its presence is immutable after creation — see the
+	// XValidation rule on DBInstanceSpec above — but its contents remain
+	// editable. Omit this field entirely for no backup capability at all;
+	// manual snapshot requests against such an instance are rejected.
+	// See yohan-docs/backups/harvester-vm-backup/.
+	// +optional
+	Backup *BackupSpec `json:"backup,omitempty"`
+
+	// RestoreFrom names the DBSnapshot this instance is restored from. Set
+	// only at creation; immutable afterward — there is no field left to
+	// change that would make a second restore attempt meaningfully
+	// different (a terminally failed restore is retried by creating a new
+	// DBInstance, not by editing this one).
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="restoreFrom is immutable after creation"
+	RestoreFrom *RestoreFromSpec `json:"restoreFrom,omitempty"`
 }
+
+// BackupSpec configures backup capability for a DBInstance. Continuous WAL
+// archiving is always enabled whenever Backup is non-nil, independent of
+// Automated.Enabled — there is no separate WAL on/off field.
+type BackupSpec struct {
+	// Automated controls scheduled daily snapshots. Defaulted when omitted
+	// from an explicitly-supplied backup object.
+	// +optional
+	// +kubebuilder:default={}
+	Automated AutomatedBackupSpec `json:"automated,omitempty"`
+}
+
+// AutomatedBackupSpec controls the daily snapshot schedule and retention.
+type AutomatedBackupSpec struct {
+	// Enabled starts/stops new daily snapshots and new automatic pruning.
+	// Existing retained snapshots, manual snapshots, and WAL archiving are
+	// unaffected by disabling this.
+	// +optional
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// RetainCount is how many of the newest successful automated snapshots
+	// to keep; older ones are pruned. A restore hold can temporarily keep
+	// an otherwise-prunable snapshot past this count.
+	// +optional
+	// +kubebuilder:default=7
+	// +kubebuilder:validation:Minimum=1
+	RetainCount int `json:"retainCount,omitempty"`
+
+	// PreferredWindowUTC is the UTC window, e.g. "02:00-03:00", the daily
+	// snapshot is scheduled inside. The controller derives one stable
+	// minute inside the window per instance (hashed from the instance
+	// UID) rather than starting every instance at the window's edge.
+	// +optional
+	// +kubebuilder:default="02:00-03:00"
+	// +kubebuilder:validation:Pattern=`^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`
+	PreferredWindowUTC string `json:"preferredWindowUTC,omitempty"`
+}
+
+// RestoreFromSpec names the snapshot a new DBInstance recovers from, and how.
+type RestoreFromSpec struct {
+	// SnapshotRef names a completed DBSnapshot in the same namespace. There
+	// is no automatic "latest" selection — every restore names one exactly.
+	// +required
+	SnapshotRef corev1.LocalObjectReference `json:"snapshotRef"`
+
+	// Mode selects the recovery mechanism. Snapshot (default) uses only the
+	// snapshot's own captured local WAL and works after the source instance
+	// is deleted. AvailableWAL additionally replays continuous WAL from the
+	// source's archive and is not available in this release.
+	// +optional
+	// +kubebuilder:default=Snapshot
+	// +kubebuilder:validation:Enum=Snapshot
+	Mode string `json:"mode,omitempty"`
+}
+
+const (
+	// RestoreFromSpec.Mode values.
+	RestoreModeSnapshot = "Snapshot"
+)
 
 // SecretKeyRef points to a single key within a K8s Secret.
 type SecretKeyRef struct {
@@ -311,7 +393,54 @@ type DBInstanceStatus struct {
 	// RunStrategyAlways KubeVirt would otherwise restart the VM forever).
 	// +optional
 	RecentUnplannedRestarts int `json:"recentUnplannedRestarts,omitempty"`
+
+	// Restore is populated only on a DBInstance created with RestoreFrom set.
+	// Once Stage is RestoreStageFailed it is terminal and permanent: this
+	// instance is never retried in place (RestoreFrom is immutable), and
+	// ordinary reconciliation must not create or recreate its VM or PVC for
+	// any reason, including spec.running.
+	// +optional
+	Restore *RestoreStatus `json:"restore,omitempty"`
 }
+
+// RestoreStatus records the controller-observed progress of a restore. It
+// intentionally excludes percentage progress, recovered WAL position, and
+// detailed guest errors — those never cross into Kubernetes status. Reaching
+// RestoreStageFailed does not release resources; that is a rebuild the
+// terminal-failure cleanup path performs first (deletion protection).
+type RestoreStatus struct {
+	// Stage is the controller-observed restore progress. It is a projection
+	// of which step is not yet satisfied, recomputed every reconcile — never
+	// a stored control variable that reconcile logic branches on.
+	// +optional
+	Stage string `json:"stage,omitempty"`
+
+	// Reason is a stable, machine-readable explanation for the current
+	// stage, particularly RestoreStageFailed (e.g. a timeout or storage
+	// error identifier).
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// SnapshotUID is the UID of the DBSnapshot this restore resolved
+	// spec.restoreFrom.snapshotRef to, captured once at admission so a
+	// later rename or recreation of the same-named snapshot can never
+	// silently redirect an in-progress restore.
+	// +optional
+	SnapshotUID string `json:"snapshotUID,omitempty"`
+
+	// Mode mirrors spec.restoreFrom.mode at admission time.
+	// +optional
+	Mode string `json:"mode,omitempty"`
+}
+
+const (
+	// RestoreStatus.Stage values.
+	RestoreStagePreparing        = "Preparing"
+	RestoreStageRestoringVolume  = "RestoringVolume"
+	RestoreStageStartingDatabase = "StartingDatabase"
+	RestoreStageSucceeded        = "Succeeded"
+	RestoreStageFailed           = "Failed"
+)
 
 // AppliedSpec records the subset of DBInstanceSpec fields that are
 // immutable after creation in this controller's implementation. Mutable
