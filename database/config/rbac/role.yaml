@@ -63,6 +63,7 @@ rules:
   - dbaas.opencloud.wso2.com
   resources:
   - dbinstances
+  - dbsnapshots
   verbs:
   - create
   - delete
@@ -75,12 +76,14 @@ rules:
   - dbaas.opencloud.wso2.com
   resources:
   - dbinstances/finalizers
+  - dbsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
   - dbaas.opencloud.wso2.com
   resources:
   - dbinstances/status
+  - dbsnapshots/status
   verbs:
   - get
   - patch

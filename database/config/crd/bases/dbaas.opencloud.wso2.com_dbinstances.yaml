@@ -98,6 +98,48 @@ spec:
                 x-kubernetes-validations:
                 - message: allocatedStorage can only grow; shrinking is not supported
                   rule: self >= oldSelf
+              backup:
+                description: |-
+                  Backup opts the instance into backup capability: automated daily
+                  snapshots (configurable below) and named manual snapshots via
+                  DBSnapshot. Its presence is immutable after creation — see the
+                  XValidation rule on DBInstanceSpec above — but its contents remain
+                  editable. Omit this field entirely for no backup capability at all;
+                  manual snapshot requests against such an instance are rejected.
+                  See yohan-docs/backups/harvester-vm-backup/.
+                properties:
+                  automated:
+                    default: {}
+                    description: |-
+                      Automated controls scheduled daily snapshots. Defaulted when omitted
+                      from an explicitly-supplied backup object.
+                    properties:
+                      enabled:
+                        default: true
+                        description: |-
+                          Enabled starts/stops new daily snapshots and new automatic pruning.
+                          Existing retained snapshots, manual snapshots, and WAL archiving are
+                          unaffected by disabling this.
+                        type: boolean
+                      preferredWindowUTC:
+                        default: 02:00-03:00
+                        description: |-
+                          PreferredWindowUTC is the UTC window, e.g. "02:00-03:00", the daily
+                          snapshot is scheduled inside. The controller derives one stable
+                          minute inside the window per instance (hashed from the instance
+                          UID) rather than starting every instance at the window's edge.
+                        pattern: ^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$
+                        type: string
+                      retainCount:
+                        default: 7
+                        description: |-
+                          RetainCount is how many of the newest successful automated snapshots
+                          to keep; older ones are pruned. A restore hold can temporarily keep
+                          an otherwise-prunable snapshot past this count.
+                        minimum: 1
+                        type: integer
+                    type: object
+                type: object
               dbInstanceClass:
                 description: |-
                   DBInstanceClass maps to VM CPU/RAM. e.g. "db.t3.medium", "db.m5.large".
@@ -212,6 +254,46 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
+              restoreFrom:
+                description: |-
+                  RestoreFrom names the DBSnapshot this instance is restored from. Set
+                  only at creation; immutable afterward — there is no field left to
+                  change that would make a second restore attempt meaningfully
+                  different (a terminally failed restore is retried by creating a new
+                  DBInstance, not by editing this one).
+                properties:
+                  mode:
+                    default: Snapshot
+                    description: |-
+                      Mode selects the recovery mechanism. Snapshot (default) uses only the
+                      snapshot's own captured local WAL and works after the source instance
+                      is deleted. AvailableWAL additionally replays continuous WAL from the
+                      source's archive and is not available in this release.
+                    enum:
+                    - Snapshot
+                    type: string
+                  snapshotRef:
+                    description: |-
+                      SnapshotRef names a completed DBSnapshot in the same namespace. There
+                      is no automatic "latest" selection — every restore names one exactly.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - snapshotRef
+                type: object
+                x-kubernetes-validations:
+                - message: restoreFrom is immutable after creation
+                  rule: self == oldSelf
               running:
                 default: true
                 description: |-
@@ -286,6 +368,9 @@ spec:
             - dbInstanceClass
             - networkRef
             type: object
+            x-kubernetes-validations:
+            - message: backup cannot be added or removed after creation
+              rule: has(self.backup) == has(oldSelf.backup)
           status:
             description: DBInstanceStatus defines the observed state of a DBInstance.
             properties:
@@ -562,6 +647,37 @@ spec:
                   RestartCount is the cumulative number of VM restarts detected or
                   initiated by the controller liveness loop (both planned and unplanned).
                 type: integer
+              restore:
+                description: |-
+                  Restore is populated only on a DBInstance created with RestoreFrom set.
+                  Once Stage is RestoreStageFailed it is terminal and permanent: this
+                  instance is never retried in place (RestoreFrom is immutable), and
+                  ordinary reconciliation must not create or recreate its VM or PVC for
+                  any reason, including spec.running.
+                properties:
+                  mode:
+                    description: Mode mirrors spec.restoreFrom.mode at admission time.
+                    type: string
+                  reason:
+                    description: |-
+                      Reason is a stable, machine-readable explanation for the current
+                      stage, particularly RestoreStageFailed (e.g. a timeout or storage
+                      error identifier).
+                    type: string
+                  snapshotUID:
+                    description: |-
+                      SnapshotUID is the UID of the DBSnapshot this restore resolved
+                      spec.restoreFrom.snapshotRef to, captured once at admission so a
+                      later rename or recreation of the same-named snapshot can never
+                      silently redirect an in-progress restore.
+                    type: string
+                  stage:
+                    description: |-
+                      Stage is the controller-observed restore progress. It is a projection
+                      of which step is not yet satisfied, recomputed every reconcile — never
+                      a stored control variable that reconcile logic branches on.
+                    type: string
+                type: object
             type: object
         type: object
     served: true
