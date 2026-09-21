@@ -801,6 +801,115 @@ func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
 	return ignoreNotFound(c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{}))
 }
 
+// CreateVMBackup requests a durable Harvester backup of sourceVMName. Always
+// spec.type: Backup — Snapshot is local-only and must never be used for this
+// design (yohan-docs/backups/harvester-vm-backup/).
+func (c *TypedClient) CreateVMBackup(ctx context.Context, ns, name, sourceVMName string, owner *metav1.OwnerReference) error {
+	vmBackup := &harvesterhciov1beta1.VirtualMachineBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       ns,
+			OwnerReferences: ownerRefSlice(owner),
+		},
+		Spec: harvesterhciov1beta1.VirtualMachineBackupSpec{
+			Source: corev1.TypedLocalObjectReference{
+				APIGroup: ptr(kubevirtv1.SchemeGroupVersion.Group),
+				Kind:     kubevirtv1.VirtualMachineGroupVersionKind.Kind,
+				Name:     sourceVMName,
+			},
+			Type: harvesterhciov1beta1.Backup,
+		},
+	}
+	_, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Create(ctx, vmBackup, metav1.CreateOptions{})
+	return ignoreAlreadyExists(err)
+}
+
+// GetVMBackupStatus returns the translated status of a VirtualMachineBackup.
+// dataVolumePVCName identifies which volume is the PostgreSQL data volume —
+// a VirtualMachineBackup covers every volume on the source VM, but DBaaS
+// restore only ever needs this one.
+func (c *TypedClient) GetVMBackupStatus(ctx context.Context, ns, name, dataVolumePVCName string) (VMBackupStatus, error) {
+	vmBackup, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return VMBackupStatus{}, err
+	}
+
+	status := VMBackupStatus{
+		ReadyToUse: vmBackup.Status.ReadyToUse != nil && *vmBackup.Status.ReadyToUse,
+	}
+	if vmBackup.Status.Error != nil && vmBackup.Status.Error.Message != nil {
+		status.ErrorMessage = *vmBackup.Status.Error.Message
+	}
+	for _, vb := range vmBackup.Status.VolumeBackups {
+		if vb.PersistentVolumeClaim.ObjectMeta.Name != dataVolumePVCName {
+			continue
+		}
+		if vb.Name != nil {
+			status.DataVolumeSnapshotName = *vb.Name
+		}
+		break
+	}
+	return status, nil
+}
+
+// DeleteVMBackup deletes a VirtualMachineBackup by name. Idempotent; NotFound
+// is success.
+func (c *TypedClient) DeleteVMBackup(ctx context.Context, ns, name string) error {
+	return ignoreNotFound(c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Delete(ctx, name, metav1.DeleteOptions{}))
+}
+
+// restoreVolumeSnapshotAPIGroup is the CSI external-snapshotter API group a
+// restore PVC's dataSource references. Not vendored as a typed dependency —
+// a TypedLocalObjectReference only needs the group/kind/name strings, and
+// pulling in the snapshot clientset just for that would be unjustified for
+// what's otherwise a plain Kubernetes PVC create.
+const restoreVolumeSnapshotAPIGroup = "snapshot.storage.k8s.io"
+
+// CreateRestorePVC creates a PVC that restores data from an existing
+// VolumeSnapshot — the same same-namespace mechanism Harvester's own restore
+// controller uses internally (getDataSourceSameNs), without going through
+// VirtualMachineRestore. Idempotent: AlreadyExists is treated as success.
+// Matches the data disk's existing shape (ReadWriteMany, Block) so the
+// restored PVC attaches to a new VM the same way an ordinary one would.
+func (c *TypedClient) CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, owner *metav1.OwnerReference) error {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            pvcName,
+			Namespace:       ns,
+			OwnerReferences: ownerRefSlice(owner),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			VolumeMode:  ptr(corev1.PersistentVolumeBlock),
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", sizeGB)),
+				},
+			},
+			StorageClassName: &storageClassName,
+			DataSource: &corev1.TypedLocalObjectReference{
+				APIGroup: ptr(restoreVolumeSnapshotAPIGroup),
+				Kind:     "VolumeSnapshot",
+				Name:     volumeSnapshotName,
+			},
+		},
+	}
+	_, err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Create(ctx, pvc, metav1.CreateOptions{})
+	return ignoreAlreadyExists(err)
+}
+
+// GetPVCPhase returns a PVC's current phase. Creating a restore PVC is
+// instant; Longhorn actually copying the snapshot's data into it is not —
+// callers must wait for PersistentVolumeClaimBound, not just for creation to
+// succeed.
+func (c *TypedClient) GetPVCPhase(ctx context.Context, ns, name string) (corev1.PersistentVolumeClaimPhase, error) {
+	pvc, err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return pvc.Status.Phase, nil
+}
+
 func ptr[T any](v T) *T {
 	return &v
 }
