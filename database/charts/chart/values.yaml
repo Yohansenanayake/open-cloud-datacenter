@@ -16,13 +16,15 @@ manager:
   replicas: 1
 
   image:
-    ## Experiment default (P002) — points at the image just built from this
-    ## exact source and pushed to a personal GHCR for chart/Addon testing.
-    ## Replace with the real org registry path before this chart is published.
-    repository: ghcr.io/tgcjananga/dbaas-operator
+    ## Target WSO2-owned registry (my-docs/release/D001 #1 — namespace
+    ## ownership/publishing access not yet confirmed). For local testing
+    ## against your own GHCR before that access exists, override with
+    ## --set manager.image.repository=... --set manager.image.tag=...
+    ## rather than editing this default.
+    repository: ghcr.io/wso2/dbaas-operator
     ## Image tag (defaults to Chart.appVersion if not set)
     ##
-    tag: "0.1.0-experiment.1"
+    tag: ""
     pullPolicy: IfNotPresent
 
   ## Arguments

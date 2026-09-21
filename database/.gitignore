@@ -10,9 +10,10 @@ dist/
 # packaged chart archives (helm package output) — never committed, only published
 *.tgz
 
-# Local experiment Addon manifest — points at a personal GHCR
-# namespace, not the real org registry. A real, scrubbed manifest belongs at
-# this same path eventually ; this ignore rule must be removed when
-# that real version is ready to commit, not bypassed with a force-add.
-deploy/harvester-addon/dbaas-operator/dbaas-operator.yaml
+# Personal-registry testing artifacts — never commit a real GHCR namespace.
+# Committed defaults (chart values.yaml, the Addon example manifest) stay
+# generic/placeholder; use one of these gitignored patterns for your own
+# testing
+*.local.yaml
+config/overlays/dev-*/
 

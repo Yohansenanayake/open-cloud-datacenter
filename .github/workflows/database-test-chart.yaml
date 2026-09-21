@@ -12,11 +12,9 @@ on:
       - 'database/**'
       - '.github/workflows/database-test-chart.yaml'
   push:
-    # NOTE: mirrors keyvault-operator.yaml's convention. The actual target
-    # branch for the database chart PR itself is still an open decision
-    # (my-docs/release/P002_experiment-to-merge-plan.md §5) — update this
-    # once that's settled if it differs from `operators`.
-    branches: [helm-release]  #change as operators brnach when the PR is merged
+    # NOTE: mirrors keyvault-operator.yaml's convention. Target branch decided
+    # 2026-09-21 (my-docs/release/D001_dbaas-release-process-discussion.md).
+    branches: [operators]
     paths:
       - 'database/**'
       - '.github/workflows/database-test-chart.yaml'
