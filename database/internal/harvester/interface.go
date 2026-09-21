@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -89,6 +90,49 @@ type ClientInterface interface {
 	// before comparing against the catalog. Returns ("", nil), not an
 	// error, if the image no longer exists.
 	ResolveVMImageDisplayName(ctx context.Context, ns, name string) (string, error)
+
+	// CreateVMBackup requests a durable Harvester backup of sourceVMName.
+	// Always spec.type: Backup (durable, uploaded externally) — Snapshot is
+	// local-only and must never be used for this design. Idempotent:
+	// AlreadyExists is treated as success.
+	CreateVMBackup(ctx context.Context, ns, name, sourceVMName string, owner *metav1.OwnerReference) error
+
+	// GetVMBackupStatus returns the translated status of a VirtualMachineBackup.
+	// dataVolumePVCName identifies which of the backup's volumes is the
+	// PostgreSQL data volume — a VirtualMachineBackup covers every volume on
+	// the source VM, but DBaaS restore only ever needs this one.
+	GetVMBackupStatus(ctx context.Context, ns, name, dataVolumePVCName string) (VMBackupStatus, error)
+
+	// DeleteVMBackup deletes a VirtualMachineBackup by name. Idempotent;
+	// NotFound is success.
+	DeleteVMBackup(ctx context.Context, ns, name string) error
+
+	// CreateRestorePVC creates a PVC that restores data from an existing
+	// VolumeSnapshot — the same same-namespace mechanism Harvester's own
+	// restore controller uses internally, without going through
+	// VirtualMachineRestore (which manages a whole VM's identity/lifecycle,
+	// not just its data — see yohan-docs/backups/harvester-vm-backup/).
+	// Idempotent: AlreadyExists is treated as success. Does not wait for
+	// binding — see GetPVCPhase.
+	CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, owner *metav1.OwnerReference) error
+
+	// GetPVCPhase returns a PVC's current phase (Pending/Bound/Lost) —
+	// creating a restore PVC is instant, but Longhorn actually copying the
+	// snapshot's data into it is not; callers must wait for Bound, not just
+	// for creation to succeed.
+	GetPVCPhase(ctx context.Context, ns, name string) (corev1.PersistentVolumeClaimPhase, error)
+}
+
+// VMBackupStatus is the provider-neutral status of a VirtualMachineBackup.
+// Harvester API types stay behind ClientInterface.
+type VMBackupStatus struct {
+	ReadyToUse bool
+	// ErrorMessage is empty unless Harvester recorded a backup failure.
+	ErrorMessage string
+	// DataVolumeSnapshotName is the VolumeSnapshot object name backing the
+	// PostgreSQL data volume specifically, empty if the backup isn't ready
+	// yet or the requested PVC name isn't among its volumes.
+	DataVolumeSnapshotName string
 }
 
 // ResolvedVMImage contains the provider-neutral image fields needed to build a

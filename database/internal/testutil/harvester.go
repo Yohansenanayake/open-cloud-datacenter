@@ -20,6 +20,9 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
@@ -93,6 +96,45 @@ type StubHarvester struct {
 	// not created yet / nothing to reconcile against".
 	OSDiskPVCName    string
 	OSDiskPVCNameErr error
+
+	CreateVMBackupErr    error
+	VMBackupStatus       harvester.VMBackupStatus
+	GetVMBackupStatusErr error
+	DeleteVMBackupErr    error
+	CreateRestorePVCErr  error
+	PVCPhase             corev1.PersistentVolumeClaimPhase
+	GetPVCPhaseErr       error
+
+	CreateVMBackupCalls   int
+	DeleteVMBackupCalls   int
+	CreateRestorePVCCalls int
+	// LastVMBackupSourceVMName captures the most recent CreateVMBackup
+	// sourceVMName input.
+	LastVMBackupSourceVMName string
+	// LastRestorePVCSnapshotName captures the most recent CreateRestorePVC
+	// volumeSnapshotName input.
+	LastRestorePVCSnapshotName string
+}
+
+func (s *StubHarvester) CreateVMBackup(_ context.Context, _, _, sourceVMName string, _ *metav1.OwnerReference) error {
+	s.CreateVMBackupCalls++
+	s.LastVMBackupSourceVMName = sourceVMName
+	return s.CreateVMBackupErr
+}
+func (s *StubHarvester) GetVMBackupStatus(_ context.Context, _, _, _ string) (harvester.VMBackupStatus, error) {
+	return s.VMBackupStatus, s.GetVMBackupStatusErr
+}
+func (s *StubHarvester) DeleteVMBackup(_ context.Context, _, _ string) error {
+	s.DeleteVMBackupCalls++
+	return s.DeleteVMBackupErr
+}
+func (s *StubHarvester) CreateRestorePVC(_ context.Context, _, _, volumeSnapshotName string, _ int, _ string, _ *metav1.OwnerReference) error {
+	s.CreateRestorePVCCalls++
+	s.LastRestorePVCSnapshotName = volumeSnapshotName
+	return s.CreateRestorePVCErr
+}
+func (s *StubHarvester) GetPVCPhase(_ context.Context, _, _ string) (corev1.PersistentVolumeClaimPhase, error) {
+	return s.PVCPhase, s.GetPVCPhaseErr
 }
 
 func (s *StubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
