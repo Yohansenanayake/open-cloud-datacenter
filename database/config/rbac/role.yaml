@@ -103,6 +103,17 @@ rules:
 - apiGroups:
   - harvesterhci.io
   resources:
+  - virtualmachinebackups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - harvesterhci.io
+  resources:
   - virtualmachineimages
   verbs:
   - get

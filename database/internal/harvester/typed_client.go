@@ -805,6 +805,15 @@ func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
 // spec.type: Backup — Snapshot is local-only and must never be used for this
 // design (yohan-docs/backups/harvester-vm-backup/).
 func (c *TypedClient) CreateVMBackup(ctx context.Context, ns, name, sourceVMName string, owner *metav1.OwnerReference) error {
+
+	_, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
 	vmBackup := &harvesterhciov1beta1.VirtualMachineBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
@@ -820,7 +829,7 @@ func (c *TypedClient) CreateVMBackup(ctx context.Context, ns, name, sourceVMName
 			Type: harvesterhciov1beta1.Backup,
 		},
 	}
-	_, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Create(ctx, vmBackup, metav1.CreateOptions{})
+	_, err = c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Create(ctx, vmBackup, metav1.CreateOptions{})
 	return ignoreAlreadyExists(err)
 }
 

@@ -51,7 +51,7 @@ func NewClient(t testing.TB, objects ...client.Object) client.Client {
 	t.Helper()
 	return ctrlfake.NewClientBuilder().
 		WithScheme(NewScheme(t)).
-		WithStatusSubresource(&dbaasv1.DBInstance{}).
+		WithStatusSubresource(&dbaasv1.DBInstance{}, &dbaasv1.DBSnapshot{}).
 		WithObjects(objects...).
 		Build()
 }
