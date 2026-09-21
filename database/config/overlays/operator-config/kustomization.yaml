@@ -5,11 +5,6 @@ kind: Kustomization
 # this overlay. The namespace must exist before applying the overlay.
 namespace: dbaas-system
 
-images:
-- name: wso2vick/ocd-dbaas
-  newName: ghcr.io/tgcjananga/dbaas-controller
-  newTag: v20260815_1
-
 resources:
 - ../../base
 - operator_config.yaml

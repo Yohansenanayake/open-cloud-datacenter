@@ -21,10 +21,13 @@ import (
 	"testing"
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
+	harvesterfake "github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clienttesting "k8s.io/client-go/testing"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
@@ -69,6 +72,35 @@ func TestCreateVMBackupIsIdempotent(t *testing.T) {
 	}
 	if err := client.CreateVMBackup(ctx, "tenant-a", "orders-daily-1", "pg-orders", testOwnerRef()); err != nil {
 		t.Fatalf("second CreateVMBackup (re-entry) returned an error, want AlreadyExists swallowed: %v", err)
+	}
+}
+
+// Reproduces a real failure: Harvester's own mutator.harvesterhci.io
+// admission webhook rejects a repeat create with a custom "already
+// existent" denial, not the standard Kubernetes AlreadyExists error —
+// apierrors.IsAlreadyExists never matches it, so a blind create-then-ignore
+// approach hard-fails on every reconcile after the first. CreateVMBackup
+// must check existence first instead, never reaching Create at all on
+// re-entry.
+func TestCreateVMBackupReEntryNeverCallsCreateWhenAlreadyPresent(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient()
+
+	if err := client.CreateVMBackup(ctx, "tenant-a", "orders-daily-1", "pg-orders", testOwnerRef()); err != nil {
+		t.Fatalf("first CreateVMBackup: %v", err)
+	}
+
+	client.Clientset.(*harvesterfake.Clientset).PrependReactor("create", "virtualmachinebackups", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Status:  metav1.StatusFailure,
+			Message: `admission webhook "mutator.harvesterhci.io" denied the request: The orders-daily-1 backup is already existent. Please use another name for it.`,
+			Reason:  metav1.StatusReasonInvalid,
+			Code:    422,
+		}}
+	})
+
+	if err := client.CreateVMBackup(ctx, "tenant-a", "orders-daily-1", "pg-orders", testOwnerRef()); err != nil {
+		t.Fatalf("re-entry CreateVMBackup must not call Create at all when the object already exists: %v", err)
 	}
 }
 

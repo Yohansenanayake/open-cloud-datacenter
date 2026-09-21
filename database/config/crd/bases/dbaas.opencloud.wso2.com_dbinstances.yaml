@@ -242,7 +242,6 @@ spec:
                   must have internet egress.
                   Immutable after first reconcile.
                   Example: "iaas-net/vm-subnet-001".
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
                 x-kubernetes-validations:
                 - message: networkRef is immutable after creation

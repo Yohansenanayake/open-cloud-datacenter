@@ -157,7 +157,8 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.DBSnapshotReconciler{
-		Client: mgr.GetClient(),
+		Client:    mgr.GetClient(),
+		Harvester: hvClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbsnapshot")
 		os.Exit(1)

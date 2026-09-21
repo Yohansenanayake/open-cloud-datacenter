@@ -154,7 +154,6 @@ type DBInstanceSpec struct {
 	// Immutable after first reconcile.
 	// Example: "iaas-net/vm-subnet-001".
 	// +required
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="networkRef is immutable after creation"
 	NetworkRef string `json:"networkRef"`
 
