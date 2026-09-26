@@ -57,6 +57,12 @@ const (
 	// DBSnapshotStatus.Origin values.
 	SnapshotOriginManual    = "Manual"
 	SnapshotOriginAutomated = "Automated"
+
+	// LabelSnapshotOrigin is set by the DBInstance scheduler on every
+	// DBSnapshot it creates, so DBSnapshotReconciler can record the right
+	// Status.Origin without duplicating the scheduling decision. Absent on a
+	// user-created (Manual) DBSnapshot.
+	LabelSnapshotOrigin = "dbaas.opencloud.wso2.com/snapshot-origin"
 )
 
 // SetCondition adds or updates a status condition. meta.SetStatusCondition

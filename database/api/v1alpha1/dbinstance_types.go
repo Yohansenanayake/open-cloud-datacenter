@@ -400,6 +400,26 @@ type DBInstanceStatus struct {
 	// any reason, including spec.running.
 	// +optional
 	Restore *RestoreStatus `json:"restore,omitempty"`
+
+	// Backup tracks automated snapshot scheduling (spec.backup.automated).
+	// Populated only once spec.backup is set — never carries over from a
+	// prior instance, since backup presence is immutable after creation.
+	// +optional
+	Backup *BackupStatus `json:"backup,omitempty"`
+}
+
+// BackupStatus is the observed state of automated snapshot scheduling
+// (yohan-docs/backups/harvester-vm-backup/ §3.2).
+type BackupStatus struct {
+	// NextScheduledSnapshotTime is the next future UTC instant an automated
+	// snapshot is due. Always strictly in the future when set: recomputed
+	// from scratch (never carried forward as a stale past value) whenever
+	// automated snapshots are (re-)enabled or preferredWindowUTC changes,
+	// and after every fired attempt — satisfying the future-only, no-catch-up
+	// rule regardless of how long reconciliation was unavailable. Nil while
+	// automated.enabled is false.
+	// +optional
+	NextScheduledSnapshotTime *metav1.Time `json:"nextScheduledSnapshotTime,omitempty"`
 }
 
 // RestoreStatus records the controller-observed progress of a restore. It
