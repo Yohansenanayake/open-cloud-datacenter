@@ -54,6 +54,17 @@ const (
 	snapshotSourceInstanceIdx = ".spec.sourceInstanceRef.name"
 )
 
+// snapshotSourceIndexFunc backs snapshotSourceInstanceIdx — shared by the
+// manager's real field indexer (SetupWithManager) and by the scheduler's
+// retention pruning, which lists a source's own DBSnapshots the same way.
+func snapshotSourceIndexFunc(obj client.Object) []string {
+	snap, ok := obj.(*dbaasv1.DBSnapshot)
+	if !ok || snap.Spec.SourceInstanceRef.Name == "" {
+		return nil
+	}
+	return []string{snap.Spec.SourceInstanceRef.Name}
+}
+
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbsnapshots,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbsnapshots/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbsnapshots/finalizers,verbs=update
@@ -179,9 +190,12 @@ func (r *DBSnapshotReconciler) runBackupAttempt(ctx context.Context, snap *dbaas
 		return ctrl.Result{}, err
 	}
 
-	// Always Manual for now — no scheduler exists yet to create automated
-	// ones. A later phase must turn this into a real distinction.
+	// The scheduler labels what it creates; a user-created request never
+	// carries this label, so its absence means Manual.
 	snap.Status.Origin = dbaasv1.SnapshotOriginManual
+	if snap.Labels[dbaasv1.LabelSnapshotOrigin] == dbaasv1.SnapshotOriginAutomated {
+		snap.Status.Origin = dbaasv1.SnapshotOriginAutomated
+	}
 
 	switch {
 	case status.ErrorMessage != "":
@@ -340,13 +354,7 @@ func removeString(list []string, s string) []string {
 // DBInstance, so a source becoming Available promptly re-reconciles any
 // DBSnapshot waiting on it instead of waiting for the next resync.
 func (r *DBSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &dbaasv1.DBSnapshot{}, snapshotSourceInstanceIdx, func(obj client.Object) []string {
-		snap, ok := obj.(*dbaasv1.DBSnapshot)
-		if !ok || snap.Spec.SourceInstanceRef.Name == "" {
-			return nil
-		}
-		return []string{snap.Spec.SourceInstanceRef.Name}
-	}); err != nil {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &dbaasv1.DBSnapshot{}, snapshotSourceInstanceIdx, snapshotSourceIndexFunc); err != nil {
 		return err
 	}
 

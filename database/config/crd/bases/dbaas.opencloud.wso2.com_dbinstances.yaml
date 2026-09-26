@@ -432,6 +432,24 @@ spec:
                   vmPassword:
                     type: string
                 type: object
+              backup:
+                description: |-
+                  Backup tracks automated snapshot scheduling (spec.backup.automated).
+                  Populated only once spec.backup is set — never carries over from a
+                  prior instance, since backup presence is immutable after creation.
+                properties:
+                  nextScheduledSnapshotTime:
+                    description: |-
+                      NextScheduledSnapshotTime is the next future UTC instant an automated
+                      snapshot is due. Always strictly in the future when set: recomputed
+                      from scratch (never carried forward as a stale past value) whenever
+                      automated snapshots are (re-)enabled or preferredWindowUTC changes,
+                      and after every fired attempt — satisfying the future-only, no-catch-up
+                      rule regardless of how long reconciliation was unavailable. Nil while
+                      automated.enabled is false.
+                    format: date-time
+                    type: string
+                type: object
               conditions:
                 description: Conditions for each sub-resource.
                 items:

@@ -244,6 +244,22 @@ func TestDBSnapshotReadyReleasesTheHoldAndRecordsManualOrigin(t *testing.T) {
 	}
 }
 
+func TestDBSnapshotReadyRecordsAutomatedOriginFromLabel(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Labels = map[string]string{dbaasv1.LabelSnapshotOrigin: dbaasv1.SnapshotOriginAutomated}
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	stub := &testutil.StubHarvester{VMBackupStatus: backupReadyStatus()}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+
+	reconcileSnapshot(t, r, snap)
+
+	got := getSnapshot(t, c, snap)
+	if got.Status.Origin != dbaasv1.SnapshotOriginAutomated {
+		t.Fatalf("Origin = %q, want %q", got.Status.Origin, dbaasv1.SnapshotOriginAutomated)
+	}
+}
+
 func TestDBSnapshotReadyIsSteadyStateOnRetry(t *testing.T) {
 	source := availableSourceInstance()
 	snap := testSnapshot()

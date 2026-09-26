@@ -139,6 +139,11 @@ const (
 	ReasonRepaveWaitingForTeardown     ConditionReason = "RepaveWaitingForTeardown"
 	ReasonRepaveWaitingForSnapshotHold ConditionReason = "RepaveWaitingForSnapshotHold"
 	ReasonRepaveApplied                ConditionReason = "RepaveApplied"
+
+	// Automated snapshot scheduling reasons (event-only — report-only, no
+	// gating condition; see internal/controller/backup_schedule.go).
+	ReasonScheduledSnapshotCreated ConditionReason = "ScheduledSnapshotCreated"
+	ReasonScheduledSnapshotSkipped ConditionReason = "ScheduledSnapshotSkipped"
 )
 
 var knownConditionReasons = map[string]ConditionReason{
@@ -205,6 +210,8 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonRepaveWaitingForTeardown):     ReasonRepaveWaitingForTeardown,
 	string(ReasonRepaveWaitingForSnapshotHold): ReasonRepaveWaitingForSnapshotHold,
 	string(ReasonRepaveApplied):                ReasonRepaveApplied,
+	string(ReasonScheduledSnapshotCreated):     ReasonScheduledSnapshotCreated,
+	string(ReasonScheduledSnapshotSkipped):     ReasonScheduledSnapshotSkipped,
 }
 
 // ParseConditionReason validates a reason already serialized in status.
