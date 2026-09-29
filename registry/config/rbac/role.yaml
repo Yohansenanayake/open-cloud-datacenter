@@ -16,6 +16,13 @@ rules:
   - update
   - watch
 - apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - registry.opencloud.wso2.com
   resources:
   - registries

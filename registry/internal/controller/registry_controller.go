@@ -57,6 +57,7 @@ type RegistryReconciler struct {
 // +kubebuilder:rbac:groups=registry.opencloud.wso2.com,resources=registries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=registry.opencloud.wso2.com,resources=registries/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile converges one Registry: create its project, quota, robot account,
 // and credentials Secret inside the central Harbor.
@@ -513,10 +514,11 @@ var errProjectNameTaken = errors.New("harbor project name already taken")
 // the name skips the check, which is what keeps repeated reconciles idempotent
 // rather than having the second pass reject the project the first one created.
 //
-// An existing project is never adopted. The operator has no way yet to tell its
-// own project from another tenant's, and adopting one would hand this Registry
-// credentials on someone else's images. Refusing is the safe direction, and it
-// stays correct once ownership is recorded explicitly.
+// An existing project is adopted only when its ownership marker names this
+// Registry, which is what lets a reconcile that died before writing status
+// carry on against the project it created. An unmarked or foreign project is
+// refused: adopting one would hand this Registry credentials on images that are
+// not its own.
 func (r *RegistryReconciler) claimProjectName(ctx context.Context, cli *harbor.Client, cr *registryv1alpha1.Registry, projectName string) error {
 	// status.harborProject is written only once the project is really ours, so
 	// its presence short-circuits the check on every later reconcile.
@@ -640,10 +642,10 @@ var reservedProjectNames = map[string]bool{"library": true}
 // claimProjectName refuses the second one rather than letting it share the
 // first one's project, which makes names global and first-come-first-served.
 //
-// That check is not atomic. Two Registries reconciling at the same instant can
-// both find the name free, and CreateHarborProject still treats 409 as success,
-// so the loser would proceed against the winner's project. Closing that needs
-// ownership recorded on the project itself.
+// That check is not atomic, so two Registries reconciling at the same instant
+// can both find the name free. The ownership marker settles it afterwards:
+// CreateHarborProject reports 409 rather than treating it as success, and the
+// loser is refused because the project carries the winner's marker.
 func harborProjectName(cr *registryv1alpha1.Registry) string {
 	return strings.ToLower(cr.Name)
 }
