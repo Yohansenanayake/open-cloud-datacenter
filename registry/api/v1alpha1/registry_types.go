@@ -19,8 +19,9 @@ import (
 // there is no field to point at one, so a Registry cannot reach another
 // tenant's registry by configuration.
 //
-// Project names are therefore global. A name already held by another Registry
-// is refused rather than shared — see status.harborProject.
+// Its Harbor project is named after the Registry with a digest of its UID, so
+// two Registries can never resolve to the same project and no name is taken
+// from another namespace — see status.harborProject for the name in use.
 type Registry struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -52,20 +53,10 @@ type RegistryStatus struct {
 	// Conditions holds standard Kubernetes status conditions.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// HarborProject is the project created in Harbor for this Registry, and the
-	// record that one exists and carries this Registry's ownership marker: the
-	// finalizer reads it to decide whether there is anything to clean up.
+	// HarborProject is the Harbor project this Registry addresses: its own name
+	// with a short digest of its UID. It is the path component images are pushed
+	// and pulled under, so it is reported here rather than left to be derived.
 	HarborProject string `json:"harborProject,omitempty"`
-
-	// PendingProject is the project name this Registry is about to create,
-	// written before the project is created and cleared once the ownership
-	// marker is in place.
-	//
-	// It is what lets a reconcile interrupted between the two recognise the
-	// project it created itself. Without it that project is indistinguishable
-	// from one made by hand, which the operator refuses to adopt, and the
-	// Registry could never reach Ready under its own name again.
-	PendingProject string `json:"pendingProject,omitempty"`
 
 	// RegistryURL is the Harbor URL to log in and push to.
 	RegistryURL string `json:"registryURL,omitempty"`
