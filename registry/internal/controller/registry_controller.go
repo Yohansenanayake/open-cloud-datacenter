@@ -537,16 +537,6 @@ func (r *RegistryReconciler) patchStatus(ctx context.Context, key client.ObjectK
 	return fmt.Errorf("status update: too many conflicts")
 }
 
-// provisioning records a wait state and requeues after the given delay.
-func (r *RegistryReconciler) provisioning(ctx context.Context, cr *registryv1alpha1.Registry, msg string, after time.Duration) (ctrl.Result, error) {
-	err := r.patchStatus(ctx, client.ObjectKeyFromObject(cr), func(s *registryv1alpha1.RegistryStatus) {
-		s.Phase = phaseProvisioning
-		s.Message = msg
-		setReady(&s.Conditions, cr.Generation, metav1.ConditionFalse, reasonProvisioning, msg)
-	})
-	return ctrl.Result{RequeueAfter: after}, err
-}
-
 // transient records a retryable failure and returns the error for backoff.
 func (r *RegistryReconciler) transient(ctx context.Context, cr *registryv1alpha1.Registry, step string, cause error) (ctrl.Result, error) {
 	msg := fmt.Sprintf("%s: %v", step, cause)
