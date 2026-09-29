@@ -12,8 +12,6 @@ on:
       - 'database/**'
       - '.github/workflows/database-test-chart.yaml'
   push:
-    # NOTE: mirrors keyvault-operator.yaml's convention. Target branch decided
-    # 2026-09-21 (my-docs/release/D001_dbaas-release-process-discussion.md).
     branches: [operators]
     paths:
       - 'database/**'

@@ -16,7 +16,7 @@ manager:
   replicas: 1
 
   image:
-    ## Target WSO2-owned registry (my-docs/release/D001 #1 — namespace
+    ## Target WSO2-owned registry — namespace
     ## ownership/publishing access not yet confirmed). For local testing
     ## against your own GHCR before that access exists, override with
     ## --set manager.image.repository=... --set manager.image.tag=...
