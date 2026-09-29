@@ -143,6 +143,14 @@ spec:
                   with a short digest of its UID. It is the path component images are pushed
                   and pulled under, so it is reported here rather than left to be derived.
                 type: string
+              harborProjectID:
+                description: |-
+                  HarborProjectID is Harbor's own id for that project, recorded when it is
+                  created. Harbor never reuses an id, so it distinguishes the project this
+                  Registry created from a later one that merely shares its name — which is
+                  what authorises the finalizer to delete it.
+                format: int64
+                type: integer
               message:
                 description: Message describes the current phase, including why it
                   is not Ready.

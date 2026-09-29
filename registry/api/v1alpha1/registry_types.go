@@ -58,6 +58,12 @@ type RegistryStatus struct {
 	// and pulled under, so it is reported here rather than left to be derived.
 	HarborProject string `json:"harborProject,omitempty"`
 
+	// HarborProjectID is Harbor's own id for that project, recorded when it is
+	// created. Harbor never reuses an id, so it distinguishes the project this
+	// Registry created from a later one that merely shares its name — which is
+	// what authorises the finalizer to delete it.
+	HarborProjectID int64 `json:"harborProjectID,omitempty"`
+
 	// RegistryURL is the Harbor URL to log in and push to.
 	RegistryURL string `json:"registryURL,omitempty"`
 

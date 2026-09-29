@@ -109,9 +109,14 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.fail(ctx, &cr, "resolve Harbor project", err)
 	}
 
-	// 5. Send request to Harbor to create the project.
-	if err := cli.CreateHarborProject(ctx, projectName, quotaBytes); err != nil && !errors.Is(err, harbor.ErrProjectExists) {
-		return r.transient(ctx, &cr, "create Harbor project", err)
+	// 5. Send request to Harbor to create the project. Nothing else can produce
+	// this name, so 409 means an earlier pass already created it.
+	created := true
+	if err := cli.CreateHarborProject(ctx, projectName, quotaBytes); err != nil {
+		if !errors.Is(err, harbor.ErrProjectExists) {
+			return r.transient(ctx, &cr, "create Harbor project", err)
+		}
+		created = false
 	}
 
 	//6. Get the project to get projectID
@@ -121,6 +126,27 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if proj.ProjectID == 0 {
 		return r.transient(ctx, &cr, "get Harbor project", fmt.Errorf("Harbor returned a project with no project_id for %q", projectName))
+	}
+
+	// 6a. Harbor never reuses a project id, so one that changed under a name only
+	// this Registry can produce means the project it created is gone and another
+	// holds the name now. Converging quota or credentials into that project would
+	// attach this tenant to contents it does not own.
+	if !created && cr.Status.HarborProjectID != 0 && cr.Status.HarborProjectID != proj.ProjectID {
+		return r.fail(ctx, &cr, "resolve Harbor project",
+			fmt.Errorf("%w: %q is now id %d, but this Registry created id %d",
+				errProjectReplaced, projectName, proj.ProjectID, cr.Status.HarborProjectID))
+	}
+
+	// 6b. Record the id as soon as it is known, so the finalizer can tell this
+	// project from a later one sharing its name even if no pass reaches Ready.
+	if cr.Status.HarborProjectID != proj.ProjectID {
+		if err := r.patchStatus(ctx, req.NamespacedName, func(st *registryv1alpha1.RegistryStatus) {
+			st.HarborProject, st.HarborProjectID = projectName, proj.ProjectID
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		cr.Status.HarborProject, cr.Status.HarborProjectID = projectName, proj.ProjectID
 	}
 
 	// 7. Set the project quota to the plan's amount. This is idempotent.
@@ -142,6 +168,7 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		s.Phase = phaseReady
 		s.ObservedGeneration = cr.Generation
 		s.HarborProject = projectName
+		s.HarborProjectID = proj.ProjectID
 		s.RegistryURL = registryURL
 		s.PullSecretName = pullName
 		s.PushSecretName = pushName
@@ -185,6 +212,10 @@ func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registry
 // this Registry does not own, so the caller can tell it apart from a write that
 // merely failed.
 var errSecretNameTaken = errors.New("credentials Secret name already in use")
+
+// errProjectReplaced marks a Harbor project that carries this Registry's name
+// but is not the project it created.
+var errProjectReplaced = errors.New("harbor project was replaced")
 
 // ensureCredential mints one project robot account and writes its credentials
 // to a Secret, once.
@@ -322,6 +353,26 @@ func (r *RegistryReconciler) deleteHarborProject(ctx context.Context, cr *regist
 	cli, err := r.harborClient(ctx)
 	if err != nil {
 		return err
+	}
+
+	// The name says which project to look at; the id says whether it is the one
+	// this Registry created. Harbor never reuses an id, so a project carrying a
+	// different one was created by somebody else after this Registry's was gone,
+	// and deleting it would destroy their repositories.
+	proj, err := cli.GetProject(ctx, projectName)
+	if errors.Is(err, harbor.ErrProjectNotFound) {
+		return nil // already gone
+	}
+	if err != nil {
+		return fmt.Errorf("get Harbor project %s: %w", projectName, err)
+	}
+	if cr.Status.HarborProjectID == 0 || proj.ProjectID != cr.Status.HarborProjectID {
+		log.Info("leaving Harbor project in place: it is not the project this Registry created",
+			"project", projectName, "id", proj.ProjectID, "createdID", cr.Status.HarborProjectID)
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, reasonOrphaned, actionDelete,
+			"Harbor project %q was left in place: it is id %d and this Registry created id %d",
+			projectName, proj.ProjectID, cr.Status.HarborProjectID)
+		return nil
 	}
 
 	// Harbor refuses to delete a project that still holds repositories (412), so

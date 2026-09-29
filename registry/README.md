@@ -71,6 +71,15 @@ The suffix is what makes the name belong to one object:
   Creating the project is simply idempotent: `409 Conflict` means it is already
   there.
 
+Deleting is authorised by Harbor's project **id**, not by the name. The id is
+recorded in `.status.harborProjectID` as soon as Harbor reports it, and Harbor
+never reuses one, so a project that carries this name with a different id was
+created by somebody else after this Registry's was gone. The finalizer leaves
+that project alone and raises an `Orphaned` warning event; a reconcile that finds
+it refuses to converge quota or credentials into it. The name is unpredictable,
+not secret — it appears in status, in the Secrets and in every image path — so
+the id is what proves identity.
+
 The trade-off is deliberate: a `Registry` that is **deleted and recreated** under
 the same name is a new object with a new UID, so it gets a new, empty project.
 Deleting a `Registry` already destroys its images, so nothing survives that the

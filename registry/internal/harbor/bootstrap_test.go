@@ -497,3 +497,50 @@ func TestNewClient_RefusesRedirects(t *testing.T) {
 		t.Errorf("redirect target received %d requests, want 0; credentials must not follow a redirect", targetHits)
 	}
 }
+
+// A project is emptied before it is deleted, and repository names can contain
+// slashes, which Harbor expects percent-encoded rather than as path segments.
+func TestDeleteRepository(t *testing.T) {
+	cases := []struct {
+		name     string
+		repo     string
+		wantPath string
+		status   int
+		wantErr  bool
+	}{
+		{"simple name", "app", "/api/v2.0/projects/web-30cf39a6/repositories/app", http.StatusOK, false},
+		{"name with a slash", "team/app", "/api/v2.0/projects/web-30cf39a6/repositories/team%2Fapp", http.StatusAccepted, false},
+		{"already gone", "app", "/api/v2.0/projects/web-30cf39a6/repositories/app", http.StatusNotFound, false},
+		{"refused", "app", "/api/v2.0/projects/web-30cf39a6/repositories/app", http.StatusInternalServerError, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.EscapedPath()
+				w.WriteHeader(tc.status)
+			})
+			defer srv.Close()
+
+			err := c.DeleteRepository(context.Background(), "web-30cf39a6", tc.repo)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DeleteRepository() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if gotPath != tc.wantPath {
+				t.Errorf("path = %q, want %q", gotPath, tc.wantPath)
+			}
+		})
+	}
+}
+
+// The error a caller reads has to say which call failed and what Harbor sent
+// back, or a 403 from one endpoint is indistinguishable from any other.
+func TestStatusError_NamesTheCallAndTheResponse(t *testing.T) {
+	e := &StatusError{Method: "POST", Path: "/api/v2.0/projects", StatusCode: 403, Body: "forbidden"}
+	got := e.Error()
+	for _, want := range []string{"POST", "/api/v2.0/projects", "403", "forbidden"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Error() = %q, want it to contain %q", got, want)
+		}
+	}
+}
