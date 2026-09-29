@@ -8,19 +8,26 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	registryv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/registry/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/registry/internal/config"
@@ -391,76 +398,6 @@ func TestHarborProjectName_RejectsWhatHarborCannotHold(t *testing.T) {
 	}
 }
 
-// harborProjectDeleteStub serves the two calls the finalizer makes, and records
-// them so a test can assert what was asked of Harbor.
-func harborProjectDeleteStub(t *testing.T, projectExists bool, repos []string) (baseURL string, requests *[]string) {
-	t.Helper()
-	var seen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, r.Method+" "+r.URL.Path)
-		if !projectExists {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/repositories"):
-			// Harbor reports a repository as "<project>/<repo>", which the client
-			// strips back to the name the delete endpoint expects.
-			project := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2.0/projects/"), "/repositories")
-			w.WriteHeader(http.StatusOK)
-			body := "["
-			for i, repo := range repos {
-				if i > 0 {
-					body += ","
-				}
-				body += fmt.Sprintf(`{"name":%q}`, project+"/"+repo)
-			}
-			_, _ = w.Write([]byte(body + "]"))
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv.URL, &seen
-}
-
-// The finalizer derives the project name from the Registry rather than reading
-// it from status, so a Registry deleted before its first status write still has
-// its project removed instead of leaking one nothing records.
-func TestDeleteHarborProject_DerivesTheProjectFromTheRegistry(t *testing.T) {
-	reg := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
-	reg.Status = registryv1alpha1.RegistryStatus{} // nothing was ever recorded
-	projectName, err := harborProjectName(reg)
-	if err != nil {
-		t.Fatalf("harborProjectName() error = %v", err)
-	}
-	url, requests := harborProjectDeleteStub(t, true, []string{"app"})
-
-	r := deleteReconciler(t, url, reg)
-	if err := r.deleteHarborProject(context.Background(), reg, testLogger()); err != nil {
-		t.Fatalf("deleteHarborProject() error = %v", err)
-	}
-	if !called(*requests, "DELETE /api/v2.0/projects/"+projectName) {
-		t.Errorf("requests = %v, want the derived project %q deleted", *requests, projectName)
-	}
-	// Harbor refuses to delete a project that still holds repositories.
-	if !called(*requests, "DELETE /api/v2.0/projects/"+projectName+"/repositories/app") {
-		t.Errorf("requests = %v, want the project emptied first", *requests)
-	}
-}
-
-// A Registry whose project was never created must still release its finalizer:
-// Harbor reporting no such project is the answer, not a failure.
-func TestDeleteHarborProject_ReleasesWhenHarborHasNoProject(t *testing.T) {
-	reg := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
-	url, _ := harborProjectDeleteStub(t, false, nil)
-
-	r := deleteReconciler(t, url, reg)
-	if err := r.deleteHarborProject(context.Background(), reg, testLogger()); err != nil {
-		t.Errorf("deleteHarborProject() error = %v, want nil for a project Harbor does not hold", err)
-	}
-}
-
 // A name Harbor could never have held was never created under it either, so the
 // finalizer has nothing to wait for.
 func TestDeleteHarborProject_ReleasesWhenNoNameCanBeDerived(t *testing.T) {
@@ -564,5 +501,661 @@ func TestEnsureCredential_RefusesASecretItDoesNotOwn(t *testing.T) {
 	kept := secretFor(t, r, cr, "web-pull")
 	if string(kept.Data["note"]) != "not the operator's" || kept.Type != corev1.SecretTypeOpaque {
 		t.Error("the existing Secret was modified; it belongs to whoever created it")
+	}
+}
+
+// --- an in-memory Harbor, for tests that drive the whole reconcile loop ---
+
+// harborFake answers the Harbor calls a reconcile makes, keeping enough state
+// to tell a first pass from a repeat one. It records every request so a test
+// can assert what the operator did rather than only what it ended up with.
+type harborFake struct {
+	mu       sync.Mutex
+	projects map[string]int64    // name -> id
+	quota    map[int64]int64     // project id -> storage limit
+	robots   map[string]int64    // full robot name -> id
+	repos    map[string][]string // project -> repositories
+	requests []string
+	failPath string // every call under this path prefix fails
+	nextID   int64
+	down     bool // every call fails, as an unreachable Harbor does
+	URL      string
+}
+
+func newHarborFake(t *testing.T) *harborFake {
+	t.Helper()
+	h := &harborFake{
+		projects: map[string]int64{},
+		quota:    map[int64]int64{},
+		robots:   map[string]int64{},
+		repos:    map[string][]string{},
+		nextID:   1,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(h.serve))
+	t.Cleanup(srv.Close)
+	h.URL = srv.URL
+	return h
+}
+
+func (h *harborFake) serve(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.requests = append(h.requests, r.Method+" "+r.URL.Path)
+
+	if h.down || (h.failPath != "" && strings.HasPrefix(r.URL.Path, h.failPath)) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	p := r.URL.Path
+	switch {
+	case p == "/api/v2.0/users/current":
+		writeJSON(w, http.StatusOK, `{"user_id":3,"username":"admin"}`)
+
+	case p == "/api/v2.0/projects" && r.Method == http.MethodPost:
+		var body struct {
+			ProjectName  string `json:"project_name"`
+			StorageLimit int64  `json:"storage_limit"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, exists := h.projects[body.ProjectName]; exists {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		id := h.nextID
+		h.nextID++
+		h.projects[body.ProjectName] = id
+		h.quota[id] = body.StorageLimit
+		w.WriteHeader(http.StatusCreated)
+
+	case strings.HasPrefix(p, "/api/v2.0/projects/") && strings.HasSuffix(p, "/repositories"):
+		name := strings.TrimSuffix(strings.TrimPrefix(p, "/api/v2.0/projects/"), "/repositories")
+		if _, ok := h.projects[name]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		out := make([]string, 0, len(h.repos[name]))
+		for _, repo := range h.repos[name] {
+			out = append(out, fmt.Sprintf(`{"name":%q}`, name+"/"+repo))
+		}
+		writeJSON(w, http.StatusOK, "["+strings.Join(out, ",")+"]")
+
+	case strings.HasPrefix(p, "/api/v2.0/projects/"):
+		rest := strings.TrimPrefix(p, "/api/v2.0/projects/")
+		if name, repo, found := strings.Cut(rest, "/repositories/"); found {
+			repo, _ = url.PathUnescape(repo)
+			kept := []string{}
+			for _, existing := range h.repos[name] {
+				if existing != repo {
+					kept = append(kept, existing)
+				}
+			}
+			h.repos[name] = kept
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		id, ok := h.projects[rest]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			delete(h.projects, rest)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		writeJSON(w, http.StatusOK, fmt.Sprintf(`{"project_id":%d}`, id))
+
+	case p == "/api/v2.0/quotas":
+		id, _ := strconv.ParseInt(r.URL.Query().Get("reference_id"), 10, 64)
+		writeJSON(w, http.StatusOK, fmt.Sprintf(`[{"id":%d,"hard":{"storage":%d}}]`, id, h.quota[id]))
+
+	case strings.HasPrefix(p, "/api/v2.0/quotas/") && r.Method == http.MethodPut:
+		id, _ := strconv.ParseInt(strings.TrimPrefix(p, "/api/v2.0/quotas/"), 10, 64)
+		var body struct {
+			Hard struct {
+				Storage int64 `json:"storage"`
+			} `json:"hard"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		h.quota[id] = body.Hard.Storage
+		w.WriteHeader(http.StatusOK)
+
+	case p == "/api/v2.0/robots" && r.Method == http.MethodPost:
+		var body struct {
+			Name        string `json:"name"`
+			Permissions []struct {
+				Namespace string `json:"namespace"`
+			} `json:"permissions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		full := "robot$" + body.Permissions[0].Namespace + "+" + body.Name
+		if _, exists := h.robots[full]; exists {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		id := h.nextID
+		h.nextID++
+		h.robots[full] = id
+		writeJSON(w, http.StatusCreated, fmt.Sprintf(`{"id":%d,"name":%q,"secret":"s3cret-%d"}`, id, full, id))
+
+	case p == "/api/v2.0/robots" && r.Method == http.MethodGet:
+		out := []string{}
+		for name, id := range h.robots {
+			out = append(out, fmt.Sprintf(`{"id":%d,"name":%q}`, id, name))
+		}
+		writeJSON(w, http.StatusOK, "["+strings.Join(out, ",")+"]")
+
+	case strings.HasPrefix(p, "/api/v2.0/robots/") && r.Method == http.MethodDelete:
+		id, _ := strconv.ParseInt(strings.TrimPrefix(p, "/api/v2.0/robots/"), 10, 64)
+		for name, known := range h.robots {
+			if known == id {
+				delete(h.robots, name)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, body string) {
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
+}
+
+// countRequests returns how many recorded requests match a method and path prefix.
+func (h *harborFake) countRequests(method, prefix string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, req := range h.requests {
+		if strings.HasPrefix(req, method+" "+prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func (h *harborFake) projectID(name string) (int64, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id, ok := h.projects[name]
+	return id, ok
+}
+
+func (h *harborFake) storage(id int64) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.quota[id]
+}
+
+func (h *harborFake) setRepos(project string, repos ...string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.repos[project] = repos
+}
+
+func (h *harborFake) setFailPath(prefix string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.failPath = prefix
+}
+
+// replaceProject stands in for somebody deleting the project and creating
+// another under the same name, which Harbor gives a new id.
+func (h *harborFake) replaceProject(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.projects[name] = h.nextID
+	h.nextID++
+}
+
+func (h *harborFake) setDown(down bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.down = down
+}
+
+// reconcilerFor wires a reconciler to a fake Harbor, with the operator's
+// credentials in place and the Registry already admitted.
+func reconcilerFor(t *testing.T, h *harborFake, objs ...client.Object) (*RegistryReconciler, client.WithWatch) {
+	t.Helper()
+	objs = append(objs, harborCredsSecret(map[string][]byte{
+		config.HarborUsernameKey: []byte("admin"),
+		config.HarborPasswordKey: []byte("s3cret"),
+	}))
+	fc := newFakeClient(t, objs...)
+	r := newRegistryReconciler(t, fc)
+	r.HarborCfg.URL = h.URL
+	return r, fc
+}
+
+// reconcileUntilSettled runs Reconcile until it stops asking to be requeued
+// immediately, which is how the finalizer pass hands over to the real work.
+func reconcileUntilSettled(t *testing.T, r *RegistryReconciler, cr *registryv1alpha1.Registry) (ctrl.Result, error) {
+	t.Helper()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	var res ctrl.Result
+	var err error
+	for i := 0; i < 5; i++ {
+		res, err = r.Reconcile(context.Background(), req)
+		if err != nil || !res.Requeue {
+			return res, err
+		}
+	}
+	t.Fatal("Reconcile kept asking for an immediate requeue")
+	return res, err
+}
+
+func registryState(t *testing.T, r *RegistryReconciler, cr *registryv1alpha1.Registry) *registryv1alpha1.Registry {
+	t.Helper()
+	var fresh registryv1alpha1.Registry
+	key := client.ObjectKey{Namespace: cr.Namespace, Name: cr.Name}
+	if err := r.Get(context.Background(), key, &fresh); err != nil {
+		t.Fatalf("get Registry: %v", err)
+	}
+	return &fresh
+}
+
+// --- the reconcile loop itself ---
+
+// One apply must produce everything a user was promised: a private project
+// sized to the plan, two scoped credentials, and a status that names them.
+func TestReconcile_ProvisionsFromScratch(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	projectName, err := harborProjectName(cr)
+	if err != nil {
+		t.Fatalf("harborProjectName() error = %v", err)
+	}
+
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	id, ok := h.projectID(projectName)
+	if !ok {
+		t.Fatalf("Harbor holds no project %q", projectName)
+	}
+	if want := int64(5) * 1024 * 1024 * 1024; h.storage(id) != want {
+		t.Errorf("quota = %d, want %d for the starter plan", h.storage(id), want)
+	}
+
+	got := registryState(t, r, cr)
+	if got.Status.Phase != phaseReady {
+		t.Errorf("phase = %q, want %q (message %q)", got.Status.Phase, phaseReady, got.Status.Message)
+	}
+	if got.Status.HarborProject != projectName {
+		t.Errorf("status.harborProject = %q, want %q", got.Status.HarborProject, projectName)
+	}
+	if got.Status.RegistryURL != h.URL {
+		t.Errorf("status.registryURL = %q, want %q", got.Status.RegistryURL, h.URL)
+	}
+	if got.Status.PullSecretName != "web-pull" || got.Status.PushSecretName != "web-push" {
+		t.Errorf("status secrets = %q/%q, want web-pull/web-push", got.Status.PullSecretName, got.Status.PushSecretName)
+	}
+	if !controllerutil.ContainsFinalizer(got, registryFinalizer) {
+		t.Error("finalizer missing; deleting this Registry would leave its project behind")
+	}
+	for _, name := range []string{"web-pull", "web-push"} {
+		sec := secretFor(t, r, cr, name)
+		if sec.Type != corev1.SecretTypeDockerConfigJson {
+			t.Errorf("Secret %s type = %q, want dockerconfigjson", name, sec.Type)
+		}
+	}
+	if n := h.countRequests("POST", "/api/v2.0/robots"); n != 2 {
+		t.Errorf("minted %d robots, want 2 — one pull, one push", n)
+	}
+}
+
+// Every pass re-asserts the same state, so repeating it must create nothing
+// new: re-minting a robot would invalidate credentials already distributed.
+func TestReconcile_IsIdempotent(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+
+	for i := 0; i < 3; i++ {
+		if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+			t.Fatalf("Reconcile() pass %d error = %v", i+1, err)
+		}
+	}
+
+	if n := h.countRequests("POST", "/api/v2.0/robots"); n != 2 {
+		t.Errorf("minted %d robots across three passes, want 2", n)
+	}
+	if n := h.countRequests("PUT", "/api/v2.0/quotas/"); n != 0 {
+		t.Errorf("wrote the quota %d times, want 0 — it already held the right value", n)
+	}
+	if got := registryState(t, r, cr); got.Status.Phase != phaseReady {
+		t.Errorf("phase = %q, want %q", got.Status.Phase, phaseReady)
+	}
+}
+
+// Changing the plan is the one thing that resizes a project, and it takes
+// effect through the same convergence that corrects drift.
+func TestReconcile_PlanChangeConvergesTheQuota(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	live := registryState(t, r, cr)
+	live.Spec.Plan = "professional"
+	if err := r.Update(context.Background(), live); err != nil {
+		t.Fatalf("update plan: %v", err)
+	}
+	if _, err := reconcileUntilSettled(t, r, live); err != nil {
+		t.Fatalf("Reconcile() after plan change error = %v", err)
+	}
+
+	projectName, _ := harborProjectName(cr)
+	id, _ := h.projectID(projectName)
+	if want := int64(20) * 1024 * 1024 * 1024; h.storage(id) != want {
+		t.Errorf("quota = %d, want %d after moving to professional", h.storage(id), want)
+	}
+	if n := h.countRequests("POST", "/api/v2.0/robots"); n != 2 {
+		t.Errorf("minted %d robots, want 2 — a plan change must not rotate credentials", n)
+	}
+}
+
+// A spec the operator cannot act on is terminal: retrying resolves nothing, and
+// leaving it Provisioning would hide the reason.
+func TestReconcile_UnknownPlanIsTerminal(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	cr.Spec.Plan = "gigantic"
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+
+	_, err := reconcileUntilSettled(t, r, cr)
+	if !errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Fatalf("Reconcile() error = %v, want a terminal error so the manager stops requeueing", err)
+	}
+	got := registryState(t, r, cr)
+	if got.Status.Phase != phaseFailed {
+		t.Errorf("phase = %q, want %q", got.Status.Phase, phaseFailed)
+	}
+	if !strings.Contains(got.Status.Message, "gigantic") {
+		t.Errorf("message = %q, want it to name the rejected plan", got.Status.Message)
+	}
+	if n := h.countRequests("POST", "/api/v2.0/projects"); n != 0 {
+		t.Errorf("made %d project calls, want 0 before the spec is usable", n)
+	}
+}
+
+// An unreachable Harbor is not the user's fault: the Registry must keep trying
+// rather than settle into Failed.
+func TestReconcile_UnreachableHarborIsTransient(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	h.setDown(true)
+	r, _ := reconcilerFor(t, h, cr)
+
+	_, err := reconcileUntilSettled(t, r, cr)
+	if err == nil {
+		t.Fatal("Reconcile() error = nil, want the failure surfaced so the manager backs off")
+	}
+	if errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Errorf("Reconcile() error = %v, want a retryable error rather than a terminal one", err)
+	}
+	got := registryState(t, r, cr)
+	if got.Status.Phase != phaseProvisioning {
+		t.Errorf("phase = %q, want %q while Harbor is merely down", got.Status.Phase, phaseProvisioning)
+	}
+
+	// Recovery needs no intervention.
+	h.setDown(false)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() after recovery error = %v", err)
+	}
+	if got := registryState(t, r, cr); got.Status.Phase != phaseReady {
+		t.Errorf("phase = %q, want %q once Harbor answers again", got.Status.Phase, phaseReady)
+	}
+}
+
+// A Secret this Registry does not own cannot be written to, and no amount of
+// retrying changes that, so the Registry reports it and stops.
+func TestReconcile_SecretNameCollisionIsTerminal(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	theirs := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pull", Namespace: cr.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"note": []byte("not the operator's")},
+	}
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr, theirs)
+
+	_, err := reconcileUntilSettled(t, r, cr)
+	if !errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Fatalf("Reconcile() error = %v, want a terminal error: retrying cannot free the name", err)
+	}
+	got := registryState(t, r, cr)
+	if got.Status.Phase != phaseFailed {
+		t.Errorf("phase = %q, want %q", got.Status.Phase, phaseFailed)
+	}
+	if !strings.Contains(got.Status.Message, "web-pull") {
+		t.Errorf("message = %q, want it to name the Secret in the way", got.Status.Message)
+	}
+	if n := h.countRequests("POST", "/api/v2.0/robots"); n != 0 {
+		t.Errorf("minted %d robots, want 0 for a credential it cannot store", n)
+	}
+	kept := secretFor(t, r, cr, "web-pull")
+	if string(kept.Data["note"]) != "not the operator's" {
+		t.Error("the existing Secret was modified")
+	}
+}
+
+// Deleting a Registry destroys its project and everything in it, and only then
+// releases the finalizer.
+func TestReconcile_DeleteRemovesTheProjectThenTheFinalizer(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	projectName, _ := harborProjectName(cr)
+	h.setRepos(projectName, "app", "sidecar")
+
+	live := registryState(t, r, cr)
+	if err := r.Delete(context.Background(), live); err != nil {
+		t.Fatalf("delete Registry: %v", err)
+	}
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() during deletion error = %v", err)
+	}
+
+	if _, ok := h.projectID(projectName); ok {
+		t.Errorf("project %q still exists in Harbor after the Registry was deleted", projectName)
+	}
+	if n := h.countRequests("DELETE", "/api/v2.0/projects/"+projectName+"/repositories/"); n != 2 {
+		t.Errorf("deleted %d repositories, want 2 — Harbor refuses to delete a non-empty project", n)
+	}
+	var gone registryv1alpha1.Registry
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: cr.Namespace, Name: cr.Name}, &gone)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("Registry still present with finalizers %v, want it released", gone.Finalizers)
+	}
+}
+
+// patchStatus reads the latest object before writing, so a status update that
+// races with another writer lands instead of failing the reconcile.
+func TestPatchStatus_RetriesOnConflict(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	r := newRegistryReconciler(t, newFakeClient(t, cr))
+	key := client.ObjectKey{Namespace: cr.Namespace, Name: cr.Name}
+
+	// Another writer bumps the object between the read and the write.
+	first := true
+	err := r.patchStatus(context.Background(), key, func(s *registryv1alpha1.RegistryStatus) {
+		if first {
+			first = false
+			live := registryState(t, r, cr)
+			live.Labels = map[string]string{"touched": "by-someone-else"}
+			_ = r.Update(context.Background(), live)
+		}
+		s.Phase = phaseReady
+	})
+	if err != nil {
+		t.Fatalf("patchStatus() error = %v", err)
+	}
+	if got := registryState(t, r, cr); got.Status.Phase != phaseReady {
+		t.Errorf("phase = %q, want %q", got.Status.Phase, phaseReady)
+	}
+}
+
+// Readiness must not cache a probe the kubelet cancelled: doing so would keep
+// the pod NotReady for the whole TTL after Harbor recovered.
+func TestCheckHarborAccess_DoesNotCacheACancelledProbe(t *testing.T) {
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.CheckHarborAccess(ctx); err == nil {
+		t.Fatal("CheckHarborAccess() error = nil, want the cancellation reported")
+	}
+	if err := r.CheckHarborAccess(context.Background()); err != nil {
+		t.Errorf("CheckHarborAccess() error = %v, want nil: the cancelled probe must not have been cached", err)
+	}
+}
+
+// The id is recorded as soon as Harbor reports it, before anything later in the
+// pass can fail. That is what keeps the window in which a project exists that
+// status cannot identify down to a single call.
+func TestReconcile_RecordsTheProjectIDBeforeLaterStepsCanFail(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	h.setFailPath("/api/v2.0/quotas") // the pass dies just after the project exists
+	r, _ := reconcilerFor(t, h, cr)
+	projectName, _ := harborProjectName(cr)
+
+	if _, err := reconcileUntilSettled(t, r, cr); err == nil {
+		t.Fatal("Reconcile() error = nil, want the quota failure surfaced")
+	}
+	got := registryState(t, r, cr)
+	if got.Status.HarborProjectID == 0 {
+		t.Fatal("status.harborProjectID = 0; the finalizer would not be able to identify the project")
+	}
+
+	// Deletion identifies it and cleans up, despite never having reached Ready.
+	h.setFailPath("")
+	if err := r.Delete(context.Background(), got); err != nil {
+		t.Fatalf("delete Registry: %v", err)
+	}
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() during deletion error = %v", err)
+	}
+	if _, ok := h.projectID(projectName); ok {
+		t.Error("project left behind although status recorded its id")
+	}
+}
+
+// Harbor never reuses a project id, so one that differs from the recorded id is
+// somebody else's project wearing this Registry's name. Deleting it would
+// destroy their repositories.
+func TestDeleteHarborProject_LeavesAProjectWithADifferentID(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	projectName, _ := harborProjectName(cr)
+	h.replaceProject(projectName) // deleted and recreated by somebody else
+
+	live := registryState(t, r, cr)
+	if err := r.deleteHarborProject(context.Background(), live, testLogger()); err != nil {
+		t.Fatalf("deleteHarborProject() error = %v, want the finalizer released", err)
+	}
+	if _, ok := h.projectID(projectName); !ok {
+		t.Error("a project this Registry did not create was deleted")
+	}
+	if n := h.countRequests("DELETE", "/api/v2.0/projects/"+projectName); n != 0 {
+		t.Errorf("issued %d project deletes, want 0", n)
+	}
+}
+
+// Without a recorded id nothing identifies the project, so the finalizer leaves
+// it and says so rather than deleting whatever holds the name.
+func TestDeleteHarborProject_LeavesAProjectItCannotIdentify(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	projectName, _ := harborProjectName(cr)
+	h.replaceProject(projectName) // a project under the name, created by nobody we know
+
+	if err := r.deleteHarborProject(context.Background(), cr, testLogger()); err != nil {
+		t.Fatalf("deleteHarborProject() error = %v", err)
+	}
+	if _, ok := h.projectID(projectName); !ok {
+		t.Error("project deleted although status recorded no id for it")
+	}
+}
+
+// A project replaced while the Registry still exists must not be converged
+// into: its quota and credentials belong to whoever created it.
+func TestReconcile_RefusesAProjectThatWasReplaced(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	projectName, _ := harborProjectName(cr)
+	h.replaceProject(projectName)
+
+	_, err := reconcileUntilSettled(t, r, cr)
+	if !errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Fatalf("Reconcile() error = %v, want a terminal error", err)
+	}
+	got := registryState(t, r, cr)
+	if got.Status.Phase != phaseFailed {
+		t.Errorf("phase = %q, want %q", got.Status.Phase, phaseFailed)
+	}
+	if !strings.Contains(got.Status.Message, "created id") {
+		t.Errorf("message = %q, want it to explain that the project was replaced", got.Status.Message)
+	}
+}
+
+// The project name comes from the Registry and the id authorises the delete.
+// Harbor refuses to remove a project that still holds repositories, so they go
+// first.
+func TestDeleteHarborProject_EmptiesThenDeletesTheProjectItCreated(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	projectName, _ := harborProjectName(cr)
+	h.setRepos(projectName, "app")
+
+	live := registryState(t, r, cr)
+	if err := r.deleteHarborProject(context.Background(), live, testLogger()); err != nil {
+		t.Fatalf("deleteHarborProject() error = %v", err)
+	}
+	if n := h.countRequests("DELETE", "/api/v2.0/projects/"+projectName+"/repositories/app"); n != 1 {
+		t.Errorf("emptied the project %d times, want 1", n)
+	}
+	if _, ok := h.projectID(projectName); ok {
+		t.Error("project still exists after its Registry was deleted")
+	}
+}
+
+// Harbor reporting no such project is the answer, not a failure: there is
+// nothing left to reclaim and the finalizer must be released.
+func TestDeleteHarborProject_ReleasesWhenHarborHasNoProject(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	cr.Status.HarborProjectID = 42 // recorded, but the project is long gone
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+
+	if err := r.deleteHarborProject(context.Background(), cr, testLogger()); err != nil {
+		t.Errorf("deleteHarborProject() error = %v, want nil", err)
 	}
 }

@@ -34,6 +34,10 @@ const (
 	reasonProvisioning = "Provisioning"
 	reasonTransient    = "Transient"
 	reasonError        = "Error"
+
+	// reasonOrphaned reports state left in Harbor that the operator declined to
+	// remove because it could not establish that the state was this Registry's.
+	reasonOrphaned = "Orphaned"
 )
 
 // setReady sets/updates the Ready condition. It delegates to
