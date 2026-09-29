@@ -3,9 +3,11 @@
 # beside it. Nothing has to be prepared first — no label, no annotation, no
 # pre-created object.
 #
-# The name is the project name, and project names are GLOBAL: every Registry,
-# in every namespace, shares one Harbor. A name already taken is refused, and
-# the Registry reports why. Names are first-come, first-served.
+# The Harbor project is named after this Registry with a short digest of its UID
+# ("web-30cf39a6"), so no two Registries can ever want the same project and no
+# name is taken from anyone. Read the exact project from .status.harborProject;
+# the Secrets below already carry the full path. Delete and recreate a Registry
+# and it gets a new project, because a new object has a new UID.
 #
 # No namespace is pinned here — supply one at apply time:
 #

@@ -53,17 +53,36 @@ and `namespace`. A copied `ownerReferences` is the one that bites: the other
 cluster's garbage collector looks for an owning `Registry`, does not find one,
 and deletes the Secret.
 
-### Project names are global
+### Project names identify one Registry
 
-A `Registry` becomes the Harbor project of the same name, and every namespace
-shares one Harbor. Names are therefore first-come, first-served across the whole
-platform: a name already held by another `Registry` is refused, and the refusal
-says so. A `Registry`'s name cannot be changed, so recovery is to delete it and
-create another.
+A `Registry` becomes a Harbor project named after it, with a short digest of its
+UID: `web` in namespace `acme-project-1` becomes something like `web-30cf39a6`.
+`.status.harborProject` reports the name, and the push and pull Secrets already
+carry the full path, so nothing has to be typed out by hand.
 
-The operator records which `Registry` owns each project it creates. A project it
-did not create is never adopted, even when the name is free to claim — nothing
-establishes that those images belong to the team asking for them.
+The suffix is what makes the name belong to one object:
+
+- **No two `Registry` objects can want the same project.** Names are not global
+  and not first-come, first-served — a team is never blocked by a name another
+  namespace took first.
+- **Nothing outside the cluster can predict the name.** A project under it was
+  created for this `Registry`, so the operator never has to ask who owns a
+  project, mark one, or work out what an interrupted creation left behind.
+  Creating the project is simply idempotent: `409 Conflict` means it is already
+  there.
+
+The trade-off is deliberate: a `Registry` that is **deleted and recreated** under
+the same name is a new object with a new UID, so it gets a new, empty project.
+Deleting a `Registry` already destroys its images, so nothing survives that the
+old name would have addressed — but a pipeline holding the old path has to read
+the new one from `.status.harborProject`.
+
+Two assumptions hold this up, and both are worth stating plainly. The digest is
+four bytes, so it separates `Registry` objects that share a name; two sharing a
+name *and* a namespace cannot exist. And anyone who can both read a `Registry`
+object and create projects in Harbor could create that project first — which
+means holding the operator's own Harbor credentials, at which point they can
+reach every project anyway.
 
 ## API
 
@@ -100,16 +119,26 @@ the source of truth, all work happens inside the reconcile loop, and the loop is
 level-triggered: every pass re-asserts the desired state and does nothing when it
 already holds. Leader election is on, so extra replicas act as hot standbys.
 
-**Reconcile** resolves the project name, refuses it if it is reserved, malformed,
-or held by another `Registry`, creates the project, records ownership, converges
-the quota, mints each robot account exactly once, and writes the Secrets. The
-quota is re-applied every pass, which is both how a plan change takes effect and
-how drift is corrected.
+**Reconcile** derives the project name, refuses it if Harbor cannot hold it,
+creates the project, converges the quota, mints each robot account exactly once,
+and writes the Secrets. The quota is re-applied every pass, which is both how a
+plan change takes effect and how drift is corrected.
 
 **Credentials are minted once.** The Secret's existence is what makes it
 once-only: re-minting would invalidate every copy already distributed. A robot
 left behind by an attempt that died before its Secret was written is unusable —
 its token was never stored — so it is replaced rather than failed against.
+
+A Secret already at that name which the `Registry` does not own is refused, not
+taken over: the `Registry` reports the collision and stops. Nothing the operator
+did not create is ever written to or deleted.
+
+Because credentials are minted once, they carry the address `HARBOR_URL` had at
+the time. Changing that address is a platform migration rather than something a
+reconcile absorbs — every pull Secret copied onto another cluster, every CI
+login and every image reference changes with it. To re-issue credentials for the
+new address, delete the two Secrets; the operator mints them again on its next
+pass, and every copy of the old ones has to be replaced.
 
 **Readiness is the Harbor check.** The pod turns Ready only once Harbor answers
 an authenticated call with the configured credentials, so an unusable Harbor

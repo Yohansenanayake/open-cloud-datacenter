@@ -448,7 +448,7 @@ func TestVerifyAccess(t *testing.T) {
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"username":"test-user"}`))
+			_, _ = w.Write([]byte(`{"user_id":3,"username":"test-user"}`))
 		})
 		defer srv.Close()
 
