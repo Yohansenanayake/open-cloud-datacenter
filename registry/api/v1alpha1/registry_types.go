@@ -53,9 +53,19 @@ type RegistryStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// HarborProject is the project created in Harbor for this Registry, and the
-	// record that one exists: the finalizer reads it to decide whether there is
-	// anything in Harbor to clean up.
+	// record that one exists and carries this Registry's ownership marker: the
+	// finalizer reads it to decide whether there is anything to clean up.
 	HarborProject string `json:"harborProject,omitempty"`
+
+	// PendingProject is the project name this Registry is about to create,
+	// written before the project is created and cleared once the ownership
+	// marker is in place.
+	//
+	// It is what lets a reconcile interrupted between the two recognise the
+	// project it created itself. Without it that project is indistinguishable
+	// from one made by hand, which the operator refuses to adopt, and the
+	// Registry could never reach Ready under its own name again.
+	PendingProject string `json:"pendingProject,omitempty"`
 
 	// RegistryURL is the Harbor URL to log in and push to.
 	RegistryURL string `json:"registryURL,omitempty"`

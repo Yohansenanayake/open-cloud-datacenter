@@ -130,6 +130,20 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.transient(ctx, &cr, "check Harbor project", err)
 	}
 
+	// Record the intent to create before creating, so that an interruption
+	// before the ownership marker is written still leaves evidence of which
+	// Registry the unmarked project belongs to. Without it the next reconcile
+	// cannot tell that project from one made by hand, refuses to adopt it, and
+	// the Registry can never reach Ready under its own name.
+	if cr.Status.PendingProject != projectName && cr.Status.HarborProject != projectName {
+		if err := r.patchStatus(ctx, req.NamespacedName, func(s *registryv1alpha1.RegistryStatus) {
+			s.PendingProject = projectName
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		cr.Status.PendingProject = projectName
+	}
+
 	// A 409 here means the name was claimed between the check above and now, or
 	// that this reconcile is resuming after the project was created but the
 	// status write never landed. created tells those apart for ensureOwnership,
@@ -179,6 +193,7 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		s.Phase = phaseReady
 		s.ObservedGeneration = cr.Generation
 		s.HarborProject = projectName
+		s.PendingProject = "" // the marker is in place; the intent is spent
 		s.RegistryURL = registryURL
 		s.PullSecretName = pullName
 		s.PushSecretName = pushName
@@ -375,11 +390,14 @@ func (r *RegistryReconciler) handleDelete(ctx context.Context, cr *registryv1alp
 // deleteHarborProject removes the Harbor project backing this Registry, along
 // with every repository inside it.
 //
-// status.harborProject is the gate: it is written only once the project really
-// exists in Harbor, so an empty value means nothing was created and there is
-// nothing to reclaim.
+// Status is the gate: harborProject names a project this Registry owns, and
+// pendingProject one it was interrupted while creating. Neither set means
+// nothing reached Harbor and there is nothing to reclaim.
 func (r *RegistryReconciler) deleteHarborProject(ctx context.Context, cr *registryv1alpha1.Registry, log logr.Logger) error {
 	projectName := cr.Status.HarborProject
+	if projectName == "" {
+		projectName = cr.Status.PendingProject
+	}
 	if projectName == "" {
 		return nil
 	}
@@ -405,7 +423,8 @@ func (r *RegistryReconciler) deleteHarborProject(ctx context.Context, cr *regist
 	if err != nil {
 		return fmt.Errorf("check who owns project %s: %w", projectName, err)
 	}
-	if owner != registryOwnerRef(cr) {
+	unmarkedAndPending := owner == "" && cr.Status.PendingProject == projectName
+	if owner != registryOwnerRef(cr) && !unmarkedAndPending {
 		log.Info("leaving Harbor project in place: it no longer belongs to this Registry",
 			"project", projectName, "owner", describeOwner(owner))
 		return nil
@@ -417,6 +436,16 @@ func (r *RegistryReconciler) deleteHarborProject(ctx context.Context, cr *regist
 	repos, err := cli.ListRepositories(ctx, projectName)
 	if err != nil {
 		return fmt.Errorf("list repositories in %s: %w", projectName, err)
+	}
+
+	// An unmarked project is only ever probably this Registry's: the intent to
+	// create it was recorded, but the marker that would prove it never was.
+	// Reclaiming an empty one frees the name; one holding images is left alone,
+	// because nothing here establishes that those images are this tenant's.
+	if unmarkedAndPending && len(repos) > 0 {
+		log.Info("leaving Harbor project in place: it is unmarked and holds images",
+			"project", projectName, "repositories", len(repos))
+		return nil
 	}
 	for _, repo := range repos {
 		log.Info("deleting Harbor repository", "project", projectName, "repository", repo)
@@ -515,10 +544,10 @@ var errProjectNameTaken = errors.New("harbor project name already taken")
 // rather than having the second pass reject the project the first one created.
 //
 // An existing project is adopted only when its ownership marker names this
-// Registry, which is what lets a reconcile that died before writing status
-// carry on against the project it created. An unmarked or foreign project is
-// refused: adopting one would hand this Registry credentials on images that are
-// not its own.
+// Registry, or when it carries no marker and status.pendingProject shows this
+// Registry was interrupted while creating it. Either way the project is one
+// this operator made; any other is refused, because adopting it would hand this
+// Registry credentials on images that are not its own.
 func (r *RegistryReconciler) claimProjectName(ctx context.Context, cli *harbor.Client, cr *registryv1alpha1.Registry, projectName string) error {
 	// status.harborProject is written only once the project is really ours, so
 	// its presence short-circuits the check on every later reconcile.
@@ -546,6 +575,11 @@ func (r *RegistryReconciler) claimProjectName(ctx context.Context, cli *harbor.C
 	if owner == registryOwnerRef(cr) {
 		return nil
 	}
+	// Unmarked, but this Registry recorded the intent to create it: an earlier
+	// reconcile created the project and was interrupted before marking it.
+	if owner == "" && cr.Status.PendingProject == projectName {
+		return nil
+	}
 
 	return fmt.Errorf("%w: %q already exists in the registry and belongs to %s. Registry "+
 		"names are global across every namespace, so rename this Registry",
@@ -570,7 +604,9 @@ func (r *RegistryReconciler) ensureOwnership(ctx context.Context, cli *harbor.Cl
 	switch {
 	case owner == registryOwnerRef(cr):
 		return nil // already ours
-	case owner == "" && created:
+	case owner == "" && (created || cr.Status.PendingProject == projectName):
+		// Unmarked, and either this reconcile created it or an earlier one
+		// recorded the intent to and was interrupted before marking it.
 		return cli.SetOwner(ctx, projectID, registryOwnerRef(cr))
 	default:
 		return fmt.Errorf("%w: %q belongs to %s", errProjectNameTaken, projectName, describeOwner(owner))
