@@ -695,3 +695,90 @@ func TestEnsureCredential_ReplacesASecretOfTheWrongType(t *testing.T) {
 		t.Errorf("credential host = %q, want %q", credentialHost(&replaced), dockerConfigHost(testHarborURL))
 	}
 }
+
+// Creating a project and marking it are two Harbor calls. A reconcile
+// interrupted between them leaves an unmarked project that the operator would
+// otherwise refuse as somebody else's, stranding the Registry at Failed with
+// its own project blocking its own name. status.pendingProject is the evidence
+// that closes that gap.
+func TestInterruptedCreation_RecognisesItsOwnUnmarkedProject(t *testing.T) {
+	cr := registryIn("acme-project-1", "web")
+	cr.Status.PendingProject = "web"
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cli := harborStub(t, http.StatusOK, "") // the project exists, unmarked
+
+	if err := r.claimProjectName(context.Background(), cli, cr, "web"); err != nil {
+		t.Fatalf("claimProjectName() error = %v, want the interrupted creation resumed", err)
+	}
+	if err := r.ensureOwnership(context.Background(), cli, cr, 7, "web", false); err != nil {
+		t.Fatalf("ensureOwnership() error = %v, want the project marked on resume", err)
+	}
+}
+
+// The intent is specific to one name: it must not become a way to adopt any
+// unmarked project that happens to be there.
+func TestInterruptedCreation_DoesNotAdoptAnotherName(t *testing.T) {
+	cr := registryIn("acme-project-1", "web")
+	cr.Status.PendingProject = "other"
+	r := newRegistryReconciler(t, newFakeClient(t))
+	cli := harborStub(t, http.StatusOK, "")
+
+	if err := r.claimProjectName(context.Background(), cli, cr, "web"); !errors.Is(err, errProjectNameTaken) {
+		t.Fatalf("claimProjectName() error = %v, want errProjectNameTaken", err)
+	}
+	if err := r.ensureOwnership(context.Background(), cli, cr, 7, "web", false); !errors.Is(err, errProjectNameTaken) {
+		t.Fatalf("ensureOwnership() error = %v, want errProjectNameTaken", err)
+	}
+}
+
+// Deleting such a Registry must free the name, or the project it created stays
+// in Harbor and blocks every later Registry from using that name.
+func TestDeleteHarborProject_ReclaimsAnEmptyPendingProject(t *testing.T) {
+	reg := registryIn("acme-project-1", "web")
+	reg.Status.PendingProject = "web" // interrupted before the marker was written
+	url, requests := harborProjectStub(t, "")
+
+	r := deleteReconciler(t, url, reg)
+	if err := r.deleteHarborProject(context.Background(), reg, testLogger()); err != nil {
+		t.Fatalf("deleteHarborProject() error = %v", err)
+	}
+	if !called(*requests, "DELETE /api/v2.0/projects/web") {
+		t.Errorf("requests = %v, want the empty project this Registry created reclaimed", *requests)
+	}
+}
+
+// An unmarked project holding images is only probably this Registry's. Nothing
+// proves those images are this tenant's, so the name stays blocked rather than
+// the images being destroyed.
+func TestDeleteHarborProject_LeavesAnUnmarkedProjectHoldingImages(t *testing.T) {
+	reg := registryIn("acme-project-1", "web")
+	reg.Status.PendingProject = "web"
+
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v2.0/labels"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		case strings.HasSuffix(r.URL.Path, "/repositories"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"name":"web/app"}]`))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"project_id":7}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	r := deleteReconciler(t, srv.URL, reg)
+	if err := r.deleteHarborProject(context.Background(), reg, testLogger()); err != nil {
+		t.Fatalf("deleteHarborProject() error = %v", err)
+	}
+	for _, req := range seen {
+		if strings.HasPrefix(req, "DELETE") {
+			t.Errorf("requests = %v, want nothing deleted from an unmarked project holding images", seen)
+			break
+		}
+	}
+}
