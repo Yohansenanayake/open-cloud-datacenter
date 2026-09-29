@@ -280,11 +280,18 @@ install-helm: ## Install the latest version of Helm.
 
 .PHONY: helm-deploy
 helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
+	@img='$(IMG)'; \
+	last_segment="$${img##*/}"; \
+	if [ "$${last_segment}" != "$${last_segment%:*}" ]; then \
+		repo="$${img%:*}"; tag="$${img##*:}"; \
+	else \
+		repo="$$img"; tag="latest"; \
+	fi; \
 	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
 		--namespace $(HELM_NAMESPACE) \
 		--create-namespace \
-		--set manager.image.repository=$${IMG%:*} \
-		--set manager.image.tag=$${IMG##*:} \
+		--set manager.image.repository="$$repo" \
+		--set manager.image.tag="$$tag" \
 		--wait \
 		--timeout 5m \
 		$(HELM_EXTRA_ARGS)

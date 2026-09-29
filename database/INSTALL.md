@@ -160,7 +160,7 @@ A version bump does **not** need disable/re-enable — Harvester's controller re
 4. `kubectl patch addon dbaas-operator -n dbaas-system --type merge -p '{"spec":{"version":"<new-version>"}}'`
 5. Verify as in step 9, plus `kubectl get dbinstance -A` to confirm existing instances stayed `Available`.
 
-During the rolling update, old and new manager pods may briefly overlap — this is exactly what `manager.leaderElection` (`values.yaml`) guards against.
+During the rolling update, old and new manager pods may briefly overlap — this is exactly what leader election (`--operator.leaderElection.enabled=true` in `manager.args`, `values.yaml`) guards against.
 
 ## Uninstalling / rolling back
 
