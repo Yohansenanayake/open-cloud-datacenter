@@ -210,7 +210,7 @@ func robotFullName(projectName, robotName string) string {
 // precisely the state a failed credentials-Secret write leaves behind, so a
 // conflict here means the previous attempt died mid-way: replace the orphan
 // rather than failing forever against it.
-func (c *Client) EnsureProjectRobotAccount(ctx context.Context, projectName, robotName string, access RobotAccess) (*RobotAccount, error) {
+func (c *Client) EnsureProjectRobotAccount(ctx context.Context, projectID int64, projectName, robotName string, access RobotAccess) (*RobotAccount, error) {
 	robot, err := c.createProjectRobotAccount(ctx, projectName, robotName, access)
 	if err == nil {
 		return robot, nil
@@ -221,7 +221,7 @@ func (c *Client) EnsureProjectRobotAccount(ctx context.Context, projectName, rob
 		return nil, err
 	}
 
-	id, findErr := c.findProjectRobotID(ctx, projectName, robotName)
+	id, findErr := c.findProjectRobotID(ctx, projectID, projectName, robotName)
 	if findErr != nil {
 		return nil, findErr
 	}
@@ -236,14 +236,20 @@ func (c *Client) EnsureProjectRobotAccount(ctx context.Context, projectName, rob
 
 // findProjectRobotID returns the ID of the project robot named robotName, or 0
 // when Harbor holds no such account.
-func (c *Client) findProjectRobotID(ctx context.Context, projectName, robotName string) (int64, error) {
+//
+// The listing must be scoped to the project. Unfiltered, /robots returns only
+// system-level accounts, so a project robot is never found there and an
+// orphaned one can never be replaced; Harbor also rejects a Level=project
+// filter that carries no project id.
+func (c *Client) findProjectRobotID(ctx context.Context, projectID int64, projectName, robotName string) (int64, error) {
 	want := robotFullName(projectName, robotName)
+	scope := url.QueryEscape(fmt.Sprintf("Level=project,ProjectID=%d", projectID))
 	for page := 1; page <= maxPages; page++ {
 		var batch []struct {
 			ID   int64  `json:"id"`
 			Name string `json:"name"`
 		}
-		path := fmt.Sprintf("/api/v2.0/robots?page=%d&page_size=%d", page, pageSize)
+		path := fmt.Sprintf("/api/v2.0/robots?q=%s&page=%d&page_size=%d", scope, page, pageSize)
 		if err := c.get(ctx, path, &batch, http.StatusOK); err != nil {
 			return 0, fmt.Errorf("list robots page %d: %w", page, err)
 		}

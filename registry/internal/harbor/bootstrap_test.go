@@ -253,7 +253,7 @@ func TestEnsureProjectRobotAccount(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(wantRobot)
 		})
-		robot, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot", AccessPush)
+		robot, err := cli.EnsureProjectRobotAccount(context.Background(), 5, "acme-project", "ci-robot", AccessPush)
 		if err != nil {
 			t.Fatalf("EnsureProjectRobotAccount() error = %v", err)
 		}
@@ -279,8 +279,16 @@ func TestEnsureProjectRobotAccount(t *testing.T) {
 				w.WriteHeader(http.StatusCreated)
 				_ = json.NewEncoder(w).Encode(wantRobot)
 			case r.Method == http.MethodGet && r.URL.Path == "/api/v2.0/robots":
+				// Harbor lists only system-level robots unless the query names
+				// the project, and rejects Level=project without an id.
+				q := r.URL.Query().Get("q")
+				if !strings.Contains(q, "Level=project") {
+					t.Errorf("robot listing q=%q, want it scoped with Level=project", q)
+				}
+				if !strings.Contains(q, "ProjectID=5") {
+					t.Errorf("robot listing q=%q, want it to name ProjectID=5", q)
+				}
 				_ = json.NewEncoder(w).Encode([]map[string]interface{}{
-					{"id": 7, "name": "robot$other-project+ci-robot"},
 					{"id": 42, "name": "robot$acme-project+ci-robot"},
 				})
 			case r.Method == http.MethodDelete && r.URL.Path == "/api/v2.0/robots/42":
@@ -290,7 +298,7 @@ func TestEnsureProjectRobotAccount(t *testing.T) {
 				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			}
 		})
-		robot, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot", AccessPush)
+		robot, err := cli.EnsureProjectRobotAccount(context.Background(), 5, "acme-project", "ci-robot", AccessPush)
 		if err != nil {
 			t.Fatalf("EnsureProjectRobotAccount() error = %v", err)
 		}
@@ -316,7 +324,7 @@ func TestEnsureProjectRobotAccount(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusConflict)
 		})
-		_, err := cli.EnsureProjectRobotAccount(context.Background(), "acme-project", "ci-robot", AccessPush)
+		_, err := cli.EnsureProjectRobotAccount(context.Background(), 5, "acme-project", "ci-robot", AccessPush)
 		if err == nil {
 			t.Fatal("EnsureProjectRobotAccount() returned nil error when the conflicting " +
 				"account was not visible; the conflict must not be silently swallowed")
