@@ -720,6 +720,22 @@ func (h *harborFake) storage(id int64) int64 {
 	return h.quota[id]
 }
 
+// deleteProjectOutOfBand is an administrator removing the project in Harbor.
+// Harbor deletes a project's robots along with it.
+func (h *harborFake) deleteProjectOutOfBand(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.projects[name]
+	delete(h.projects, name)
+	delete(h.repos, name)
+	for robot, project := range h.robotProject {
+		if project == id {
+			delete(h.robotProject, robot)
+			delete(h.robots, robot)
+		}
+	}
+}
+
 func (h *harborFake) robotCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1277,5 +1293,63 @@ func TestReconcile_DeletingASecretRevokesAndReplacesTheCredential(t *testing.T) 
 	}
 	if n := h.robotCount(); n != 2 {
 		t.Errorf("Harbor holds %d robots for this Registry, want 2", n)
+	}
+}
+
+// An administrator deleting the project in Harbor takes its robots with it, so
+// the credentials in the Secrets authenticate nothing. Recreating the project
+// without reissuing them would report Ready while every pull and push 401s.
+func TestReconcile_ProjectDeletedOutOfBandReissuesCredentials(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	before := registryState(t, r, cr)
+	pullBefore := secretFor(t, r, cr, "web-pull").Data[corev1.DockerConfigJsonKey]
+	pushBefore := secretFor(t, r, cr, "web-push").Data[corev1.DockerConfigJsonKey]
+
+	h.deleteProjectOutOfBand(before.Status.HarborProject)
+
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() after the project was deleted error = %v", err)
+	}
+
+	after := registryState(t, r, cr)
+	if after.Status.Phase != phaseReady {
+		t.Fatalf("phase = %q, want %q (message %q)", after.Status.Phase, phaseReady, after.Status.Message)
+	}
+	if after.Status.HarborProjectID == before.Status.HarborProjectID {
+		t.Errorf("project id = %d, want a new one after the project was recreated", after.Status.HarborProjectID)
+	}
+	if string(secretFor(t, r, cr, "web-pull").Data[corev1.DockerConfigJsonKey]) == string(pullBefore) {
+		t.Error("pull credential unchanged; it names a robot Harbor deleted with the old project")
+	}
+	if string(secretFor(t, r, cr, "web-push").Data[corev1.DockerConfigJsonKey]) == string(pushBefore) {
+		t.Error("push credential unchanged; it names a robot Harbor deleted with the old project")
+	}
+	if n := h.robotCount(); n != 2 {
+		t.Errorf("Harbor holds %d robots, want 2 minted in the new project", n)
+	}
+}
+
+// Reissuing must not reach a Secret this Registry does not control, for the
+// same reason writing one does not.
+func TestDeleteCredentialSecrets_LeavesSecretsItDoesNotOwn(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	theirs := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pull", Namespace: cr.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"note": []byte("not the operator's")},
+	}
+	r := newRegistryReconciler(t, newFakeClient(t, cr, theirs))
+
+	if err := r.deleteCredentialSecrets(context.Background(), cr); err != nil {
+		t.Fatalf("deleteCredentialSecrets() error = %v", err)
+	}
+	kept := secretFor(t, r, cr, "web-pull")
+	if string(kept.Data["note"]) != "not the operator's" {
+		t.Error("a Secret this Registry does not own was deleted")
 	}
 }
