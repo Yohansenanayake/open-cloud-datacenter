@@ -7,6 +7,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=reg
+// +kubebuilder:metadata:annotations="helm.sh/resource-policy=keep"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Project",type=string,JSONPath=`.status.harborProject`
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.registryURL`

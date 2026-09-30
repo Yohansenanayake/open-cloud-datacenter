@@ -426,7 +426,7 @@ func TestEnsureCredential_MintsTheRobotAndWritesTheSecret(t *testing.T) {
 	r := newRegistryReconciler(t, newFakeClient(t, cr))
 	cli, requests := harborRobotStub(t)
 
-	if err := r.ensureCredential(context.Background(), cr, cli, "web-30cf39a6",
+	if err := r.ensureCredential(context.Background(), cr, cli, 7, "web-30cf39a6",
 		testHarborURL, "web-pull", "pull-web", harbor.AccessPull); err != nil {
 		t.Fatalf("ensureCredential() error = %v", err)
 	}
@@ -466,7 +466,7 @@ func TestEnsureCredential_DoesNotMintAgainForItsOwnSecret(t *testing.T) {
 	cli, requests := harborRobotStub(t)
 
 	for i := 0; i < 3; i++ {
-		if err := r.ensureCredential(context.Background(), cr, cli, "web-30cf39a6",
+		if err := r.ensureCredential(context.Background(), cr, cli, 7, "web-30cf39a6",
 			testHarborURL, "web-pull", "pull-web", harbor.AccessPull); err != nil {
 			t.Fatalf("ensureCredential() pass %d error = %v", i+1, err)
 		}
@@ -489,7 +489,7 @@ func TestEnsureCredential_RefusesASecretItDoesNotOwn(t *testing.T) {
 	r := newRegistryReconciler(t, newFakeClient(t, cr, theirs))
 	cli, requests := harborRobotStub(t)
 
-	err := r.ensureCredential(context.Background(), cr, cli, "web-30cf39a6",
+	err := r.ensureCredential(context.Background(), cr, cli, 7, "web-30cf39a6",
 		testHarborURL, "web-pull", "pull-web", harbor.AccessPull)
 	if !errors.Is(err, errSecretNameTaken) {
 		t.Fatalf("ensureCredential() error = %v, want errSecretNameTaken", err)
@@ -510,26 +510,28 @@ func TestEnsureCredential_RefusesASecretItDoesNotOwn(t *testing.T) {
 // to tell a first pass from a repeat one. It records every request so a test
 // can assert what the operator did rather than only what it ended up with.
 type harborFake struct {
-	mu       sync.Mutex
-	projects map[string]int64    // name -> id
-	quota    map[int64]int64     // project id -> storage limit
-	robots   map[string]int64    // full robot name -> id
-	repos    map[string][]string // project -> repositories
-	requests []string
-	failPath string // every call under this path prefix fails
-	nextID   int64
-	down     bool // every call fails, as an unreachable Harbor does
-	URL      string
+	mu           sync.Mutex
+	projects     map[string]int64    // name -> id
+	quota        map[int64]int64     // project id -> storage limit
+	robots       map[string]int64    // full robot name -> id
+	robotProject map[string]int64    // full robot name -> project id
+	repos        map[string][]string // project -> repositories
+	requests     []string
+	failPath     string // every call under this path prefix fails
+	nextID       int64
+	down         bool // every call fails, as an unreachable Harbor does
+	URL          string
 }
 
 func newHarborFake(t *testing.T) *harborFake {
 	t.Helper()
 	h := &harborFake{
-		projects: map[string]int64{},
-		quota:    map[int64]int64{},
-		robots:   map[string]int64{},
-		repos:    map[string][]string{},
-		nextID:   1,
+		projects:     map[string]int64{},
+		quota:        map[int64]int64{},
+		robots:       map[string]int64{},
+		robotProject: map[string]int64{},
+		repos:        map[string][]string{},
+		nextID:       1,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(h.serve))
 	t.Cleanup(srv.Close)
@@ -636,12 +638,26 @@ func (h *harborFake) serve(w http.ResponseWriter, r *http.Request) {
 		id := h.nextID
 		h.nextID++
 		h.robots[full] = id
+		h.robotProject[full] = h.projects[body.Permissions[0].Namespace]
 		writeJSON(w, http.StatusCreated, fmt.Sprintf(`{"id":%d,"name":%q,"secret":"s3cret-%d"}`, id, full, id))
 
 	case p == "/api/v2.0/robots" && r.Method == http.MethodGet:
+		// Harbor 2.15.2 lists only system-level robots unless the query scopes
+		// the listing to a project, and rejects Level=project without an id.
+		q := r.URL.Query().Get("q")
+		if !strings.Contains(q, "Level=project") {
+			writeJSON(w, http.StatusOK, "[]")
+			return
+		}
+		if !strings.Contains(q, "ProjectID=") {
+			writeJSON(w, http.StatusBadRequest, `{"errors":[{"code":"BAD_REQUEST","message":"must with project ID when to query project robots"}]}`)
+			return
+		}
 		out := []string{}
 		for name, id := range h.robots {
-			out = append(out, fmt.Sprintf(`{"id":%d,"name":%q}`, id, name))
+			if h.robotProject[name] == h.projectOfQuery(q) {
+				out = append(out, fmt.Sprintf(`{"id":%d,"name":%q}`, id, name))
+			}
 		}
 		writeJSON(w, http.StatusOK, "["+strings.Join(out, ",")+"]")
 
@@ -650,6 +666,7 @@ func (h *harborFake) serve(w http.ResponseWriter, r *http.Request) {
 		for name, known := range h.robots {
 			if known == id {
 				delete(h.robots, name)
+				delete(h.robotProject, name)
 			}
 		}
 		w.WriteHeader(http.StatusOK)
@@ -657,6 +674,19 @@ func (h *harborFake) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+// projectOfQuery reads ProjectID=<n> out of Harbor's q parameter.
+func (h *harborFake) projectOfQuery(q string) int64 {
+	_, rest, found := strings.Cut(q, "ProjectID=")
+	if !found {
+		return 0
+	}
+	if cut, _, more := strings.Cut(rest, ","); more {
+		rest = cut
+	}
+	id, _ := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+	return id
 }
 
 func writeJSON(w http.ResponseWriter, status int, body string) {
@@ -688,6 +718,12 @@ func (h *harborFake) storage(id int64) int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.quota[id]
+}
+
+func (h *harborFake) robotCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.robots)
 }
 
 func (h *harborFake) setRepos(project string, repos ...string) {
@@ -1157,5 +1193,89 @@ func TestDeleteHarborProject_ReleasesWhenHarborHasNoProject(t *testing.T) {
 
 	if err := r.deleteHarborProject(context.Background(), cr, testLogger()); err != nil {
 		t.Errorf("deleteHarborProject() error = %v, want nil", err)
+	}
+}
+
+// Uninstalling the operator leaves the CRD, the Registry objects and their
+// Harbor projects in place, so reinstalling meets state it did not create in
+// this process. It must adopt that state rather than provision over it: a new
+// project would orphan the images, and a new robot would invalidate every
+// credential already copied onto other clusters.
+func TestReconcile_ReinstallAdoptsExistingState(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, fc := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	before := registryState(t, r, cr)
+	projectName := before.Status.HarborProject
+	projectID := before.Status.HarborProjectID
+	pullBefore := secretFor(t, r, cr, "web-pull").Data[corev1.DockerConfigJsonKey]
+	robotsBefore := h.countRequests("POST", "/api/v2.0/robots")
+
+	// The operator is removed and installed again: a new manager process, with
+	// nothing remembered, meeting the same cluster and the same Harbor.
+	reinstalled := newRegistryReconciler(t, fc)
+	reinstalled.HarborCfg.URL = h.URL
+	if _, err := reconcileUntilSettled(t, reinstalled, cr); err != nil {
+		t.Fatalf("Reconcile() after reinstall error = %v", err)
+	}
+
+	after := registryState(t, reinstalled, cr)
+	if after.Status.Phase != phaseReady {
+		t.Errorf("phase = %q, want %q after reinstall (message %q)", after.Status.Phase, phaseReady, after.Status.Message)
+	}
+	if after.Status.HarborProject != projectName || after.Status.HarborProjectID != projectID {
+		t.Errorf("project = %q/%d, want the original %q/%d — a new project would orphan the images",
+			after.Status.HarborProject, after.Status.HarborProjectID, projectName, projectID)
+	}
+	if got := h.countRequests("POST", "/api/v2.0/robots"); got != robotsBefore {
+		t.Errorf("minted %d robots during reinstall, want none: every copied credential would stop working", got-robotsBefore)
+	}
+	if got := secretFor(t, reinstalled, cr, "web-pull").Data[corev1.DockerConfigJsonKey]; string(got) != string(pullBefore) {
+		t.Error("the pull credential was rewritten during reinstall")
+	}
+	if id, ok := h.projectID(projectName); !ok || id != projectID {
+		t.Errorf("Harbor project id = %d (exists %v), want the original %d", id, ok, projectID)
+	}
+}
+
+// Deleting a credentials Secret is how a leaked credential is revoked: the
+// operator mints a replacement, and Harbor's 409 against the robot left behind
+// is resolved by replacing it. That recovery reaches Harbor through the robot
+// listing, which returns nothing at all unless it is scoped to the project — so
+// this is the test that proves the revocation procedure works end to end.
+func TestReconcile_DeletingASecretRevokesAndReplacesTheCredential(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	h := newHarborFake(t)
+	r, _ := reconcilerFor(t, h, cr)
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	before := secretFor(t, r, cr, "web-pull").Data[corev1.DockerConfigJsonKey]
+
+	// The compromised credential is destroyed; its robot stays in Harbor.
+	if err := r.Delete(context.Background(), secretFor(t, r, cr, "web-pull")); err != nil {
+		t.Fatalf("delete Secret: %v", err)
+	}
+	if _, err := reconcileUntilSettled(t, r, cr); err != nil {
+		t.Fatalf("Reconcile() after revocation error = %v", err)
+	}
+
+	after := secretFor(t, r, cr, "web-pull").Data[corev1.DockerConfigJsonKey]
+	if string(after) == string(before) {
+		t.Error("the credential is unchanged; the leaked one would still be valid")
+	}
+	if got := registryState(t, r, cr); got.Status.Phase != phaseReady {
+		t.Errorf("phase = %q, want %q (message %q)", got.Status.Phase, phaseReady, got.Status.Message)
+	}
+	// The orphan must be gone, not merely shadowed: one robot per credential.
+	if n := h.countRequests("DELETE", "/api/v2.0/robots/"); n != 1 {
+		t.Errorf("deleted %d robots, want 1 — the leaked robot must be revoked in Harbor", n)
+	}
+	if n := h.robotCount(); n != 2 {
+		t.Errorf("Harbor holds %d robots for this Registry, want 2", n)
 	}
 }

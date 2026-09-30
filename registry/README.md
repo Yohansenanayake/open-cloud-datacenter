@@ -194,6 +194,45 @@ kubectl apply -n <your-namespace> -k config/samples/
 kubectl get registries -A -w
 ```
 
+## Uninstalling
+
+Removing the operator does not remove anybody's registry:
+
+```sh
+make undeploy      # manager, RBAC, namespace — the CRD and every Registry stay
+```
+
+The CRD is not part of that overlay, and it carries `helm.sh/resource-policy:
+keep` so Helm leaves it alone too. Deleting a CRD deletes every custom resource
+defined by it, and each of those deletions runs the finalizer that destroys a
+Harbor project and its images — an uninstall must not be able to reach that.
+
+Reinstalling adopts what is already there. The project name is derived from the
+`Registry`, an existing project is recognised by its recorded id, and
+credentials are only minted when their Secret is absent, so nothing is recreated
+and no copied credential stops working.
+
+While the operator is uninstalled, deleting a `Registry` **hangs in
+Terminating**: its finalizer has nobody to run it. Reinstall the operator and
+the deletion completes. That is deliberate — the alternative is a Harbor project
+nothing owns.
+
+### Removing everything, deliberately
+
+Destroying tenant data is a separate, explicit act. Delete the registries first,
+let the operator clean Harbor up, and only then remove the operator and the CRD:
+
+```sh
+kubectl delete registries --all -A     # deletes the Harbor projects and every image
+kubectl get registries -A              # wait until this is empty
+make undeploy
+make uninstall                         # removes the CRD
+```
+
+Running `make uninstall` while registries still exist has the same effect
+through a path nobody reviews: the CRD goes, the objects go with it, and their
+finalizers destroy the projects.
+
 ## Build / test / develop
 
 ```sh

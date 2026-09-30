@@ -3,7 +3,11 @@ namespace: registry-system
 namePrefix: regi-
 
 resources:
-- ../crd
+# The CRD is deliberately NOT here. Deleting it would delete every Registry
+# with it, and each deletion runs a finalizer that destroys a Harbor project
+# and its images — so removing the operator must not be able to reach it.
+# `make install` and `make uninstall` own the CRD's lifecycle; `make deploy`
+# installs it first, `make undeploy` leaves it in place.
 - ../rbac
 - ../manager
 # [PROMETHEUS] To enable a Prometheus Operator ServiceMonitor for metrics
