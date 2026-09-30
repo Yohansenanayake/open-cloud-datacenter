@@ -138,7 +138,22 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				errProjectReplaced, projectName, proj.ProjectID, cr.Status.HarborProjectID))
 	}
 
-	// 6b. Record the id as soon as it is known, so the finalizer can tell this
+	// 6b. A project created in this pass under an id this Registry did not have
+	// means the old one was deleted out of band, and Harbor deleted its robots
+	// with it. The Secrets still hold those robots, so they authenticate nothing:
+	// drop them, and the credentials step below mints replacements in the new
+	// project. Copies made onto other clusters stop working either way — the
+	// images they were minted for are gone.
+	if created && cr.Status.HarborProjectID != 0 && cr.Status.HarborProjectID != proj.ProjectID {
+		if err := r.deleteCredentialSecrets(ctx, &cr); err != nil {
+			return r.transient(ctx, &cr, "reissue credentials", err)
+		}
+		r.Recorder.Eventf(&cr, nil, corev1.EventTypeWarning, reasonReissued, actionProvision,
+			"Harbor project %q was recreated as id %d; its credentials no longer authenticate and are being reissued",
+			projectName, proj.ProjectID)
+	}
+
+	// 6c. Record the id as soon as it is known, so the finalizer can tell this
 	// project from a later one sharing its name even if no pass reaches Ready.
 	if cr.Status.HarborProjectID != proj.ProjectID {
 		if err := r.patchStatus(ctx, req.NamespacedName, func(st *registryv1alpha1.RegistryStatus) {
@@ -216,6 +231,29 @@ var errSecretNameTaken = errors.New("credentials Secret name already in use")
 // errProjectReplaced marks a Harbor project that carries this Registry's name
 // but is not the project it created.
 var errProjectReplaced = errors.New("harbor project was replaced")
+
+// deleteCredentialSecrets removes both credential Secrets so the next pass mints
+// them again. Only Secrets this Registry controls are touched: one it does not
+// own belongs to whoever created it, exactly as when they are written.
+func (r *RegistryReconciler) deleteCredentialSecrets(ctx context.Context, cr *registryv1alpha1.Registry) error {
+	for _, name := range []string{pullSecretName(cr), pushSecretName(cr)} {
+		var sec corev1.Secret
+		err := r.Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, &sec)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !metav1.IsControlledBy(&sec, cr) {
+			continue
+		}
+		if err := r.Delete(ctx, &sec); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
 
 // ensureCredential mints one project robot account and writes its credentials
 // to a Secret, once.
