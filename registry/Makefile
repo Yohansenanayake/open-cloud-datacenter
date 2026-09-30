@@ -71,20 +71,20 @@ ifndef ignore-not-found
 endif
 
 .PHONY: install
-install: kustomize ## Install the CRDs into the cluster (KUBECONFIG / --context as needed).
+install: kustomize ## Install the CRD into the cluster (KUBECONFIG / --context as needed).
 	"$(KUSTOMIZE)" build config/crd | "$(KUBECTL)" apply -f -
 
 .PHONY: uninstall
-uninstall: kustomize ## Remove the CRDs from the cluster.
+uninstall: kustomize ## DESTRUCTIVE. Remove the CRD, which deletes every Registry and every Harbor project with it. Deleting the Registries first is the supported way to do this deliberately.
 	"$(KUSTOMIZE)" build config/crd | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
-deploy: kustomize ## Deploy the operator (namespace, RBAC, CRDs, manager) with generic placeholder config. Override IMG as needed.
+deploy: install ## Deploy the operator (CRD, namespace, RBAC, manager) with generic placeholder config. Override IMG as needed.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
-undeploy: kustomize ## Remove the operator from the cluster.
+undeploy: kustomize ## Remove the operator. The CRD and every Registry stay; see `make uninstall` to remove those deliberately.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy-local
@@ -94,6 +94,7 @@ deploy-local: kustomize ## Deploy using config/local — your real HARBOR_URL an
 		echo "Copy config/local/manager_local_patch.yaml.example to config/local/manager_local_patch.yaml and fill in your real values first."; \
 		exit 1; \
 	}
+	"$(KUSTOMIZE)" build config/crd | "$(KUBECTL)" apply -f -
 	"$(KUSTOMIZE)" build config/local | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy-local
