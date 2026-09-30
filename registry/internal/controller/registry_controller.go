@@ -155,7 +155,7 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// 8. Mint the robot accounts once and keep their credentials in Secrets.
-	if err := r.ensureCredentials(ctx, &cr, cli, projectName, registryURL); err != nil {
+	if err := r.ensureCredentials(ctx, &cr, cli, proj.ProjectID, projectName, registryURL); err != nil {
 		if errors.Is(err, errSecretNameTaken) {
 			return r.fail(ctx, &cr, "provision credentials", err)
 		}
@@ -192,7 +192,7 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // able to publish; a push Secret belongs to a build pipeline. One credential
 // doing both would mean any workload able to read its own pull Secret could
 // overwrite the images it pulls.
-func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registryv1alpha1.Registry, cli *harbor.Client, projectName, registryURL string) error {
+func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registryv1alpha1.Registry, cli *harbor.Client, projectID int64, projectName, registryURL string) error {
 	for _, c := range []struct {
 		secretName string
 		robotName  string
@@ -201,7 +201,7 @@ func (r *RegistryReconciler) ensureCredentials(ctx context.Context, cr *registry
 		{pullSecretName(cr), robotAccountName(cr, harbor.AccessPull), harbor.AccessPull},
 		{pushSecretName(cr), robotAccountName(cr, harbor.AccessPush), harbor.AccessPush},
 	} {
-		if err := r.ensureCredential(ctx, cr, cli, projectName, registryURL, c.secretName, c.robotName, c.access); err != nil {
+		if err := r.ensureCredential(ctx, cr, cli, projectID, projectName, registryURL, c.secretName, c.robotName, c.access); err != nil {
 			return err
 		}
 	}
@@ -230,7 +230,7 @@ var errProjectReplaced = errors.New("harbor project was replaced")
 // rather than taken over: it belongs to whoever created it, and overwriting or
 // deleting it would destroy something the operator never made.
 func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv1alpha1.Registry, cli *harbor.Client,
-	projectName, registryURL, secretName, robotName string, access harbor.RobotAccess) error {
+	projectID int64, projectName, registryURL, secretName, robotName string, access harbor.RobotAccess) error {
 
 	key := client.ObjectKey{Namespace: cr.Namespace, Name: secretName}
 	var existing corev1.Secret
@@ -245,7 +245,7 @@ func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv
 		return err
 	}
 
-	robot, err := cli.EnsureProjectRobotAccount(ctx, projectName, robotName, access)
+	robot, err := cli.EnsureProjectRobotAccount(ctx, projectID, projectName, robotName, access)
 	if err != nil {
 		return fmt.Errorf("create robot account %q: %w", robotName, err)
 	}
