@@ -77,6 +77,12 @@ type DBRestoreSpec struct {
 	// of the source. Omission means no ongoing backup capability.
 	// +optional
 	Backup *BackupSpec `json:"backup,omitempty"`
+
+	// VMPassword is passed through to the target's spec.vmPassword: the
+	// console/SSH password for the VM's default user (ubuntu). For
+	// development and debugging only — leave empty in production.
+	// +optional
+	VMPassword string `json:"vmPassword,omitempty"`
 }
 
 const (

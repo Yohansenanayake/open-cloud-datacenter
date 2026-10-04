@@ -527,6 +527,7 @@ func (r *DBRestoreReconciler) createTarget(ctx context.Context, restore *dbaasv1
 			NetworkRef:       restore.Spec.NetworkRef,
 			StaticNetwork:    restore.Spec.StaticNetwork,
 			Backup:           restore.Spec.Backup,
+			VMPassword:       restore.Spec.VMPassword,
 			RestoredFrom: &dbaasv1.RestoredFromRef{
 				DBRestoreName: restore.Name,
 				DBRestoreUID:  restore.UID,

@@ -39,11 +39,18 @@ const sandboxPGVer = "17"
 // "<name> <args>" to $SANDBOX/calls; behavior is steered by env vars.
 var stubs = map[string]string{
 	"systemctl": `echo "systemctl $*" >> "$SANDBOX/calls"
-if [ "$1" = "restart" ] && [ "$2" = "postgresql" ]; then
+if [ "$1" = "restart" ] && [ "${2#postgresql}" != "$2" ]; then
   conf="$SANDBOX/etc/postgresql/` + sandboxPGVer + `/main"
-  echo "restart listen=$(grep -o "^listen_addresses = '[^']*'" "$conf/postgresql.conf") hostssl=$(grep -c '^hostssl' "$conf/pg_hba.conf" || true)" >> "$SANDBOX/calls"
+  pidfile=absent; [ -f "$SANDBOX/var/lib/postgresql/` + sandboxPGVer + `/main/postmaster.pid" ] && pidfile=present
+  echo "restart listen=$(grep -o "^listen_addresses = '[^']*'" "$conf/postgresql.conf") hostssl=$(grep -c '^hostssl' "$conf/pg_hba.conf" || true) pidfile=$pidfile" >> "$SANDBOX/calls"
+  if [ "${SYSTEMCTL_START_FAIL:-0}" = "1" ]; then exit 1; fi
 fi`,
-	"pg_lsclusters":  `true`,
+	"pg_lsclusters": `true`,
+	// pgrep -x postgres: reports a server still running for the first
+	// $PGREP_RUNNING calls (or always, with PGREP_ALWAYS=1).
+	"pgrep": `n=$(cat "$SANDBOX/pgrep-count" 2>/dev/null || echo 0); echo $((n+1)) > "$SANDBOX/pgrep-count"
+if [ "${PGREP_ALWAYS:-0}" = "1" ] || [ "$n" -lt "${PGREP_RUNNING:-0}" ]; then echo "pgrep postgres running" >> "$SANDBOX/calls"; exit 0; fi
+echo "pgrep postgres gone" >> "$SANDBOX/calls"; exit 1`,
 	"pg_dropcluster": `echo "pg_dropcluster $*" >> "$SANDBOX/calls"`,
 	"pg_createcluster": `echo "pg_createcluster $*" >> "$SANDBOX/calls"
 conf="$SANDBOX/etc/postgresql/` + sandboxPGVer + `/main"
@@ -59,8 +66,11 @@ exit 0`,
 	"umount":    `echo "umount $*" >> "$SANDBOX/calls"`,
 	"chown":     `true`,
 	"cp":        `echo "cp $*" >> "$SANDBOX/calls"`,
-	"pg_isready": `[ "${PGISREADY_FAIL:-0}" = "1" ] && exit 1
-exit 0`,
+	// pg_isready: down for the first $PGISREADY_DOWN_FOR calls (or always,
+	// with PGISREADY_FAIL=1), then up.
+	"pg_isready": `n=$(cat "$SANDBOX/pgisready-count" 2>/dev/null || echo 0); echo $((n+1)) > "$SANDBOX/pgisready-count"
+if [ "${PGISREADY_FAIL:-0}" = "1" ] || [ "$n" -lt "${PGISREADY_DOWN_FOR:-0}" ]; then echo "pg_isready down" >> "$SANDBOX/calls"; exit 1; fi
+echo "pg_isready up" >> "$SANDBOX/calls"; exit 0`,
 	// Real time must pass for bash's SECONDS to advance; keep it short.
 	"sleep": `exec "$(PATH=/usr/bin:/bin command -v sleep)" 1`,
 	"sudo":  `shift 2; exec "$@"`,
@@ -120,6 +130,9 @@ type sandboxDisk struct {
 	filesystem bool
 	pgVersion  string // "" = no cluster on the disk
 	marker     string // restore marker already on the disk ("" = none)
+	// stalePID puts a postmaster.pid in the (mounted) data directory, as a
+	// crash-consistent snapshot of a running server carries.
+	stalePID bool
 }
 
 func runBootstrap(t *testing.T, restoreID string, disk sandboxDisk, env ...string) sandboxRun {
@@ -179,6 +192,9 @@ func runBootstrapParams(t *testing.T, p BootstrapParams, disk sandboxDisk, env .
 	if disk.marker != "" {
 		mustWrite("var/lib/postgresql/.dbaas-restored-from", disk.marker+"\n")
 	}
+	if disk.stalePID {
+		mustWrite("var/lib/postgresql/"+sandboxPGVer+"/main/postmaster.pid", "1234\n")
+	}
 	bin := filepath.Join(root, "stubbin")
 	for name, body := range stubs {
 		mustWrite(filepath.Join("stubbin", name), "#!/bin/bash\n"+body+"\n")
@@ -197,7 +213,7 @@ func runBootstrapParams(t *testing.T, p BootstrapParams, disk sandboxDisk, env .
 }
 
 // restoredDisk is a correctly restored data disk.
-var restoredDisk = sandboxDisk{attached: true, filesystem: true, pgVersion: sandboxPGVer}
+var restoredDisk = sandboxDisk{attached: true, filesystem: true, pgVersion: sandboxPGVer, stalePID: true}
 
 func TestBootstrapRestoreHappyPath(t *testing.T) {
 	run := runBootstrap(t, "restore-uid-1", restoredDisk)
@@ -359,5 +375,169 @@ func TestBootstrapRestoreFailsAfterConfiguredRecoveryTimeout(t *testing.T) {
 	}
 	if run.exists("var/lib/dbaas/bootstrap-complete") || strings.Contains(run.calls, "listen_addresses = '*'") {
 		t.Fatal("a timed-out restore must never report ready or open remote access")
+	}
+}
+
+// A crash-consistent snapshot carries the source's postmaster.pid; if any
+// process on the new VM happens to have that PID, PostgreSQL refuses to
+// start (seen in the e2e run: one of four restores of the same snapshot
+// failed). A pending restore removes it before PostgreSQL's first start.
+func TestBootstrapRestoreRemovesStalePostmasterPIDBeforeFirstStart(t *testing.T) {
+	run := runBootstrap(t, "restore-uid-1", restoredDisk)
+
+	if run.err != nil {
+		t.Fatalf("bootstrap failed: %v", run.err)
+	}
+	first := run.calls[strings.Index(run.calls, "restart listen="):]
+	if !strings.Contains(first[:strings.Index(first, "\n")], "pidfile=absent") {
+		t.Fatalf("PostgreSQL first started on the restored data with the stale postmaster.pid still present:\n%s", first)
+	}
+}
+
+// Only a pending restore removes it: an instance whose restore is already
+// recorded on its disk (a repave or VM recreation) never touches it.
+func TestBootstrapLeavesPostmasterPIDAloneOnceRestored(t *testing.T) {
+	disk := restoredDisk
+	disk.marker = "restore-uid-1"
+	run := runBootstrap(t, "restore-uid-1", disk)
+
+	if run.err != nil {
+		t.Fatalf("bootstrap failed: %v", run.err)
+	}
+	if !strings.Contains(run.calls, "pidfile=present") {
+		t.Fatal("postmaster.pid must not be touched outside a pending restore")
+	}
+}
+
+// The data disk is only touched once every PostgreSQL server is gone:
+// systemctl stop on the umbrella unit returns while the cluster is still
+// shutting down, and a shutdown checkpoint landing after the mount wrote
+// the throwaway cluster's pg_control onto a restored disk in testing.
+func TestBootstrapWaitsForPostgresToExitBeforeTouchingTheDataDisk(t *testing.T) {
+	for name, tc := range map[string]struct {
+		restoreID string
+		disk      sandboxDisk
+	}{
+		"restore":  {"restore-uid-1", restoredDisk},
+		"ordinary": {"", sandboxDisk{attached: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := runBootstrap(t, tc.restoreID, tc.disk, "PGREP_RUNNING=2")
+
+			if run.err != nil {
+				t.Fatalf("bootstrap failed: %v", run.err)
+			}
+			if !strings.Contains(run.calls, "systemctl stop postgresql@* postgresql") {
+				t.Fatal("must stop the cluster units by name, not only the postgresql umbrella unit")
+			}
+			lastRunning := strings.LastIndex(run.calls, "pgrep postgres running")
+			gone := strings.Index(run.calls, "pgrep postgres gone")
+			firstMount := strings.Index(run.calls, "\nmount ")
+			if lastRunning == -1 || gone == -1 || firstMount == -1 || lastRunning > gone || gone > firstMount {
+				t.Fatalf("the data disk was mounted before PostgreSQL had exited:\n%s", run.calls)
+			}
+		})
+	}
+}
+
+func TestBootstrapFailsClosedIfPostgresWontExit(t *testing.T) {
+	t.Run("restore", func(t *testing.T) {
+		run := runBootstrap(t, "restore-uid-1", restoredDisk, "PGREP_ALWAYS=1", "PG_STOP_TIMEOUT_SECONDS=2")
+
+		if run.err == nil {
+			t.Fatal("bootstrap must fail")
+		}
+		if !strings.Contains(run.read(t, "var/lib/dbaas/restore-failed"), "still running") {
+			t.Fatal("restore-failed must record that PostgreSQL wouldn't exit")
+		}
+		if strings.Contains(run.calls, "\nmount ") || run.exists("var/lib/dbaas/bootstrap-complete") {
+			t.Fatal("must not mount the restored disk, or report ready, while a server is still running")
+		}
+	})
+	t.Run("ordinary", func(t *testing.T) {
+		run := runBootstrap(t, "", sandboxDisk{attached: true}, "PGREP_ALWAYS=1", "PG_STOP_TIMEOUT_SECONDS=2")
+
+		if run.err == nil {
+			t.Fatal("bootstrap must fail")
+		}
+		if strings.Contains(run.calls, "mkfs.ext4") || strings.Contains(run.calls, "\nmount ") {
+			t.Fatal("must not format or mount the data disk while a server is still running")
+		}
+	})
+}
+
+// PostgreSQL is restarted by its cluster unit (systemctl waits for that,
+// unlike the postgresql umbrella unit), and nothing talks to it until it
+// accepts connections — on an ordinary first boot the role/database SQL
+// used to run straight after the umbrella restart, racing the server.
+func TestBootstrapWaitsForPostgresBeforeAnySQL(t *testing.T) {
+	for name, tc := range map[string]struct {
+		restoreID string
+		disk      sandboxDisk
+	}{
+		"ordinary": {"", sandboxDisk{attached: true}},
+		"restore":  {"restore-uid-1", restoredDisk},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := runBootstrap(t, tc.restoreID, tc.disk, "PGISREADY_DOWN_FOR=2")
+
+			if run.err != nil {
+				t.Fatalf("bootstrap failed: %v", run.err)
+			}
+			if !strings.Contains(run.calls, "systemctl restart postgresql@"+sandboxPGVer+"-main") ||
+				strings.Contains(run.calls, "systemctl restart postgresql\n") {
+				t.Fatal("PostgreSQL must be restarted by its cluster unit, never the umbrella unit")
+			}
+			lastDown := strings.LastIndex(run.calls, "pg_isready down")
+			firstSQL := strings.Index(run.calls, "psql ")
+			if lastDown == -1 || firstSQL == -1 || firstSQL < lastDown {
+				t.Fatalf("SQL ran before PostgreSQL accepted connections:\n%s", run.calls)
+			}
+		})
+	}
+}
+
+// A server that fails to start (as opposed to starting slowly) fails the
+// bootstrap at once — the two e2e failures sat out the full recovery
+// timeout before anything noticed.
+func TestBootstrapFailsFastWhenPostgresFailsToStart(t *testing.T) {
+	t.Run("restore", func(t *testing.T) {
+		start := time.Now()
+		run := runBootstrap(t, "restore-uid-1", restoredDisk, "SYSTEMCTL_START_FAIL=1")
+
+		if run.err == nil {
+			t.Fatal("bootstrap must fail")
+		}
+		if got := run.read(t, "var/lib/dbaas/restore-failed"); !strings.Contains(got, "failed to start on the restored data") {
+			t.Fatalf("restore-failed = %q, want the start failure", got)
+		}
+		if elapsed := time.Since(start); elapsed > 20*time.Second {
+			t.Fatalf("took %v: a failed start must not wait out the recovery timeout", elapsed)
+		}
+		if run.exists("var/lib/dbaas/bootstrap-complete") || strings.Contains(run.calls, "ALTER ROLE") {
+			t.Fatal("a failed start must not reset credentials or report ready")
+		}
+	})
+	t.Run("ordinary", func(t *testing.T) {
+		run := runBootstrap(t, "", sandboxDisk{attached: true}, "SYSTEMCTL_START_FAIL=1")
+
+		if run.err == nil {
+			t.Fatal("bootstrap must fail")
+		}
+		if strings.Contains(run.calls, "psql ") || run.exists("var/lib/dbaas/bootstrap-complete") {
+			t.Fatal("a failed start must not run SQL or report ready")
+		}
+	})
+}
+
+// An ordinary start that never accepts connections fails after its bound.
+func TestBootstrapFailsWhenPostgresNeverAcceptsConnections(t *testing.T) {
+	run := runBootstrap(t, "", sandboxDisk{attached: true}, "PGISREADY_FAIL=1", "PG_START_TIMEOUT_SECONDS=1")
+
+	if run.err == nil {
+		t.Fatal("bootstrap must fail")
+	}
+	if strings.Contains(run.calls, "psql ") || run.exists("var/lib/dbaas/bootstrap-complete") {
+		t.Fatal("must not run SQL or report ready without a reachable server")
 	}
 }

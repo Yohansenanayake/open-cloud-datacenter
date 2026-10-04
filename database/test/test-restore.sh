@@ -32,6 +32,9 @@
 # Env (defaults in brackets):
 #   NAMESPACE [default]  NETWORK_REF [vm-network-001]  DB_CLASS [db.t3.medium]
 #   ALLOCATED_STORAGE [20]  ROWS [20000]  RUN_ID [epoch seconds]
+#   VM_PASSWORD [random, printed at start]  console/SSH password for user
+#              "ubuntu" on every VM this run creates (source and restore
+#              targets), for debugging: virtctl console pg-<instance> -n <ns>
 #   PROVISION_TIMEOUT [900]  BACKUP_TIMEOUT [1200]  RESTORE_TIMEOUT [2400]
 #   FAIL_TIMEOUT [180]  POLL [5]
 #   SKIP_SOURCE_DELETE=1   skip phase 5 (restore after the source is gone)
@@ -53,6 +56,9 @@ BACKUP_TIMEOUT="${BACKUP_TIMEOUT:-1200}"
 RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-2400}"
 FAIL_TIMEOUT="${FAIL_TIMEOUT:-180}"
 POLL="${POLL:-5}"
+VM_PASSWORD="${VM_PASSWORD:-e2e-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
+# YAML single-quoted scalar: a literal ' is written as ''.
+VM_PASSWORD_YAML="'${VM_PASSWORD//\'/\'\'}'"
 
 CLEANUP=false
 for arg in "$@"; do
@@ -225,6 +231,7 @@ spec:
   dbInstanceClass: $DB_CLASS
   networkRef: $NETWORK_REF
   allocatedStorage: $4
+  vmPassword: $VM_PASSWORD_YAML
 EOF
 }
 
@@ -281,6 +288,7 @@ spec:
   dbInstanceClass: $DB_CLASS
   allocatedStorage: $ALLOCATED_STORAGE
   networkRef: $NETWORK_REF
+  vmPassword: $VM_PASSWORD_YAML
   backup: {}
 EOF
   wait_available "$SOURCE" || die "source DBInstance/$SOURCE never became usable"
@@ -541,6 +549,7 @@ main() {
   kubectl get crd dbrestores.dbaas.opencloud.wso2.com >/dev/null 2>&1 \
     || die "DBRestore CRD not installed — deploy the controller under test first"
   info "Run $RUN_ID in namespace $NAMESPACE (network $NETWORK_REF, class $DB_CLASS, ${ALLOCATED_STORAGE}Gi)"
+  info "VM console login for every VM in this run: ubuntu / $VM_PASSWORD  (virtctl console pg-<instance> -n $NAMESPACE)"
 
   phase_seed
   phase_restore_live_source

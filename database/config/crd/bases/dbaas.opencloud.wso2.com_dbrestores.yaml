@@ -183,6 +183,12 @@ spec:
                   after a failed attempt creates a new DBRestore object and can still
                   target the same instance name.
                 type: string
+              vmPassword:
+                description: |-
+                  VMPassword is passed through to the target's spec.vmPassword: the
+                  console/SSH password for the VM's default user (ubuntu). For
+                  development and debugging only — leave empty in production.
+                type: string
             required:
             - allocatedStorage
             - dbInstanceClass

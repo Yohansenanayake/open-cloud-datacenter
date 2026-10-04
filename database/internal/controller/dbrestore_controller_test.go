@@ -665,6 +665,7 @@ func TestDBRestoreCreatesTargetOnceVolumeBoundAndRecordsItsUID(t *testing.T) {
 	snap := readySnapshot()
 	restore := capturedRestore(snap)
 	restore.Spec.Backup = &dbaasv1.BackupSpec{}
+	restore.Spec.VMPassword = "debug-pw"
 	r, c := newRestoreReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimBound)), restore, snap)
 
 	reconcileRestore(t, r, restore)
@@ -679,6 +680,9 @@ func TestDBRestoreCreatesTargetOnceVolumeBoundAndRecordsItsUID(t *testing.T) {
 	}
 	if s.DBName != "appdb" || s.MasterUsername != "dbadmin" || s.EngineVersion != "16" || s.Port != 5432 || s.StorageType != "longhorn" {
 		t.Fatalf("target Spec = %+v, want fields inherited from the snapshot", s)
+	}
+	if s.VMPassword != "debug-pw" {
+		t.Fatalf("target VMPassword = %q, want it passed through from DBRestore.spec.vmPassword", s.VMPassword)
 	}
 	if s.RestoredFrom == nil || s.RestoredFrom.DBRestoreName != restore.Name || s.RestoredFrom.DBRestoreUID != restore.UID {
 		t.Fatalf("RestoredFrom = %+v, want this DBRestore", s.RestoredFrom)
