@@ -39,7 +39,7 @@ func TestEnsureRepaveWaitsForAnInProgressSnapshotHold(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	triggerRepave(inst, "now")
 
-	acquired, err := backup.Acquire(context.Background(), r.Client, inst.Namespace, backup.SnapshotHoldName(inst.UID), "snapshot:orders-daily-20260918", ownerRefFor(inst), nil)
+	acquired, err := (backup.Holds{Live: r.Client, Writer: r.Client}).Acquire(context.Background(), inst.Namespace, backup.SnapshotHoldName(inst.UID), "snapshot:orders-daily-20260918", ownerRefFor(inst), nil)
 	if err != nil {
 		t.Fatalf("simulate an in-progress snapshot: Acquire: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestEnsureRepaveHoldingTheLeaseBlocksASnapshot(t *testing.T) {
 	}
 
 	// A would-be snapshot creation tries to acquire the same lease next.
-	snapshotAcquire, err := backup.Acquire(context.Background(), r.Client, inst.Namespace, backup.SnapshotHoldName(inst.UID), "snapshot:orders-daily-20260918", ownerRefFor(inst), nil)
+	snapshotAcquire, err := (backup.Holds{Live: r.Client, Writer: r.Client}).Acquire(context.Background(), inst.Namespace, backup.SnapshotHoldName(inst.UID), "snapshot:orders-daily-20260918", ownerRefFor(inst), nil)
 	if err != nil {
 		t.Fatalf("snapshot Acquire: %v", err)
 	}

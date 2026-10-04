@@ -61,6 +61,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.DatabaseDefaults.OSVersion) == "" {
 		return fmt.Errorf("databaseDefaults.osVersion must not be empty")
 	}
+	if c.Restore.RecoveryTimeout <= 0 {
+		return fmt.Errorf("restore.recoveryTimeout must be positive")
+	}
 	if problems := validation.IsDNS1123Label(c.Infrastructure.Harvester.ImageNamespace); len(problems) > 0 {
 		return fmt.Errorf("infrastructure.harvester.imageNamespace %q is invalid: %s",
 			c.Infrastructure.Harvester.ImageNamespace, strings.Join(problems, ", "))

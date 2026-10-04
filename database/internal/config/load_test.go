@@ -42,6 +42,9 @@ func TestLoadDefaults(t *testing.T) {
 	if got.DatabaseDefaults != want.DatabaseDefaults {
 		t.Fatalf("DatabaseDefaults = %+v, want %+v", got.DatabaseDefaults, want.DatabaseDefaults)
 	}
+	if got.Restore.RecoveryTimeout != time.Hour {
+		t.Fatalf("Restore.RecoveryTimeout = %v, want 1h", got.Restore.RecoveryTimeout)
+	}
 	if len(got.InstanceClasses) != len(want.InstanceClasses) {
 		t.Fatalf("InstanceClasses has %d entries, want %d", len(got.InstanceClasses), len(want.InstanceClasses))
 	}
@@ -103,6 +106,37 @@ func TestEnvironmentNameNormalization(t *testing.T) {
 	}
 	if got.DatabaseDefaults.OSVersion != "22.04" {
 		t.Fatalf("OSVersion = %q, want 22.04", got.DatabaseDefaults.OSVersion)
+	}
+}
+
+func TestRestoreRecoveryTimeoutIsConfigurable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file string
+		env  string
+		args []string
+		want time.Duration
+	}{
+		"config file": {file: `{"restore": {"recoveryTimeout": "90m"}}`, want: 90 * time.Minute},
+		"environment": {env: "2h", want: 2 * time.Hour},
+		"flag":        {args: []string{"--restore.recoveryTimeout=45m"}, want: 45 * time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigurationEnvironment(t)
+			if tc.env != "" {
+				t.Setenv("DBAAS_RESTORE__RECOVERY_TIMEOUT", tc.env)
+			}
+			file := tc.file
+			if file == "" {
+				file = "{}"
+			}
+			got, err := load(flag.NewFlagSet("test", flag.ContinueOnError), tc.args, writeConfig(t, file))
+			if err != nil {
+				t.Fatalf("load() error = %v", err)
+			}
+			if got.Restore.RecoveryTimeout != tc.want {
+				t.Fatalf("Restore.RecoveryTimeout = %v, want %v", got.Restore.RecoveryTimeout, tc.want)
+			}
+		})
 	}
 }
 

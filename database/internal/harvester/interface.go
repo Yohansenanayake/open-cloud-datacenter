@@ -112,15 +112,32 @@ type ClientInterface interface {
 	// restore controller uses internally, without going through
 	// VirtualMachineRestore (which manages a whole VM's identity/lifecycle,
 	// not just its data — see yohan-docs/backups/harvester-vm-backup/).
-	// Idempotent: AlreadyExists is treated as success. Does not wait for
-	// binding — see GetPVCPhase.
-	CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, owner *metav1.OwnerReference) error
+	// AlreadyExists is swallowed, so a PVC already under pvcName is NOT
+	// proof it's the one requested — callers must verify it via GetPVC
+	// (labels, spec.dataSource). Does not wait for binding.
+	CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, labels map[string]string) error
 
-	// GetPVCPhase returns a PVC's current phase (Pending/Bound/Lost) —
-	// creating a restore PVC is instant, but Longhorn actually copying the
-	// snapshot's data into it is not; callers must wait for Bound, not just
-	// for creation to succeed.
-	GetPVCPhase(ctx context.Context, ns, name string) (corev1.PersistentVolumeClaimPhase, error)
+	// GetPVC returns the live PVC (NotFound as an error). Creating a restore
+	// PVC is instant, but Longhorn copying the snapshot's data into it is
+	// not — callers wait for Bound, and verify the PVC's identity, on every
+	// pass rather than trusting an earlier observation.
+	GetPVC(ctx context.Context, ns, name string) (*corev1.PersistentVolumeClaim, error)
+
+	// GetVolumeSnapshotState returns the live state of a CSI VolumeSnapshot
+	// — the object a restore PVC's dataSource actually reads from. A
+	// DBSnapshot's Ready condition is only a record of what was true when
+	// its backup completed; this is the thing itself. NotFound is returned
+	// as an error.
+	GetVolumeSnapshotState(ctx context.Context, ns, name string) (VolumeSnapshotState, error)
+}
+
+// VolumeSnapshotState is the provider-neutral live state of a VolumeSnapshot.
+type VolumeSnapshotState struct {
+	ReadyToUse bool
+	// Deleting is true once the VolumeSnapshot has a deletionTimestamp.
+	Deleting bool
+	// ErrorMessage is empty unless the snapshotter recorded an error.
+	ErrorMessage string
 }
 
 // VMBackupStatus is the provider-neutral status of a VirtualMachineBackup.

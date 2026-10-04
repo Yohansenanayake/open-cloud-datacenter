@@ -21,7 +21,9 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
@@ -102,8 +104,20 @@ type StubHarvester struct {
 	GetVMBackupStatusErr error
 	DeleteVMBackupErr    error
 	CreateRestorePVCErr  error
-	PVCPhase             corev1.PersistentVolumeClaimPhase
-	GetPVCPhaseErr       error
+	GetPVCErr            error
+
+	// PVCs is an in-memory PVC store keyed by name, so tests can seed a PVC
+	// (including a foreign one under the expected name) or delete one out
+	// of band. CreateRestorePVC adds to it only when the name is absent —
+	// mirroring the real client's swallowed AlreadyExists — with
+	// Status.Phase = NewRestorePVCPhase (zero value: "", i.e. not Bound).
+	PVCs               map[string]*corev1.PersistentVolumeClaim
+	NewRestorePVCPhase corev1.PersistentVolumeClaimPhase
+
+	// VolumeSnapshots is the live VolumeSnapshot state keyed by name; a name
+	// absent from it reads as NotFound.
+	VolumeSnapshots           map[string]harvester.VolumeSnapshotState
+	GetVolumeSnapshotStateErr error
 
 	CreateVMBackupCalls   int
 	DeleteVMBackupCalls   int
@@ -114,6 +128,11 @@ type StubHarvester struct {
 	// LastRestorePVCSnapshotName captures the most recent CreateRestorePVC
 	// volumeSnapshotName input.
 	LastRestorePVCSnapshotName string
+	// LastRestorePVCName, LastRestorePVCSizeGB, and LastRestorePVCStorageClass
+	// capture the rest of the most recent CreateRestorePVC call's inputs.
+	LastRestorePVCName         string
+	LastRestorePVCSizeGB       int
+	LastRestorePVCStorageClass string
 }
 
 func (s *StubHarvester) CreateVMBackup(_ context.Context, _, _, sourceVMName string, _ *metav1.OwnerReference) error {
@@ -128,13 +147,55 @@ func (s *StubHarvester) DeleteVMBackup(_ context.Context, _, _ string) error {
 	s.DeleteVMBackupCalls++
 	return s.DeleteVMBackupErr
 }
-func (s *StubHarvester) CreateRestorePVC(_ context.Context, _, _, volumeSnapshotName string, _ int, _ string, _ *metav1.OwnerReference) error {
+func (s *StubHarvester) CreateRestorePVC(_ context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, labels map[string]string) error {
 	s.CreateRestorePVCCalls++
+	s.LastRestorePVCName = pvcName
 	s.LastRestorePVCSnapshotName = volumeSnapshotName
-	return s.CreateRestorePVCErr
+	s.LastRestorePVCSizeGB = sizeGB
+	s.LastRestorePVCStorageClass = storageClassName
+	if s.CreateRestorePVCErr != nil {
+		return s.CreateRestorePVCErr
+	}
+	if s.PVCs == nil {
+		s.PVCs = map[string]*corev1.PersistentVolumeClaim{}
+	}
+	if _, exists := s.PVCs[pvcName]; !exists {
+		s.PVCs[pvcName] = RestorePVC(ns, pvcName, volumeSnapshotName, labels, s.NewRestorePVCPhase)
+	}
+	return nil
 }
-func (s *StubHarvester) GetPVCPhase(_ context.Context, _, _ string) (corev1.PersistentVolumeClaimPhase, error) {
-	return s.PVCPhase, s.GetPVCPhaseErr
+func (s *StubHarvester) GetPVC(_ context.Context, _, name string) (*corev1.PersistentVolumeClaim, error) {
+	if s.GetPVCErr != nil {
+		return nil, s.GetPVCErr
+	}
+	pvc, ok := s.PVCs[name]
+	if !ok {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "persistentvolumeclaims"}, name)
+	}
+	return pvc.DeepCopy(), nil
+}
+
+func (s *StubHarvester) GetVolumeSnapshotState(_ context.Context, _, name string) (harvester.VolumeSnapshotState, error) {
+	if s.GetVolumeSnapshotStateErr != nil {
+		return harvester.VolumeSnapshotState{}, s.GetVolumeSnapshotStateErr
+	}
+	state, ok := s.VolumeSnapshots[name]
+	if !ok {
+		return harvester.VolumeSnapshotState{}, apierrors.NewNotFound(schema.GroupResource{Group: "snapshot.storage.k8s.io", Resource: "volumesnapshots"}, name)
+	}
+	return state, nil
+}
+
+// RestorePVC builds a PVC shaped like the one CreateRestorePVC produces.
+func RestorePVC(ns, name, volumeSnapshotName string, labels map[string]string, phase corev1.PersistentVolumeClaimPhase) *corev1.PersistentVolumeClaim {
+	group := "snapshot.storage.k8s.io"
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSource: &corev1.TypedLocalObjectReference{APIGroup: &group, Kind: "VolumeSnapshot", Name: volumeSnapshotName},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: phase},
+	}
 }
 
 func (s *StubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {

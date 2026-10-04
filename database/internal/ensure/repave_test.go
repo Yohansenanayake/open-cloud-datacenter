@@ -676,3 +676,26 @@ func TestEnsureRepaveContinuesAfterOwnPhaseChange(t *testing.T) {
 			inst.Status.LastAppliedRepaveTrigger, "trigger-1")
 	}
 }
+
+// A repave re-renders cloud-init; a restored instance must keep its restore
+// ID there, so the new OS disk's bootstrap still fails closed on a bad data
+// disk (the guest skips the one-time restore work via the data disk's own
+// marker, not via this).
+func TestEnsureRepaveKeepsRestoreIDInCloudInit(t *testing.T) {
+	r, inst, _ := newRepaveFixture(t, kubevirtv1.RunStrategyHalted, harvester.VMIReadiness{})
+	inst.Spec.RestoredFrom = &dbaasv1.RestoredFromRef{DBRestoreName: "orders-restore", DBRestoreUID: "restore-uid-9"}
+	convergeCredentials(t, context.Background(), r, inst)
+	triggerRepave(inst, "trigger-1")
+
+	if res := r.ensureRepave(context.Background(), inst); res.Reason != dbaasv1.ReasonRepaveApplied {
+		t.Fatalf("res = %+v, want RepaveApplied", res)
+	}
+
+	var ci corev1.Secret
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "tenant-a", Name: inst.Status.Resources.CloudInitSecretName}, &ci); err != nil {
+		t.Fatalf("cloud-init secret missing: %v", err)
+	}
+	if !strings.Contains(string(ci.Data["userdata"]), "RESTORE_ID='restore-uid-9'") {
+		t.Fatal("repave's regenerated cloud-init dropped the restore ID")
+	}
+}

@@ -17,8 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // DBInstanceSpec defines the desired state of a managed PostgreSQL database.
@@ -200,14 +200,28 @@ type DBInstanceSpec struct {
 	// +optional
 	Backup *BackupSpec `json:"backup,omitempty"`
 
-	// RestoreFrom names the DBSnapshot this instance is restored from. Set
-	// only at creation; immutable afterward — there is no field left to
-	// change that would make a second restore attempt meaningfully
-	// different (a terminally failed restore is retried by creating a new
-	// DBInstance, not by editing this one).
+	// RestoredFrom identifies the DBRestore that created this instance, if
+	// any. Set only by DBRestoreReconciler. Immutable afterward: a terminally failed
+	// restore is retried by creating a new DBRestore (and a new DBInstance)
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="restoreFrom is immutable after creation"
-	RestoreFrom *RestoreFromSpec `json:"restoreFrom,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="restoredFrom is immutable after creation"
+	RestoredFrom *RestoredFromRef `json:"restoredFrom,omitempty"`
+}
+
+// RestoredFromRef identifies the DBRestore that created a DBInstance — see
+// DBInstanceSpec.RestoredFrom.
+type RestoredFromRef struct {
+	// DBRestoreName is the name of the owning DBRestore, in the same
+	// namespace — for display and lookup only.
+	// +required
+	DBRestoreName string `json:"dbRestoreName"`
+
+	// DBRestoreUID is the DBRestore's UID, captured at Create() time — the
+	// naming salt diskIdentifierFor uses for this instance's restore PVC
+	// (prefixed "restore-"), matching the name DBRestoreReconciler already
+	// created it under.
+	// +required
+	DBRestoreUID types.UID `json:"dbRestoreUID"`
 }
 
 // BackupSpec configures backup capability for a DBInstance. Continuous WAL
@@ -247,28 +261,6 @@ type AutomatedBackupSpec struct {
 	// +kubebuilder:validation:Pattern=`^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`
 	PreferredWindowUTC string `json:"preferredWindowUTC,omitempty"`
 }
-
-// RestoreFromSpec names the snapshot a new DBInstance recovers from, and how.
-type RestoreFromSpec struct {
-	// SnapshotRef names a completed DBSnapshot in the same namespace. There
-	// is no automatic "latest" selection — every restore names one exactly.
-	// +required
-	SnapshotRef corev1.LocalObjectReference `json:"snapshotRef"`
-
-	// Mode selects the recovery mechanism. Snapshot (default) uses only the
-	// snapshot's own captured local WAL and works after the source instance
-	// is deleted. AvailableWAL additionally replays continuous WAL from the
-	// source's archive and is not available in this release.
-	// +optional
-	// +kubebuilder:default=Snapshot
-	// +kubebuilder:validation:Enum=Snapshot
-	Mode string `json:"mode,omitempty"`
-}
-
-const (
-	// RestoreFromSpec.Mode values.
-	RestoreModeSnapshot = "Snapshot"
-)
 
 // SecretKeyRef points to a single key within a K8s Secret.
 type SecretKeyRef struct {
@@ -393,14 +385,6 @@ type DBInstanceStatus struct {
 	// +optional
 	RecentUnplannedRestarts int `json:"recentUnplannedRestarts,omitempty"`
 
-	// Restore is populated only on a DBInstance created with RestoreFrom set.
-	// Once Stage is RestoreStageFailed it is terminal and permanent: this
-	// instance is never retried in place (RestoreFrom is immutable), and
-	// ordinary reconciliation must not create or recreate its VM or PVC for
-	// any reason, including spec.running.
-	// +optional
-	Restore *RestoreStatus `json:"restore,omitempty"`
-
 	// Backup tracks automated snapshot scheduling (spec.backup.automated).
 	// Populated only once spec.backup is set — never carries over from a
 	// prior instance, since backup presence is immutable after creation.
@@ -421,45 +405,6 @@ type BackupStatus struct {
 	// +optional
 	NextScheduledSnapshotTime *metav1.Time `json:"nextScheduledSnapshotTime,omitempty"`
 }
-
-// RestoreStatus records the controller-observed progress of a restore. It
-// intentionally excludes percentage progress, recovered WAL position, and
-// detailed guest errors — those never cross into Kubernetes status. Reaching
-// RestoreStageFailed does not release resources; that is a rebuild the
-// terminal-failure cleanup path performs first (deletion protection).
-type RestoreStatus struct {
-	// Stage is the controller-observed restore progress. It is a projection
-	// of which step is not yet satisfied, recomputed every reconcile — never
-	// a stored control variable that reconcile logic branches on.
-	// +optional
-	Stage string `json:"stage,omitempty"`
-
-	// Reason is a stable, machine-readable explanation for the current
-	// stage, particularly RestoreStageFailed (e.g. a timeout or storage
-	// error identifier).
-	// +optional
-	Reason string `json:"reason,omitempty"`
-
-	// SnapshotUID is the UID of the DBSnapshot this restore resolved
-	// spec.restoreFrom.snapshotRef to, captured once at admission so a
-	// later rename or recreation of the same-named snapshot can never
-	// silently redirect an in-progress restore.
-	// +optional
-	SnapshotUID string `json:"snapshotUID,omitempty"`
-
-	// Mode mirrors spec.restoreFrom.mode at admission time.
-	// +optional
-	Mode string `json:"mode,omitempty"`
-}
-
-const (
-	// RestoreStatus.Stage values.
-	RestoreStagePreparing        = "Preparing"
-	RestoreStageRestoringVolume  = "RestoringVolume"
-	RestoreStageStartingDatabase = "StartingDatabase"
-	RestoreStageSucceeded        = "Succeeded"
-	RestoreStageFailed           = "Failed"
-)
 
 // AppliedSpec records the subset of DBInstanceSpec fields that are
 // immutable after creation in this controller's implementation. Mutable

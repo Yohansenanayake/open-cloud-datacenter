@@ -253,45 +253,30 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
-              restoreFrom:
+              restoredFrom:
                 description: |-
-                  RestoreFrom names the DBSnapshot this instance is restored from. Set
-                  only at creation; immutable afterward — there is no field left to
-                  change that would make a second restore attempt meaningfully
-                  different (a terminally failed restore is retried by creating a new
-                  DBInstance, not by editing this one).
+                  RestoredFrom identifies the DBRestore that created this instance, if
+                  any. Set only by DBRestoreReconciler. Immutable afterward: a terminally failed
+                  restore is retried by creating a new DBRestore (and a new DBInstance)
                 properties:
-                  mode:
-                    default: Snapshot
+                  dbRestoreName:
                     description: |-
-                      Mode selects the recovery mechanism. Snapshot (default) uses only the
-                      snapshot's own captured local WAL and works after the source instance
-                      is deleted. AvailableWAL additionally replays continuous WAL from the
-                      source's archive and is not available in this release.
-                    enum:
-                    - Snapshot
+                      DBRestoreName is the name of the owning DBRestore, in the same
+                      namespace — for display and lookup only.
                     type: string
-                  snapshotRef:
+                  dbRestoreUID:
                     description: |-
-                      SnapshotRef names a completed DBSnapshot in the same namespace. There
-                      is no automatic "latest" selection — every restore names one exactly.
-                    properties:
-                      name:
-                        default: ""
-                        description: |-
-                          Name of the referent.
-                          This field is effectively required, but due to backwards compatibility is
-                          allowed to be empty. Instances of this type with an empty value here are
-                          almost certainly wrong.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        type: string
-                    type: object
-                    x-kubernetes-map-type: atomic
+                      DBRestoreUID is the DBRestore's UID, captured at Create() time — the
+                      naming salt diskIdentifierFor uses for this instance's restore PVC
+                      (prefixed "restore-"), matching the name DBRestoreReconciler already
+                      created it under.
+                    type: string
                 required:
-                - snapshotRef
+                - dbRestoreName
+                - dbRestoreUID
                 type: object
                 x-kubernetes-validations:
-                - message: restoreFrom is immutable after creation
+                - message: restoredFrom is immutable after creation
                   rule: self == oldSelf
               running:
                 default: true
@@ -664,37 +649,6 @@ spec:
                   RestartCount is the cumulative number of VM restarts detected or
                   initiated by the controller liveness loop (both planned and unplanned).
                 type: integer
-              restore:
-                description: |-
-                  Restore is populated only on a DBInstance created with RestoreFrom set.
-                  Once Stage is RestoreStageFailed it is terminal and permanent: this
-                  instance is never retried in place (RestoreFrom is immutable), and
-                  ordinary reconciliation must not create or recreate its VM or PVC for
-                  any reason, including spec.running.
-                properties:
-                  mode:
-                    description: Mode mirrors spec.restoreFrom.mode at admission time.
-                    type: string
-                  reason:
-                    description: |-
-                      Reason is a stable, machine-readable explanation for the current
-                      stage, particularly RestoreStageFailed (e.g. a timeout or storage
-                      error identifier).
-                    type: string
-                  snapshotUID:
-                    description: |-
-                      SnapshotUID is the UID of the DBSnapshot this restore resolved
-                      spec.restoreFrom.snapshotRef to, captured once at admission so a
-                      later rename or recreation of the same-named snapshot can never
-                      silently redirect an in-progress restore.
-                    type: string
-                  stage:
-                    description: |-
-                      Stage is the controller-observed restore progress. It is a projection
-                      of which step is not yet satisfied, recomputed every reconcile — never
-                      a stored control variable that reconcile logic branches on.
-                    type: string
-                type: object
             type: object
         type: object
     served: true

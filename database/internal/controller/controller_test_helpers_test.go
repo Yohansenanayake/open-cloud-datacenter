@@ -72,6 +72,7 @@ func testEnsureDependencies(r *DBInstanceReconciler) ensure.Dependencies {
 	}
 	return ensure.Dependencies{
 		Client:            r.Client,
+		APIReader:         r.Client, // test clients (fake / envtest) are uncached
 		Harvester:         r.Harvester,
 		Recorder:          r.Recorder,
 		GrafanaBaseURL:    r.GrafanaBaseURL,

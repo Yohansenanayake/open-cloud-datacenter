@@ -50,6 +50,10 @@ import (
 // updates the status, and requeues for the next phase.
 type DBInstanceReconciler struct {
 	client.Client
+	// APIReader is an uncached reader handed to the ensure steps for
+	// coordination reads (repave's snapshot hold). Defaults to the manager's
+	// APIReader in SetupWithManager.
+	APIReader client.Reader
 	Harvester harvester.ClientInterface
 	Recorder  record.EventRecorder
 	// GrafanaBaseURL is the cluster Grafana base used to render per-instance
@@ -69,6 +73,7 @@ type DBInstanceReconciler struct {
 	DatabaseDefaults operatorconfig.DatabaseDefaults
 	InstanceClasses  map[string]dbaasv1.InstanceClassSpec
 	Monitoring       operatorconfig.MonitoringConfig
+	Restore          operatorconfig.RestoreConfig
 }
 
 // DBInstance CRD permissions.
@@ -273,9 +278,13 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("operator namespace must not be empty")
 	}
 	r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if r.EnsureRunner == nil {
 		r.EnsureRunner = ensure.NewDefaultRunner(ensure.Dependencies{
 			Client:            r.Client,
+			APIReader:         r.APIReader,
 			Harvester:         r.Harvester,
 			Recorder:          r.Recorder,
 			GrafanaBaseURL:    r.GrafanaBaseURL,
@@ -283,6 +292,7 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DatabaseDefaults:  r.DatabaseDefaults,
 			InstanceClasses:   r.InstanceClasses,
 			Monitoring:        r.Monitoring,
+			Restore:           r.Restore,
 		})
 	}
 

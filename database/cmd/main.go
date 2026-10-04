@@ -152,6 +152,7 @@ func main() {
 		DatabaseDefaults:        cfg.DatabaseDefaults,
 		InstanceClasses:         cfg.InstanceClasses,
 		Monitoring:              cfg.Observability.Monitoring,
+		Restore:                 cfg.Restore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbinstance")
 		os.Exit(1)
@@ -161,6 +162,14 @@ func main() {
 		Harvester: hvClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbsnapshot")
+		os.Exit(1)
+	}
+	if err := (&controller.DBRestoreReconciler{
+		Client:           mgr.GetClient(),
+		Harvester:        hvClient,
+		DatabaseDefaults: cfg.DatabaseDefaults,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "dbrestore")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

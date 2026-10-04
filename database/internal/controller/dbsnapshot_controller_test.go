@@ -61,7 +61,7 @@ func testSnapshot() *dbaasv1.DBSnapshot {
 func newSnapshotReconciler(t *testing.T, stub *testutil.StubHarvester, objs ...client.Object) (*DBSnapshotReconciler, client.Client) {
 	t.Helper()
 	c := testutil.NewClient(t, objs...)
-	return &DBSnapshotReconciler{Client: c, Harvester: stub}, c
+	return &DBSnapshotReconciler{Client: c, APIReader: c, Harvester: stub}, c
 }
 
 func reconcileSnapshot(t *testing.T, r *DBSnapshotReconciler, snap *dbaasv1.DBSnapshot) reconcile.Result {
@@ -156,6 +156,54 @@ func TestDBSnapshotRejectsWhenSourceNotAvailable(t *testing.T) {
 	}
 }
 
+func TestDBSnapshotAdmissionCapturesSourceMetadataOnce(t *testing.T) {
+	source := availableSourceInstance()
+	source.Spec.DBName = "appdb"
+	source.Spec.EngineVersion = "17"
+	source.Spec.Port = 5432
+	source.Spec.StorageType = "longhorn"
+	source.Status.CurrentImageRevision = "test-ubuntu-24-04-postgres-r3"
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	stub := &testutil.StubHarvester{} // ReadyToUse defaults false: stays in progress, admission still ran
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+
+	reconcileSnapshot(t, r, snap)
+
+	got := getSnapshot(t, c, snap)
+	want := &dbaasv1.SourceMetadata{
+		InstanceUID:      source.UID,
+		DBName:           "appdb",
+		EngineVersion:    "17",
+		Port:             5432,
+		StorageType:      "longhorn",
+		AllocatedStorage: 20,
+		ImageRevision:    "test-ubuntu-24-04-postgres-r3",
+	}
+	if got.Status.Source == nil || *got.Status.Source != *want {
+		t.Fatalf("Status.Source = %+v, want %+v", got.Status.Source, want)
+	}
+
+	// A later pass, after the source's mutable allocatedStorage changes,
+	// must not overwrite what was already captured — it must reflect what
+	// was actually backed up, not the source's current state.
+	var freshSource dbaasv1.DBInstance
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: source.Namespace, Name: source.Name}, &freshSource); err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	freshSource.Spec.AllocatedStorage = 100
+	if err := c.Update(context.Background(), &freshSource); err != nil {
+		t.Fatalf("update source: %v", err)
+	}
+
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap))
+
+	got = getSnapshot(t, c, snap)
+	if got.Status.Source.AllocatedStorage != 20 {
+		t.Fatalf("AllocatedStorage = %d, want the originally-captured 20 (frozen, not re-read from the source)", got.Status.Source.AllocatedStorage)
+	}
+}
+
 func TestDBSnapshotWaitsWhenSnapshotHoldIsHeldByAnother(t *testing.T) {
 	source := availableSourceInstance()
 	snap := testSnapshot()
@@ -164,7 +212,7 @@ func TestDBSnapshotWaitsWhenSnapshotHoldIsHeldByAnother(t *testing.T) {
 	r, c := newSnapshotReconciler(t, stub, source, snap)
 
 	// Simulate repave already holding the lease.
-	if _, err := backup.Acquire(context.Background(), c, source.Namespace, backup.SnapshotHoldName(source.UID), "repave", instanceOwnerRef(source), nil); err != nil {
+	if _, err := (backup.Holds{Live: c, Writer: c}).Acquire(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID), "repave", instanceOwnerRef(source), nil); err != nil {
 		t.Fatalf("seed competing hold: %v", err)
 	}
 
@@ -208,7 +256,7 @@ func TestDBSnapshotBackupInProgressRequeues(t *testing.T) {
 	}
 
 	// The snapshot hold must still be held while the backup is in progress.
-	_, held, err := backup.Held(context.Background(), c, source.Namespace, backup.SnapshotHoldName(source.UID))
+	_, held, err := (backup.Holds{Live: c, Writer: c}).Held(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID))
 	if err != nil {
 		t.Fatalf("Held: %v", err)
 	}
@@ -234,8 +282,11 @@ func TestDBSnapshotReadyReleasesTheHoldAndRecordsManualOrigin(t *testing.T) {
 	if got.Status.Origin != dbaasv1.SnapshotOriginManual {
 		t.Fatalf("Origin = %q, want %q", got.Status.Origin, dbaasv1.SnapshotOriginManual)
 	}
+	if got.Status.DataVolumeSnapshotName != backupReadyStatus().DataVolumeSnapshotName {
+		t.Fatalf("DataVolumeSnapshotName = %q, want %q", got.Status.DataVolumeSnapshotName, backupReadyStatus().DataVolumeSnapshotName)
+	}
 
-	_, held, err := backup.Held(context.Background(), c, source.Namespace, backup.SnapshotHoldName(source.UID))
+	_, held, err := (backup.Holds{Live: c, Writer: c}).Held(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID))
 	if err != nil {
 		t.Fatalf("Held: %v", err)
 	}
@@ -297,7 +348,7 @@ func TestDBSnapshotFailedBackupCleansUpAndReleasesHold(t *testing.T) {
 	if stub.DeleteVMBackupCalls != 1 {
 		t.Fatalf("DeleteVMBackupCalls = %d, want 1 (clean up the failed backend attempt)", stub.DeleteVMBackupCalls)
 	}
-	_, held, err := backup.Held(context.Background(), c, source.Namespace, backup.SnapshotHoldName(source.UID))
+	_, held, err := (backup.Holds{Live: c, Writer: c}).Held(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID))
 	if err != nil {
 		t.Fatalf("Held: %v", err)
 	}
@@ -314,7 +365,7 @@ func TestDBSnapshotDeleteReleasesInFlightHoldAndDeletesBackend(t *testing.T) {
 	r, c := newSnapshotReconciler(t, stub, source, snap)
 
 	// Simulate creation still in flight: this snapshot holds the lease.
-	if _, err := backup.Acquire(context.Background(), c, source.Namespace, backup.SnapshotHoldName(source.UID), snapshotHolderIdentity(snap), instanceOwnerRef(source), nil); err != nil {
+	if _, err := (backup.Holds{Live: c, Writer: c}).Acquire(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID), snapshotHolderIdentity(snap), instanceOwnerRef(source), nil); err != nil {
 		t.Fatalf("seed in-flight hold: %v", err)
 	}
 
@@ -326,12 +377,103 @@ func TestDBSnapshotDeleteReleasesInFlightHoldAndDeletesBackend(t *testing.T) {
 	if stub.DeleteVMBackupCalls != 1 {
 		t.Fatalf("DeleteVMBackupCalls = %d, want 1", stub.DeleteVMBackupCalls)
 	}
-	_, held, err := backup.Held(context.Background(), c, source.Namespace, backup.SnapshotHoldName(source.UID))
+	_, held, err := (backup.Holds{Live: c, Writer: c}).Held(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID))
 	if err != nil {
 		t.Fatalf("Held: %v", err)
 	}
 	if held {
 		t.Fatal("in-flight snapshot hold still held after deletion cleanup")
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: snap.Namespace, Name: snap.Name}, &dbaasv1.DBSnapshot{}); err == nil {
+		t.Fatal("DBSnapshot still exists after its finalizer should have been removed")
+	}
+}
+
+// The restore-hold check that gates deleting the backend backup must read
+// the API server, not the cache: a restore hold acquired a moment ago that
+// the informer cache hasn't delivered yet must still block the delete.
+func TestDBSnapshotDeleteWaitsForRestoreHoldTheCacheHasNotSeenYet(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	snap.Status.Source = &dbaasv1.SourceMetadata{InstanceUID: source.UID}
+	stub := &testutil.StubHarvester{}
+	cache := testutil.NewClient(t, source, snap)
+	live := testutil.NewClient(t, source, snap)
+	r := &DBSnapshotReconciler{Client: cache, APIReader: live, Harvester: stub}
+
+	restoringOwner := instanceOwnerRef(&dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "restore-target", UID: "restoring-uid"}})
+	if _, err := (backup.Holds{Live: live, Writer: live}).Acquire(context.Background(), source.Namespace, backup.RestoreHoldName("restoring-uid"), "restoring-uid",
+		restoringOwner, map[string]string{backup.SourceUIDLabel: string(source.UID)}); err != nil {
+		t.Fatalf("seed restore hold (live only): %v", err)
+	}
+	if err := cache.Delete(context.Background(), snap); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	reconcileSnapshot(t, r, snap)
+
+	if stub.DeleteVMBackupCalls != 0 {
+		t.Fatal("DeleteVMBackup must not run while a restore hold exists on the API server, whatever the cache says")
+	}
+}
+
+func TestDBSnapshotDeleteWaitsForRestoreHoldOnSource(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	snap.Status.Source = &dbaasv1.SourceMetadata{InstanceUID: source.UID}
+	stub := &testutil.StubHarvester{}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+
+	// Simulate a restore in flight, reading from one of this source's snapshots.
+	restoringOwner := instanceOwnerRef(&dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "restore-target", UID: "restoring-uid"}})
+	if _, err := (backup.Holds{Live: c, Writer: c}).Acquire(context.Background(), source.Namespace, backup.RestoreHoldName("restoring-uid"), "restoring-uid",
+		restoringOwner, map[string]string{backup.SourceUIDLabel: string(source.UID)}); err != nil {
+		t.Fatalf("seed restore hold: %v", err)
+	}
+
+	if err := c.Delete(context.Background(), snap); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	res := reconcileSnapshot(t, r, snap)
+
+	if res.RequeueAfter != snapshotHoldRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v", res.RequeueAfter, snapshotHoldRequeue)
+	}
+	if stub.DeleteVMBackupCalls != 0 {
+		t.Fatal("DeleteVMBackup must not be called while a restore hold protects this source's snapshots")
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: snap.Namespace, Name: snap.Name}, &dbaasv1.DBSnapshot{}); err != nil {
+		t.Fatalf("DBSnapshot should still exist while blocked: %v", err)
+	}
+}
+
+func TestDBSnapshotDeleteProceedsOnceRestoreHoldReleased(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	snap.Status.Source = &dbaasv1.SourceMetadata{InstanceUID: source.UID}
+	stub := &testutil.StubHarvester{}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+
+	restoringOwner := instanceOwnerRef(&dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "restore-target", UID: "restoring-uid"}})
+	if _, err := (backup.Holds{Live: c, Writer: c}).Acquire(context.Background(), source.Namespace, backup.RestoreHoldName("restoring-uid"), "restoring-uid",
+		restoringOwner, map[string]string{backup.SourceUIDLabel: string(source.UID)}); err != nil {
+		t.Fatalf("seed restore hold: %v", err)
+	}
+	if err := c.Delete(context.Background(), snap); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	reconcileSnapshot(t, r, snap) // blocked pass
+
+	if err := (backup.Holds{Live: c, Writer: c}).Release(context.Background(), source.Namespace, backup.RestoreHoldName("restoring-uid"), "restoring-uid"); err != nil {
+		t.Fatalf("release restore hold: %v", err)
+	}
+	reconcileSnapshot(t, r, snap)
+
+	if stub.DeleteVMBackupCalls != 1 {
+		t.Fatalf("DeleteVMBackupCalls = %d, want 1 once the restore hold is released", stub.DeleteVMBackupCalls)
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: snap.Namespace, Name: snap.Name}, &dbaasv1.DBSnapshot{}); err == nil {
 		t.Fatal("DBSnapshot still exists after its finalizer should have been removed")

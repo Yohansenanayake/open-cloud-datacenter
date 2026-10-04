@@ -64,7 +64,7 @@ require (
 	github.com/kube-logging/logging-operator v0.0.0-20250424202944-7e1f9aad6e21 // indirect
 	github.com/kube-logging/logging-operator/pkg/sdk v0.12.0 // indirect
 	github.com/kubereboot/kured v1.13.1 // indirect
-	github.com/kubernetes-csi/external-snapshotter/client/v4 v4.2.0 // indirect
+	github.com/kubernetes-csi/external-snapshotter/client/v4 v4.2.0
 	github.com/longhorn/go-common-libs v0.0.0-20250215052214-151615b29f8e // indirect
 	github.com/longhorn/longhorn-manager v1.8.1 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect

@@ -209,7 +209,7 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// that below. If a snapshot holds it instead, wait rather than racing a
 	// Harvester VirtualMachineBackup that may be reading this VM's disks
 	// right now.
-	acquired, err := backup.Acquire(ctx, r.Client, inst.Namespace, backup.SnapshotHoldName(inst.UID), repaveSnapshotHoldHolder, ownerRefFor(inst), nil)
+	acquired, err := r.holds().Acquire(ctx, inst.Namespace, backup.SnapshotHoldName(inst.UID), repaveSnapshotHoldHolder, ownerRefFor(inst), nil)
 	if err != nil {
 		return Transient(err)
 	}
@@ -287,7 +287,7 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// the Transient/Pending returns above on purpose: releasing on a
 	// transient hiccup only to immediately re-acquire on retry would open a
 	// race window for no benefit.
-	if err := backup.Release(ctx, r.Client, inst.Namespace, backup.SnapshotHoldName(inst.UID), repaveSnapshotHoldHolder); err != nil {
+	if err := r.holds().Release(ctx, inst.Namespace, backup.SnapshotHoldName(inst.UID), repaveSnapshotHoldHolder); err != nil {
 		return Transient(err)
 	}
 
@@ -344,6 +344,9 @@ func (r *repaveStep) regenerateCloudInit(ctx context.Context, inst *dbaasv1.DBIn
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork,
 		EngineVersion:  engineVersion,
+		RestoreID:      restoreIDFor(inst),
+		// Only read by the guest when RestoreID is set.
+		RestoreRecoveryTimeout: r.restoreConfig().RecoveryTimeout,
 	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)

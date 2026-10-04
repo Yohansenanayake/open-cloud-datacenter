@@ -59,6 +59,9 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 	set.String("databaseDefaults.osVersion", defaults.DatabaseDefaults.OSVersion,
 		"Default baked-image OS stream (internal/catalog key) for DBInstance provisioning and repave.")
 
+	set.Duration("restore.recoveryTimeout", defaults.Restore.RecoveryTimeout,
+		"How long a restored instance's first boot waits for PostgreSQL to finish recovering the restored data before failing the restore.")
+
 	set.String("observability.grafana.baseURL", defaults.Observability.Grafana.BaseURL,
 		"Base URL used for per-instance Grafana links.")
 	set.String("observability.metrics.bindAddress", defaults.Observability.Metrics.BindAddress,

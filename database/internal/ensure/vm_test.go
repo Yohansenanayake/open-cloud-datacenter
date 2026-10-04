@@ -21,12 +21,14 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 )
 
@@ -275,6 +277,63 @@ func TestEnsureVMDiskNamesDisjointAcrossSameNameRecreate(t *testing.T) {
 	}
 }
 
+// When spec.restoredFrom is set, the disk naming salt comes from the owning
+// DBRestore's UID instead of this instance's own UID — this is the whole
+// coordination fix that lets DBRestoreReconciler create the data-disk PVC
+// under a name this instance will later look for, before this instance
+// exists at all (DBInstanceSpec.RestoredFrom's doc comment, design §6).
+func TestEnsureVMUsesRestoredFromUIDAsDiskSalt(t *testing.T) {
+	inst := newProvisionInst()
+	inst.UID = "11111111-1111-1111-1111-111111111111"
+	inst.Spec.RestoredFrom = &dbaasv1.RestoredFromRef{
+		DBRestoreName: "orders-restore",
+		DBRestoreUID:  "22222222-2222-2222-2222-222222222222",
+	}
+	stub := &stubHarvester{}
+	r := newTestHarness(t, stub, inst)
+	convergeCredentials(t, context.Background(), r, inst)
+
+	res := r.ensureVM(context.Background(), inst)
+
+	if res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
+	}
+	refs := inst.Status.Resources
+	if refs.DataVolumeName != "pg-orders-restore-22222222-data" {
+		t.Fatalf("DataVolumeName = %q, want pg-orders-restore-22222222-data (salted from DBRestoreUID, not %s's own UID)", refs.DataVolumeName, inst.UID)
+	}
+	if refs.OSDiskPVCName != "pg-orders-restore-22222222-os" {
+		t.Fatalf("OSDiskPVCName = %q, want pg-orders-restore-22222222-os", refs.OSDiskPVCName)
+	}
+}
+
+// RestoreDataVolumeName must predict the exact name diskIdentifierFor (via
+// dataVolumeNameFor/ensureVM) computes once the target DBInstance actually
+// exists with the matching spec.restoredFrom — that agreement, reached
+// without either controller waiting on the other, is the coordination fix
+// itself.
+func TestRestoreDataVolumeNameMatchesEnsureVMOnceInstanceExists(t *testing.T) {
+	const targetName = "orders"
+	const dbRestoreUID = types.UID("22222222-2222-2222-2222-222222222222")
+
+	predicted := RestoreDataVolumeName(targetName, dbRestoreUID)
+
+	inst := newProvisionInst()
+	inst.Name = targetName
+	inst.UID = "11111111-1111-1111-1111-111111111111"
+	inst.Spec.RestoredFrom = &dbaasv1.RestoredFromRef{DBRestoreName: "orders-restore", DBRestoreUID: dbRestoreUID}
+	stub := &stubHarvester{}
+	r := newTestHarness(t, stub, inst)
+	convergeCredentials(t, context.Background(), r, inst)
+	if res := r.ensureVM(context.Background(), inst); res.Outcome != OutcomePending {
+		t.Fatalf("res = %+v, want Pending", res)
+	}
+
+	if inst.Status.Resources.DataVolumeName != predicted {
+		t.Fatalf("ensureVM DataVolumeName = %q, RestoreDataVolumeName predicted %q, want equal", inst.Status.Resources.DataVolumeName, predicted)
+	}
+}
+
 func TestEnsureVMCreateErrorIsTransientAndRecordsRefs(t *testing.T) {
 	inst := newProvisionInst()
 	stub := &stubHarvester{CreateVMErr: errors.New("harvester unavailable")}
@@ -291,5 +350,41 @@ func TestEnsureVMCreateErrorIsTransientAndRecordsRefs(t *testing.T) {
 	refs := inst.Status.Resources
 	if refs.VMName == "" || refs.CloudInitSecretName == "" {
 		t.Fatalf("Resources = %+v, want refs recorded despite create error", refs)
+	}
+}
+
+// A restored instance's cloud-init carries its DBRestore UID, which switches
+// the guest bootstrap into fail-closed restore mode; an ordinary one's is
+// empty.
+func TestEnsureVMRendersRestoreIDIntoCloudInit(t *testing.T) {
+	for name, restoredFrom := range map[string]*dbaasv1.RestoredFromRef{
+		"restored": {DBRestoreName: "orders-restore", DBRestoreUID: "restore-uid-9"},
+		"ordinary": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			inst := newProvisionInst()
+			inst.Spec.RestoredFrom = restoredFrom
+			r := newTestHarness(t, &stubHarvester{}, inst)
+			r.Restore = operatorconfig.RestoreConfig{RecoveryTimeout: 90 * time.Minute}
+			convergeCredentials(t, ctx, r, inst)
+
+			r.ensureVM(ctx, inst)
+
+			var ci corev1.Secret
+			if err := r.Get(ctx, types.NamespacedName{Namespace: inst.Namespace, Name: inst.Status.Resources.CloudInitSecretName}, &ci); err != nil {
+				t.Fatalf("cloud-init secret: %v", err)
+			}
+			want := []string{"RESTORE_ID=''"}
+			if restoredFrom != nil {
+				// restore.recoveryTimeout from operator config reaches the guest.
+				want = []string{"RESTORE_ID='restore-uid-9'", "RESTORE_RECOVERY_TIMEOUT_SECONDS=5400"}
+			}
+			for _, w := range want {
+				if !strings.Contains(string(ci.Data["userdata"]), w) {
+					t.Fatalf("userdata missing %s", w)
+				}
+			}
+		})
 	}
 }

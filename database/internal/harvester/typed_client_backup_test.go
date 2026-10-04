@@ -22,6 +22,7 @@ import (
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvesterfake "github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -201,7 +202,7 @@ func TestCreateRestorePVCPointsDataSourceAtTheSnapshot(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
 
-	err := client.CreateRestorePVC(ctx, "tenant-a", "pg-restored-data", "orders-daily-1-volume-pg-orders-data", 20, "longhorn", testOwnerRef())
+	err := client.CreateRestorePVC(ctx, "tenant-a", "pg-restored-data", "orders-daily-1-volume-pg-orders-data", 20, "longhorn", map[string]string{"dbaas.opencloud.wso2.com/restore-uid": "restore-uid-1"})
 	if err != nil {
 		t.Fatalf("CreateRestorePVC: %v", err)
 	}
@@ -220,8 +221,11 @@ func TestCreateRestorePVCPointsDataSourceAtTheSnapshot(t *testing.T) {
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "longhorn" {
 		t.Fatalf("Spec.StorageClassName = %v, want %q", pvc.Spec.StorageClassName, "longhorn")
 	}
-	if len(pvc.OwnerReferences) != 1 || pvc.OwnerReferences[0].Name != "orders" {
-		t.Fatalf("OwnerReferences = %+v, want the supplied owner", pvc.OwnerReferences)
+	if pvc.Labels["dbaas.opencloud.wso2.com/restore-uid"] != "restore-uid-1" {
+		t.Fatalf("Labels = %+v, want the supplied labels", pvc.Labels)
+	}
+	if len(pvc.OwnerReferences) != 0 {
+		t.Fatalf("OwnerReferences = %+v, want none (the PVC outlives its DBRestore)", pvc.OwnerReferences)
 	}
 	wantSize := resource.MustParse("20Gi")
 	if got := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; got.Cmp(wantSize) != 0 {
@@ -233,15 +237,15 @@ func TestCreateRestorePVCIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
 
-	if err := client.CreateRestorePVC(ctx, "tenant-a", "pg-restored-data", "snap-1", 20, "longhorn", testOwnerRef()); err != nil {
+	if err := client.CreateRestorePVC(ctx, "tenant-a", "pg-restored-data", "snap-1", 20, "longhorn", nil); err != nil {
 		t.Fatalf("first CreateRestorePVC: %v", err)
 	}
-	if err := client.CreateRestorePVC(ctx, "tenant-a", "pg-restored-data", "snap-1", 20, "longhorn", testOwnerRef()); err != nil {
+	if err := client.CreateRestorePVC(ctx, "tenant-a", "pg-restored-data", "snap-1", 20, "longhorn", nil); err != nil {
 		t.Fatalf("second CreateRestorePVC (re-entry) returned an error, want AlreadyExists swallowed: %v", err)
 	}
 }
 
-func TestGetPVCPhaseReturnsCurrentPhase(t *testing.T) {
+func TestGetPVCReturnsTheLivePVC(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient()
 	pvc := &corev1.PersistentVolumeClaim{
@@ -252,11 +256,49 @@ func TestGetPVCPhaseReturnsCurrentPhase(t *testing.T) {
 		t.Fatalf("seed PVC: %v", err)
 	}
 
-	phase, err := client.GetPVCPhase(ctx, "tenant-a", "pg-restored-data")
+	got, err := client.GetPVC(ctx, "tenant-a", "pg-restored-data")
 	if err != nil {
-		t.Fatalf("GetPVCPhase: %v", err)
+		t.Fatalf("GetPVC: %v", err)
 	}
-	if phase != corev1.ClaimBound {
-		t.Fatalf("phase = %q, want %q", phase, corev1.ClaimBound)
+	if got.Status.Phase != corev1.ClaimBound {
+		t.Fatalf("phase = %q, want %q", got.Status.Phase, corev1.ClaimBound)
+	}
+	if _, err := client.GetPVC(ctx, "tenant-a", "missing"); !apierrors.IsNotFound(err) {
+		t.Fatalf("GetPVC(missing) err = %v, want NotFound", err)
+	}
+}
+
+func TestGetVolumeSnapshotStateReflectsTheLiveObject(t *testing.T) {
+	ctx := context.Background()
+	ready, notReady := true, false
+	msg := "snapshot content missing"
+	now := metav1.Now()
+	client := newTestTypedClient(
+		&snapshotv1.VolumeSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "vs-ready", Namespace: "tenant-a"},
+			Status:     &snapshotv1.VolumeSnapshotStatus{ReadyToUse: &ready},
+		},
+		&snapshotv1.VolumeSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "vs-broken", Namespace: "tenant-a", DeletionTimestamp: &now, Finalizers: []string{"x"}},
+			Status:     &snapshotv1.VolumeSnapshotStatus{ReadyToUse: &notReady, Error: &snapshotv1.VolumeSnapshotError{Message: &msg}},
+		},
+		&snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "vs-no-status", Namespace: "tenant-a"}},
+	)
+
+	for name, want := range map[string]VolumeSnapshotState{
+		"vs-ready":     {ReadyToUse: true},
+		"vs-broken":    {Deleting: true, ErrorMessage: msg},
+		"vs-no-status": {},
+	} {
+		got, err := client.GetVolumeSnapshotState(ctx, "tenant-a", name)
+		if err != nil {
+			t.Fatalf("%s: GetVolumeSnapshotState: %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("%s: state = %+v, want %+v", name, got, want)
+		}
+	}
+	if _, err := client.GetVolumeSnapshotState(ctx, "tenant-a", "missing"); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing: err = %v, want NotFound", err)
 	}
 }

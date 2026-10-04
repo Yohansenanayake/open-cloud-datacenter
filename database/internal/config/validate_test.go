@@ -19,6 +19,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultConfigurationIsValid(t *testing.T) {
@@ -68,6 +69,18 @@ func TestValidateRejectsInvalidImageNamespace(t *testing.T) {
 		err := cfg.Validate()
 		if err == nil || !strings.Contains(err.Error(), "infrastructure.harvester.imageNamespace") {
 			t.Fatalf("Validate() with ImageNamespace = %q error = %v, want infrastructure.harvester.imageNamespace field", value, err)
+		}
+	}
+}
+
+func TestValidateRejectsNonPositiveRestoreRecoveryTimeout(t *testing.T) {
+	for _, value := range []time.Duration{0, -time.Minute} {
+		cfg := Default()
+		cfg.Restore.RecoveryTimeout = value
+
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "restore.recoveryTimeout") {
+			t.Fatalf("Validate() with RecoveryTimeout = %v error = %v, want restore.recoveryTimeout field", value, err)
 		}
 	}
 }

@@ -48,16 +48,37 @@ func SnapshotHoldName(sourceUID types.UID) string {
 }
 
 // RestoreHoldName is the deterministic Lease name for one restore attempt's
-// hold. A source can have several of these active at once — one per
-// concurrent restore reading from one of its snapshots.
-func RestoreHoldName(targetUID types.UID) string {
-	return fmt.Sprintf("dbaas-restore-hold-%s", targetUID)
+// hold, keyed by that DBRestore's own UID — not the target DBInstance's,
+// which doesn't exist yet when the hold is first acquired (see
+// DBRestoreReconciler.restoreVolume). A source can have several of these
+// active at once — one per concurrent restore reading from one of its
+// snapshots.
+func RestoreHoldName(restoreUID types.UID) string {
+	return fmt.Sprintf("dbaas-restore-hold-%s", restoreUID)
 }
 
 // SourceUIDLabel labels every hold Lease with the source instance's UID, so
 // deletion can find every restore hold naming a given source via a live List
-// without needing to know each restore attempt's target UID in advance.
+// without needing to know each restore attempt's DBRestore UID in advance.
 const SourceUIDLabel = "dbaas.opencloud.wso2.com/source-uid"
+
+// Holds performs hold operations. Every read goes through Live, an uncached
+// reader (in production, the manager's APIReader): these reads decide mutual
+// exclusion, and a decision made from an informer cache that hasn't yet seen
+// another party's Lease — or its deletion — isn't mutual exclusion at all.
+// Writes go through Writer. There is deliberately no fallback to a cached
+// client: a Holds without Live refuses to operate.
+type Holds struct {
+	Live   client.Reader
+	Writer client.Writer
+}
+
+func (h Holds) check() error {
+	if h.Live == nil || h.Writer == nil {
+		return fmt.Errorf("backup.Holds needs both an uncached Live reader and a Writer")
+	}
+	return nil
+}
 
 // AcquireResult reports the outcome of Acquire.
 type AcquireResult struct {
@@ -71,73 +92,85 @@ type AcquireResult struct {
 }
 
 // Acquire creates the named Lease with holderIdentity if absent. If it
-// already exists and is held by holderIdentity, that's treated as already
-// acquired (safe to call again across reconciles). If held by someone else,
-// Acquire reports that holder and does not touch the Lease.
+// already exists and is held by holderIdentity, it is treated as already
+// acquired; if another holder owns it, Acquire reports that holder and
+// leaves the Lease alone.
 //
-// owner is set as the Lease's sole owner reference and is required, not
-// optional — every hold in this design has exactly one natural owner (the
-// source instance for a snapshot hold, the restoring instance for a restore
-// hold), so there is no legitimate case for an unowned hold. Acquire rejects
-// a nil owner rather than silently creating one, because that owner
-// reference is a safety net: it's not a substitute for actively waiting on a
-// hold before allowing its owner to be deleted (that's the deletion path's
-// job), but it ensures a hold orphaned by a bug or an unhandled case doesn't
-// become permanent garbage — Kubernetes' own garbage collector cleans it up
-// once the owner is actually gone. This is event-driven, not time-based —
-// Leases here never expire on elapsed time (see the package doc).
-func Acquire(ctx context.Context, c client.Client, namespace, name, holderIdentity string, owner *metav1.OwnerReference, extraLabels map[string]string) (AcquireResult, error) {
+// owner is required and is set as the Lease's only owner reference. Each
+// hold has exactly one natural owner (the source instance for snapshot holds,
+// the DBRestore for restore holds), so an unowned hold is not valid. Acquire
+// rejects a nil owner instead of creating one, because the owner reference is a
+// safety net: it does not replace waiting on the hold before deleting the
+// owner, but it prevents orphaned holds from persisting forever; the
+// Kubernetes garbage collector removes them after the owner is gone. Holds are
+// event-driven, not time-based: they never expire on elapsed time.
+func (h Holds) Acquire(ctx context.Context, namespace, name, holderIdentity string, owner *metav1.OwnerReference, extraLabels map[string]string) (AcquireResult, error) {
+	if err := h.check(); err != nil {
+		return AcquireResult{}, err
+	}
 	if owner == nil {
 		return AcquireResult{}, fmt.Errorf("acquire hold %s/%s: owner must not be nil", namespace, name)
 	}
 
+	key := types.NamespacedName{Namespace: namespace, Name: name}
 	var lease coordinationv1.Lease
-	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &lease)
+	err := h.Live.Get(ctx, key, &lease)
 	switch {
 	case err == nil:
-		if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == holderIdentity {
-			return AcquireResult{Acquired: true}, nil
-		}
-		held := ""
-		if lease.Spec.HolderIdentity != nil {
-			held = *lease.Spec.HolderIdentity
-		}
-		return AcquireResult{Acquired: false, HolderIdentity: held}, nil
-
-	case apierrors.IsNotFound(err):
-		holder := holderIdentity
-		lease = coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            name,
-				Namespace:       namespace,
-				Labels:          extraLabels,
-				OwnerReferences: []metav1.OwnerReference{*owner},
-			},
-			Spec: coordinationv1.LeaseSpec{
-				HolderIdentity: &holder,
-			},
-		}
-		if createErr := c.Create(ctx, &lease); createErr != nil {
-			if apierrors.IsAlreadyExists(createErr) {
-				// Lost a create race — re-read and report the real holder
-				// rather than treating this as acquired.
-				return Acquire(ctx, c, namespace, name, holderIdentity, owner, extraLabels)
-			}
-			return AcquireResult{}, createErr
-		}
-		return AcquireResult{Acquired: true}, nil
-
-	default:
+		return resultFor(&lease, holderIdentity), nil
+	case !apierrors.IsNotFound(err):
 		return AcquireResult{}, err
 	}
+
+	holder := holderIdentity
+	lease = coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       namespace,
+			Labels:          extraLabels,
+			OwnerReferences: []metav1.OwnerReference{*owner},
+		},
+		Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder},
+	}
+	createErr := h.Writer.Create(ctx, &lease)
+	switch {
+	case createErr == nil:
+		return AcquireResult{Acquired: true}, nil
+	case !apierrors.IsAlreadyExists(createErr):
+		return AcquireResult{}, createErr
+	}
+
+	// Lost a create race: report the real holder rather than assuming it's
+	// us. One live re-read — if the winner already released it again, that's
+	// a transient error, and the caller's next pass simply retries.
+	if err := h.Live.Get(ctx, key, &lease); err != nil {
+		return AcquireResult{}, fmt.Errorf("acquire hold %s/%s: re-read after losing create race: %w", namespace, name, err)
+	}
+	return resultFor(&lease, holderIdentity), nil
+}
+
+func resultFor(lease *coordinationv1.Lease, holderIdentity string) AcquireResult {
+	if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == holderIdentity {
+		return AcquireResult{Acquired: true}
+	}
+	held := ""
+	if lease.Spec.HolderIdentity != nil {
+		held = *lease.Spec.HolderIdentity
+	}
+	return AcquireResult{Acquired: false, HolderIdentity: held}
 }
 
 // Release deletes the named Lease if, and only if, it is currently held by
 // holderIdentity. Releasing a Lease held by someone else, or one that's
 // already gone, is a no-op — safe to call unconditionally during cleanup.
-func Release(ctx context.Context, c client.Client, namespace, name, holderIdentity string) error {
+// The delete is preconditioned on the exact object read, so a Lease that was
+// replaced in between is never deleted by mistake.
+func (h Holds) Release(ctx context.Context, namespace, name, holderIdentity string) error {
+	if err := h.check(); err != nil {
+		return err
+	}
 	var lease coordinationv1.Lease
-	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &lease)
+	err := h.Live.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &lease)
 	switch {
 	case apierrors.IsNotFound(err):
 		return nil
@@ -147,19 +180,40 @@ func Release(ctx context.Context, c client.Client, namespace, name, holderIdenti
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
 		return nil
 	}
-	if err := c.Delete(ctx, &lease); err != nil && !apierrors.IsNotFound(err) {
+	uid, rv := lease.UID, lease.ResourceVersion
+	if err := h.Writer.Delete(ctx, &lease, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
 }
 
+// AnyRestoreHoldForSource reports whether a restore-hold Lease exists for
+// sourceUID. Used by DBSnapshot deletion (wait before deleting the backend
+// backup) and, later, source DBInstance deletion.
+//
+// Coarse: holds aren't labeled by snapshot (that's read from the owning
+// DBRestore's spec.snapshotRef instead), so this can't tell "restoring from
+// this snapshot" from "restoring from a sibling snapshot of the same
+// source" — never unsafe, just sometimes broader than necessary.
+func (h Holds) AnyRestoreHoldForSource(ctx context.Context, namespace string, sourceUID types.UID) (bool, error) {
+	if err := h.check(); err != nil {
+		return false, err
+	}
+	var list coordinationv1.LeaseList
+	if err := h.Live.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{SourceUIDLabel: string(sourceUID)}); err != nil {
+		return false, err
+	}
+	return len(list.Items) > 0, nil
+}
+
 // Held reports whether the named Lease currently exists and, if so, who
-// holds it. A live Get, never served from a cache the caller doesn't
-// control — callers deciding whether to acquire a hold must see the current
-// state, not a stale one.
-func Held(ctx context.Context, c client.Client, namespace, name string) (holderIdentity string, held bool, err error) {
+// holds it.
+func (h Holds) Held(ctx context.Context, namespace, name string) (holderIdentity string, held bool, err error) {
+	if err := h.check(); err != nil {
+		return "", false, err
+	}
 	var lease coordinationv1.Lease
-	getErr := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &lease)
+	getErr := h.Live.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &lease)
 	switch {
 	case apierrors.IsNotFound(getErr):
 		return "", false, nil

@@ -50,13 +50,49 @@ func vmNameFor(inst *dbaasv1.DBInstance) string {
 
 // diskIdentifierFor returns "<name>-<uid8>", used to build this instance's
 // disk PVC names. Including the UID means a deleted-and-recreated instance
-// (same name, new UID) never reattaches a disk left over from before the deletion.
+// (same name, new UID) never reattaches a disk left over from before the
+// deletion.
+//
+// When spec.restoredFrom is set, the salt is derived from the owning
+// DBRestore's UID instead of this instance's own UID ("<name>-restore-<uid8>").
+// DBRestoreReconciler computes this same name via RestoreDataVolumeName
+// before this instance exists, and creates the data-disk PVC under it.
 func diskIdentifierFor(inst *dbaasv1.DBInstance) string {
-	uid := strings.ReplaceAll(string(inst.UID), "-", "")
-	if len(uid) > 8 {
-		uid = uid[:8]
+	if inst.Spec.RestoredFrom != nil {
+		return fmt.Sprintf("%s-restore-%s", inst.Name, shortUID(inst.Spec.RestoredFrom.DBRestoreUID))
 	}
-	return fmt.Sprintf("%s-%s", inst.Name, uid)
+	return fmt.Sprintf("%s-%s", inst.Name, shortUID(inst.UID))
+}
+
+// shortUID is the naming salt diskIdentifierFor and RestoreDataVolumeName
+// both derive from a UID: dashes stripped, truncated to 8 characters.
+func shortUID(uid types.UID) string {
+	s := strings.ReplaceAll(string(uid), "-", "")
+	if len(s) > 8 {
+		s = s[:8]
+	}
+	return s
+}
+
+// RestoreDataVolumeName returns the deterministic data-disk PVC name a
+// DBInstance named targetInstanceName will have once created with
+// spec.restoredFrom.dbRestoreUID set to dbRestoreUID. DBRestoreReconciler
+// calls this to create that PVC before the DBInstance exists; see
+// diskIdentifierFor's doc comment for why this must produce an identical
+// name to what that future DBInstance's own dataVolumeNameFor computes.
+func RestoreDataVolumeName(targetInstanceName string, dbRestoreUID types.UID) string {
+	return harvester.DataVolumeName(fmt.Sprintf("%s-restore-%s", targetInstanceName, shortUID(dbRestoreUID)))
+}
+
+// restoreIDFor is the bootstrap RestoreID for inst: its DBRestore's UID, or
+// "" for an ordinary instance. Passed on every cloud-init render (create,
+// VM recreation, repave) — the guest itself decides from the data disk's
+// own restore marker whether the one-time restore work is still pending.
+func restoreIDFor(inst *dbaasv1.DBInstance) string {
+	if inst.Spec.RestoredFrom == nil {
+		return ""
+	}
+	return string(inst.Spec.RestoredFrom.DBRestoreUID)
 }
 
 // dataVolumeNameFor derives the controller's deterministic data-disk PVC
@@ -202,6 +238,9 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork,
 		EngineVersion:  engineVersion,
+		RestoreID:      restoreIDFor(inst),
+		// Only read by the guest when RestoreID is set.
+		RestoreRecoveryTimeout: r.restoreConfig().RecoveryTimeout,
 	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)

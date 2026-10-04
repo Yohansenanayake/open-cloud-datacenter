@@ -43,9 +43,18 @@ import (
 // Not a formal ensure.Step/Runner pipeline — that pattern is DBInstance-
 // specific today. reconcileCreate instead composes three plain stages
 // (admitSnapshot, acquireHold, runBackupAttempt) in the same spirit.
+//
+// APIReader is an uncached reader for the hold Leases: this reconciler's
+// "is any restore still reading this source?" check is what lets it delete a
+// backend backup, and must not be answered from a stale cache.
 type DBSnapshotReconciler struct {
 	client.Client
+	APIReader client.Reader
 	Harvester harvester.ClientInterface
+}
+
+func (r *DBSnapshotReconciler) holds() backup.Holds {
+	return backup.Holds{Live: r.APIReader, Writer: r.Client}
 }
 
 const (
@@ -154,7 +163,28 @@ func (r *DBSnapshotReconciler) admitSnapshot(ctx context.Context, snap *dbaasv1.
 		return dbaasv1.DBInstance{}, false, res, err
 	}
 
+	// Captured once, on first successful admission — never overwritten on a
+	// later pass, even if the source's mutable fields (e.g. allocatedStorage)
+	// change before the backup finishes. Restore reads only this, never the
+	// live source, so it must reflect what was actually backed up.
+	if snap.Status.Source == nil {
+		snap.Status.Source = sourceMetadataFrom(&source)
+	}
+
 	return source, true, ctrl.Result{}, nil
+}
+
+func sourceMetadataFrom(source *dbaasv1.DBInstance) *dbaasv1.SourceMetadata {
+	return &dbaasv1.SourceMetadata{
+		InstanceUID:      source.UID,
+		DBName:           source.Spec.DBName,
+		MasterUsername:   source.Spec.MasterUsername,
+		EngineVersion:    source.Spec.EngineVersion,
+		Port:             source.Spec.Port,
+		StorageType:      source.Spec.StorageType,
+		AllocatedStorage: source.Spec.AllocatedStorage,
+		ImageRevision:    source.Status.CurrentImageRevision,
+	}
 }
 
 // acquireHold acquires the snapshot-hold lease shared with repave.
@@ -162,7 +192,7 @@ func (r *DBSnapshotReconciler) admitSnapshot(ctx context.Context, snap *dbaasv1.
 // a transient lease-check failure.
 func (r *DBSnapshotReconciler) acquireHold(ctx context.Context, snap *dbaasv1.DBSnapshot, source *dbaasv1.DBInstance) (holder string, acquired bool, res ctrl.Result, err error) {
 	holder = snapshotHolderIdentity(snap)
-	result, acqErr := backup.Acquire(ctx, r.Client, source.Namespace, backup.SnapshotHoldName(source.UID), holder, instanceOwnerRef(source), nil)
+	result, acqErr := r.holds().Acquire(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), holder, instanceOwnerRef(source), nil)
 	if acqErr != nil {
 		return holder, false, ctrl.Result{}, acqErr
 	}
@@ -202,7 +232,7 @@ func (r *DBSnapshotReconciler) runBackupAttempt(ctx context.Context, snap *dbaas
 		if err := r.Harvester.DeleteVMBackup(ctx, snap.Namespace, snap.Name); err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := backup.Release(ctx, r.Client, source.Namespace, backup.SnapshotHoldName(source.UID), holder); err != nil {
+		if err := r.holds().Release(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), holder); err != nil {
 			return ctrl.Result{}, err
 		}
 		snap.Status.SetCondition(metav1.Condition{
@@ -212,9 +242,10 @@ func (r *DBSnapshotReconciler) runBackupAttempt(ctx context.Context, snap *dbaas
 		return r.patchSnapshotStatus(ctx, snap, ctrl.Result{})
 
 	case status.ReadyToUse:
-		if err := backup.Release(ctx, r.Client, source.Namespace, backup.SnapshotHoldName(source.UID), holder); err != nil {
+		if err := r.holds().Release(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), holder); err != nil {
 			return ctrl.Result{}, err
 		}
+		snap.Status.DataVolumeSnapshotName = status.DataVolumeSnapshotName
 		snap.Status.SetCondition(metav1.Condition{
 			Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionTrue,
 			Reason: string(dbaasv1.ReasonSnapshotBackupReady), Message: "backup is ready to use",
@@ -230,22 +261,35 @@ func (r *DBSnapshotReconciler) runBackupAttempt(ctx context.Context, snap *dbaas
 	}
 }
 
-// reconcileDelete releases any in-flight hold (safe no-op if we don't hold
-// it), deletes the backend backup, and removes the finalizer. Doesn't check
-// restore holds yet — nothing acquires those until restore (later) exists.
+// reconcileDelete releases any in-flight snapshot hold (safe no-op if we
+// don't hold it), waits out any restore reading this source's snapshots
+// (protected deletion), deletes the backend backup, and removes the
+// finalizer.
 func (r *DBSnapshotReconciler) reconcileDelete(ctx context.Context, snap *dbaasv1.DBSnapshot) (ctrl.Result, error) {
 	var source dbaasv1.DBInstance
 	err := r.Get(ctx, types.NamespacedName{Namespace: snap.Namespace, Name: snap.Spec.SourceInstanceRef.Name}, &source)
 	switch {
 	case err == nil:
 		holder := snapshotHolderIdentity(snap)
-		if relErr := backup.Release(ctx, r.Client, source.Namespace, backup.SnapshotHoldName(source.UID), holder); relErr != nil {
+		if relErr := r.holds().Release(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), holder); relErr != nil {
 			return ctrl.Result{}, relErr
 		}
 	case apierrors.IsNotFound(err):
 		// Source gone: its lease (owned by it) is already GC'd if it existed.
 	default:
 		return ctrl.Result{}, err
+	}
+
+	// snap.Status.Source is nil only if admission never succeeded, meaning
+	// no backend backup was ever created either — nothing to protect.
+	if snap.Status.Source != nil {
+		held, holdErr := r.holds().AnyRestoreHoldForSource(ctx, snap.Namespace, snap.Status.Source.InstanceUID)
+		if holdErr != nil {
+			return ctrl.Result{}, holdErr
+		}
+		if held {
+			return ctrl.Result{RequeueAfter: snapshotHoldRequeue}, nil
+		}
 	}
 
 	if err := r.Harvester.DeleteVMBackup(ctx, snap.Namespace, snap.Name); err != nil {
@@ -354,6 +398,9 @@ func removeString(list []string, s string) []string {
 // DBInstance, so a source becoming Available promptly re-reconciles any
 // DBSnapshot waiting on it instead of waiting for the next resync.
 func (r *DBSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &dbaasv1.DBSnapshot{}, snapshotSourceInstanceIdx, snapshotSourceIndexFunc); err != nil {
 		return err
 	}

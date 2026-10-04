@@ -145,6 +145,16 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              dataVolumeSnapshotName:
+                description: |-
+                  DataVolumeSnapshotName is the VolumeSnapshot object backing the
+                  PostgreSQL data volume specifically (a VirtualMachineBackup covers
+                  every disk on the VM), captured once the backup becomes Ready. Restore
+                  creates its PVC with this as spec.dataSource — recorded here, not
+                  re-derived at restore time, because re-deriving it needs the source's
+                  data volume name (to pick the right disk out of several), which is
+                  only available while the source instance still exists.
+                type: string
               observedGeneration:
                 description: ObservedGeneration tracks which spec version has been
                   reconciled.
@@ -156,6 +166,46 @@ spec:
                   controller created on the automated schedule. Recorded once at
                   creation; never changes afterward.
                 type: string
+              source:
+                description: |-
+                  Source records the restore-relevant subset of the source DBInstance's
+                  spec/status (design §3.4), captured once at admission — the only
+                  point the source is guaranteed to still exist and be Available. Never
+                  modified afterward, even if the source's own mutable fields (e.g.
+                  allocatedStorage) later change: this must reflect what was actually
+                  backed up, not the source's current state. Snapshot-mode restore
+                  (design §3) reads exclusively from here, never the live source, so it
+                  keeps working after the source is deleted.
+                properties:
+                  allocatedStorage:
+                    description: |-
+                      AllocatedStorage is the source's size at the moment of this snapshot,
+                      not necessarily its current size — allocatedStorage is mutable, and a
+                      restore must match what was actually backed up.
+                    type: integer
+                  dbName:
+                    type: string
+                  engineVersion:
+                    type: string
+                  imageRevision:
+                    description: |-
+                      ImageRevision is the baked-image catalog revision
+                      (DBInstance.status.currentImageRevision) the source was running at
+                      snapshot time.
+                    type: string
+                  instanceUID:
+                    description: |-
+                      InstanceUID is the source DBInstance's UID at admission time. The
+                      restore-hold Lease is labeled with it — spec.sourceInstanceRef is a
+                      name, and the source may no longer exist by restore time.
+                    type: string
+                  masterUsername:
+                    type: string
+                  port:
+                    type: integer
+                  storageType:
+                    type: string
+                type: object
             type: object
         type: object
     served: true

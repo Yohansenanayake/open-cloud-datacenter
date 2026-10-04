@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
@@ -206,6 +207,27 @@ func TestBuildCloudInitNetworkDataStatic(t *testing.T) {
 	} {
 		if !strings.Contains(networkdata, want) {
 			t.Errorf("networkdata missing %q, got: %s", want, networkdata)
+		}
+	}
+}
+
+// restore.recoveryTimeout reaches the guest in whole seconds, rounded up (a
+// sub-second remainder must never truncate towards an instant failure), and
+// an unset value falls back to the operator default.
+func TestBuildCloudInitRendersRestoreRecoveryTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		timeout time.Duration
+		want    string
+	}{
+		{90 * time.Second, "RESTORE_RECOVERY_TIMEOUT_SECONDS=90"},
+		{1500 * time.Millisecond, "RESTORE_RECOVERY_TIMEOUT_SECONDS=2"},
+		{0, "RESTORE_RECOVERY_TIMEOUT_SECONDS=3600"},
+	} {
+		p := testBootstrapParams()
+		p.RestoreRecoveryTimeout = tc.timeout
+		userdata, _ := BuildCloudInit(p, testMaterial())
+		if !strings.Contains(userdata, tc.want) {
+			t.Errorf("timeout %v: userdata missing %s", tc.timeout, tc.want)
 		}
 	}
 }

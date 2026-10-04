@@ -877,15 +877,16 @@ const restoreVolumeSnapshotAPIGroup = "snapshot.storage.k8s.io"
 // CreateRestorePVC creates a PVC that restores data from an existing
 // VolumeSnapshot — the same same-namespace mechanism Harvester's own restore
 // controller uses internally (getDataSourceSameNs), without going through
-// VirtualMachineRestore. Idempotent: AlreadyExists is treated as success.
-// Matches the data disk's existing shape (ReadWriteMany, Block) so the
-// restored PVC attaches to a new VM the same way an ordinary one would.
-func (c *TypedClient) CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, owner *metav1.OwnerReference) error {
+// VirtualMachineRestore. AlreadyExists is swallowed — see the interface doc
+// for why callers must still verify the result. Matches the data disk's
+// existing shape (ReadWriteMany, Block) so the restored PVC attaches to a new
+// VM the same way an ordinary one would.
+func (c *TypedClient) CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, labels map[string]string) error {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            pvcName,
-			Namespace:       ns,
-			OwnerReferences: ownerRefSlice(owner),
+			Name:      pvcName,
+			Namespace: ns,
+			Labels:    labels,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
@@ -907,16 +908,27 @@ func (c *TypedClient) CreateRestorePVC(ctx context.Context, ns, pvcName, volumeS
 	return ignoreAlreadyExists(err)
 }
 
-// GetPVCPhase returns a PVC's current phase. Creating a restore PVC is
-// instant; Longhorn actually copying the snapshot's data into it is not —
-// callers must wait for PersistentVolumeClaimBound, not just for creation to
-// succeed.
-func (c *TypedClient) GetPVCPhase(ctx context.Context, ns, name string) (corev1.PersistentVolumeClaimPhase, error) {
-	pvc, err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+// GetPVC returns the live PVC straight from the API server (not a cache).
+func (c *TypedClient) GetPVC(ctx context.Context, ns, name string) (*corev1.PersistentVolumeClaim, error) {
+	return c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+}
+
+// GetVolumeSnapshotState reads the VolumeSnapshot straight from the API
+// server, through the snapshot.storage.k8s.io client Harvester's own
+// clientset already carries.
+func (c *TypedClient) GetVolumeSnapshotState(ctx context.Context, ns, name string) (VolumeSnapshotState, error) {
+	vs, err := c.Clientset.SnapshotV1().VolumeSnapshots(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return "", err
+		return VolumeSnapshotState{}, err
 	}
-	return pvc.Status.Phase, nil
+	state := VolumeSnapshotState{Deleting: !vs.DeletionTimestamp.IsZero()}
+	if vs.Status != nil {
+		state.ReadyToUse = vs.Status.ReadyToUse != nil && *vs.Status.ReadyToUse
+		if vs.Status.Error != nil && vs.Status.Error.Message != nil {
+			state.ErrorMessage = *vs.Status.Error.Message
+		}
+	}
+	return state, nil
 }
 
 func ptr[T any](v T) *T {
