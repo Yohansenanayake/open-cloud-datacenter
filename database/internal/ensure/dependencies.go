@@ -61,7 +61,13 @@ func (d Dependencies) holds() backup.Holds {
 }
 
 func (d Dependencies) databaseDefaults() operatorconfig.DatabaseDefaults {
-	defaults := d.DatabaseDefaults
+	return withBuiltInDatabaseDefaults(d.DatabaseDefaults)
+}
+
+// withBuiltInDatabaseDefaults fills any field left unset in defaults (e.g. a
+// caller constructed without operator config, as tests do) from the
+// built-in defaults.
+func withBuiltInDatabaseDefaults(defaults operatorconfig.DatabaseDefaults) operatorconfig.DatabaseDefaults {
 	builtIn := operatorconfig.Default().DatabaseDefaults
 	if defaults.StorageClass == "" {
 		defaults.StorageClass = builtIn.StorageClass

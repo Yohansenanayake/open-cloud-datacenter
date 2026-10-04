@@ -25,7 +25,9 @@
 #
 # Usage: ./test-restore.sh [--cleanup]
 #   --cleanup  delete everything this run created on exit (including the
-#              data PVCs, which the controller deliberately leaves behind)
+#              data PVCs, which the controller deliberately leaves behind) —
+#              only if the run passed: a failed run always keeps everything,
+#              so the evidence survives (the cleanup commands are printed)
 #
 # Env (defaults in brackets):
 #   NAMESPACE [default]  NETWORK_REF [vm-network-001]  DB_CLASS [db.t3.medium]
@@ -63,8 +65,13 @@ done
 
 SOURCE="rt-src-$RUN_ID"
 SNAPSHOT="rt-snap-$RUN_ID"
-DB_NAME="appdb"
-MASTER="dbadmin"
+# The source deliberately leaves dbName and masterUsername unset — the common
+# case, and the one that needs the snapshot to record *effective* values:
+# dbName defaults to the source's name made into an identifier
+# (DefaultDBName: "rt-src-1" -> "rt_src_1"), and a restore must keep that
+# name, not default to the target's.
+DB_NAME="${SOURCE//-/_}"
+MASTER=""  # read from the source's credentials Secret once provisioned
 EXTRA_DB="rt_extra"
 TENANT_ROLE="rt_tenant"
 TENANT_PW="tp$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -224,8 +231,13 @@ EOF
 on_exit() {
   local code=$?
   printf '\n\033[1m%d passed, %d failed\033[0m (run %s)\n' "$PASS" "$FAIL" "$RUN_ID"
-  if [[ "$CLEANUP" != "true" ]]; then
-    info "Leaving test resources in place (label $RUN_LABEL; pass --cleanup to remove)"
+  if [[ "$CLEANUP" != "true" || "$code" != "0" || "$FAIL" != "0" ]]; then
+    [[ "$CLEANUP" == "true" ]] && info "Run failed — keeping every resource for inspection despite --cleanup"
+    info "Leaving test resources in place. To remove them later:"
+    info "  kubectl -n $NAMESPACE delete dbrestore -l $RUN_LABEL"
+    info "  kubectl -n $NAMESPACE delete dbinstance ${CREATED_TARGETS[*]:-} $SOURCE --ignore-not-found"
+    info "  kubectl -n $NAMESPACE delete dbsnapshot $SNAPSHOT --ignore-not-found"
+    info "  then the PVCs: kubectl -n $NAMESPACE get pvc | grep -E 'rt-(src|tgt)'"
     exit "$code"
   fi
   say "Cleaning up"
@@ -269,12 +281,11 @@ spec:
   dbInstanceClass: $DB_CLASS
   allocatedStorage: $ALLOCATED_STORAGE
   networkRef: $NETWORK_REF
-  dbName: $DB_NAME
-  masterUsername: $MASTER
   backup: {}
 EOF
   wait_available "$SOURCE" || die "source DBInstance/$SOURCE never became usable"
   SOURCE_MASTER_PW=$(inst_cred "$SOURCE" admin_password)
+  MASTER=$(inst_cred "$SOURCE" admin_user)
 
   local out
   out=$(master_script "$SOURCE" "$DB_NAME" <<EOF
@@ -344,6 +355,11 @@ verify_target() { # verify_target <restore> <target>
     || { diagnose_restore "$restore" "$target"; return 1; }
   pass "target logs in with its own credentials Secret"
 
+  check "target inherited the source's effective dbName (not its own name)" "$DB_NAME" \
+    "$(jp dbinstance "$target" '{.spec.dbName}')"
+  check "target inherited the source's effective masterUsername" "$MASTER" "$(inst_cred "$target" admin_user)"
+  check "no database named after the target was created" "0" \
+    "$(master_sql "$target" "$DB_NAME" "SELECT count(*) FROM pg_database WHERE datname = '${target//-/_}'")"
   check "row checksum matches the snapshot" "$EXPECTED_CHECKSUM" "$(master_sql "$target" "$DB_NAME" "$CHECKSUM_SQL")"
   check "only pre-snapshot markers present (restore reflects the snapshot, not the live source)" \
     "before-snapshot" "$(master_sql "$target" "$DB_NAME" "SELECT string_agg(label, ',' ORDER BY label) FROM restore_marker")"

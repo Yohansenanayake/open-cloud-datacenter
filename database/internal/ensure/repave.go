@@ -322,10 +322,7 @@ func (r *repaveStep) regenerateCloudInit(ctx context.Context, inst *dbaasv1.DBIn
 	if masterUser == "" {
 		masterUser = defaults.MasterUsername
 	}
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
+	dbName := inst.EffectiveDBName()
 
 	resolved, err := r.credentialsResolver().Resolve(ctx, inst)
 	if err != nil {

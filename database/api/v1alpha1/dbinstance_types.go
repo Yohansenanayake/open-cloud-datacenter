@@ -59,16 +59,18 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engineVersion is immutable after creation"
 	EngineVersion string `json:"engineVersion,omitempty"`
 
-	// DBName is the initial database to create. Default: the instance name.
-	// Must follow PostgreSQL identifier rules: start with a letter or
-	// underscore, contain only letters, digits, underscores, or "$",
-	// max 63 characters. The reconciler also double-quotes this identifier
-	// when emitting CREATE DATABASE; the regex catches invalid values at
-	// apply time so failures don't appear later inside cloud-init.
-	// Immutable after first reconcile; modify is refused.
+	// DBName is the initial database to create. Default: DefaultDBName of
+	// the instance name (e.g. "orders-db" becomes "orders_db").
+	// A lowercase PostgreSQL identifier that never needs quoting — lowercase
+	// letters, digits, and underscores, starting with a letter or underscore,
+	// at most 63 characters (RDS's rule): uppercase, hyphens, or "$" would
+	// force every tenant SQL statement naming it to quote it forever. The
+	// built-in databases are reserved. Immutable after first reconcile;
+	// modify is refused.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`
+	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
+	// +kubebuilder:validation:XValidation:rule="!(self in ['postgres', 'template0', 'template1'])",message="dbName must not be a built-in PostgreSQL database (postgres, template0, template1)"
 	DBName string `json:"dbName,omitempty"`
 
 	// Port for PostgreSQL. Default 5432.
@@ -78,16 +80,15 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int `json:"port,omitempty"`
 
-	// MasterUsername for the admin user. Default "dbadmin".
-	// Must follow PostgreSQL identifier rules: start with a letter or
-	// underscore, contain only letters, digits, underscores, or "$",
-	// max 63 characters. The reconciler also double-quotes this identifier
-	// when emitting CREATE ROLE; the regex catches invalid values at
-	// apply time so failures don't appear later inside cloud-init.
-	// Immutable after first reconcile.
+	// MasterUsername for the admin user. Default "dbadmin" (operator config).
+	// Same identifier rule as DBName. Roles PostgreSQL or DBaaS manage are
+	// reserved: "postgres", "postgres_exporter", and anything starting with
+	// "pg_" (which PostgreSQL itself refuses — rejected here rather than
+	// failing later inside cloud-init). Immutable after first reconcile.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`
+	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
+	// +kubebuilder:validation:XValidation:rule="!(self in ['postgres', 'postgres_exporter']) && !self.startsWith('pg_')",message="masterUsername must not be a reserved role (postgres, postgres_exporter, or a pg_ prefix)"
 	MasterUsername string `json:"masterUsername,omitempty"`
 
 	// ManageMasterUserPassword: if true, auto-generate the admin password

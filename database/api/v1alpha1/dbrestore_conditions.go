@@ -47,6 +47,7 @@ const (
 	ReasonRestoreTargetStarting     ConditionReason = "TargetStarting"
 	ReasonRestoreTargetNameConflict ConditionReason = "TargetNameConflict"
 	ReasonRestoreTargetRejected     ConditionReason = "TargetRejected"
+	ReasonRestoreTargetInvalid      ConditionReason = "TargetInvalid"
 	ReasonRestoreTargetLost         ConditionReason = "TargetLost"
 
 	// Terminal / deletion.

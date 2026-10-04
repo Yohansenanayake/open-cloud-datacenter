@@ -77,8 +77,8 @@ var BakedImages = map[string]BakedImageEntry{
 		DefaultEngineVersion:    "17",
 	},
 	"ubuntu-2404-postgres-v20260815": {
-		ImageName:               "ubuntu-2404-postgres-v20260815",
-		OSVersion:               "24.04",
+		ImageName: "ubuntu-2404-postgres-v20260815",
+		OSVersion: "24.04",
 		// 17 dropped on purpose — this revision simulates the PG-major-EOL
 		// scenario (E1-E4 in database/test/README.md's test matrix), so 18
 		// is the only supported version and therefore the only valid default.

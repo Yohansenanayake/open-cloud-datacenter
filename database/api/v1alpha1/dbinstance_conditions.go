@@ -291,12 +291,6 @@ type PhaseSummary struct {
 	Message string
 }
 
-// WantRunning reports the desired power state. An omitted running field
-// defaults to true.
-func (s *DBInstanceSpec) WantRunning() bool {
-	return s.Running == nil || *s.Running
-}
-
 func conditionMessage(s *DBInstanceStatus, condType, fallback string) string {
 	if c := s.GetCondition(condType); c != nil && c.Message != "" {
 		return c.Message

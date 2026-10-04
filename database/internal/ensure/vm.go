@@ -185,10 +185,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	if masterUser == "" {
 		masterUser = defaults.MasterUsername
 	}
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
+	dbName := inst.EffectiveDBName()
 	// Recomputed here rather than passed forward from preflight — ensureVM
 	// doesn't trust state from other steps, matching how every other input
 	// above is re-derived independently.

@@ -28,6 +28,7 @@ import (
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/backup"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/testutil"
 )
@@ -174,6 +175,7 @@ func TestDBSnapshotAdmissionCapturesSourceMetadataOnce(t *testing.T) {
 	want := &dbaasv1.SourceMetadata{
 		InstanceUID:      source.UID,
 		DBName:           "appdb",
+		MasterUsername:   "dbadmin", // left unset on the source: its effective (defaulted) value
 		EngineVersion:    "17",
 		Port:             5432,
 		StorageType:      "longhorn",
@@ -506,4 +508,48 @@ func backupReadyStatus() harvester.VMBackupStatus {
 
 func backupFailedStatus(msg string) harvester.VMBackupStatus {
 	return harvester.VMBackupStatus{ErrorMessage: msg}
+}
+
+// A source that left its restore-inherited settings to defaults must be
+// recorded with what it actually runs — not empty strings, which would make
+// a restored target apply its *own* defaults (dbName = the target's name, a
+// database the restored disk doesn't contain).
+func TestDBSnapshotAdmissionRecordsEffectiveValuesForDefaultedSourceFields(t *testing.T) {
+	source := availableSourceInstance()                                   // dbName, masterUsername, engineVersion, port, storageType all unset
+	source.Status.CurrentImageRevision = "ubuntu-2404-postgres-v20260815" // catalog default engine version: 18
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	r, c := newSnapshotReconciler(t, &testutil.StubHarvester{}, source, snap)
+
+	reconcileSnapshot(t, r, snap)
+
+	got := getSnapshot(t, c, snap).Status.Source
+	if got == nil {
+		t.Fatal("Status.Source not captured")
+	}
+	if got.DBName != source.Name || got.MasterUsername != "dbadmin" || got.EngineVersion != "18" ||
+		got.Port != 5432 || got.StorageType != "longhorn" {
+		t.Fatalf("Status.Source = %+v, want the source's effective values (dbName=%s, dbadmin, 18, 5432, longhorn)", got, source.Name)
+	}
+}
+
+// status.appliedSpec — what the source was provisioned with — wins over the
+// operator's *current* defaults, which may have changed since.
+func TestDBSnapshotAdmissionPrefersAppliedSpecOverCurrentDefaults(t *testing.T) {
+	source := availableSourceInstance()
+	source.Status.AppliedSpec = &dbaasv1.AppliedSpec{
+		DBName: "orders", MasterUsername: "legacy_admin", Port: 6432, StorageType: "longhorn-fast",
+	}
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	c := testutil.NewClient(t, source, snap)
+	r := &DBSnapshotReconciler{Client: c, APIReader: c, Harvester: &testutil.StubHarvester{},
+		DatabaseDefaults: operatorconfig.DatabaseDefaults{MasterUsername: "platform_admin", Port: 5432, StorageClass: "longhorn"}}
+
+	reconcileSnapshot(t, r, snap)
+
+	got := getSnapshot(t, c, snap).Status.Source
+	if got == nil || got.DBName != "orders" || got.MasterUsername != "legacy_admin" || got.Port != 6432 || got.StorageType != "longhorn-fast" {
+		t.Fatalf("Status.Source = %+v, want the values recorded in status.appliedSpec", got)
+	}
 }

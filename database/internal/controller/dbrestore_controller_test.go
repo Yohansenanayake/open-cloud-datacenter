@@ -18,15 +18,21 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -960,5 +966,100 @@ func TestDBRestoreDeletionNeverTouchesForeignSameNamedInstance(t *testing.T) {
 
 	if got, exists := targetExists(t, c, restore); !exists || !got.DeletionTimestamp.IsZero() {
 		t.Fatal("an instance this restore didn't create must never be touched")
+	}
+}
+
+// A snapshot whose recorded source settings are incomplete (taken before
+// effective-value capture) fails fast with a reason, instead of producing a
+// target whose guest refuses the restored disk and never becomes ready.
+func TestDBRestoreFailsFastOnSnapshotWithoutEffectiveSourceSettings(t *testing.T) {
+	for name, blank := range map[string]func(*dbaasv1.SourceMetadata){
+		"dbName":         func(s *dbaasv1.SourceMetadata) { s.DBName = "" },
+		"masterUsername": func(s *dbaasv1.SourceMetadata) { s.MasterUsername = "" },
+		"engineVersion":  func(s *dbaasv1.SourceMetadata) { s.EngineVersion = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			snap := readySnapshot()
+			blank(snap.Status.Source)
+			restore := testRestore()
+			stub := stubWithPVCs()
+			r, c := newRestoreReconciler(t, stub, restore, snap)
+
+			reconcileRestore(t, r, restore)
+
+			wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreInvalidSnapshotState)
+			if stub.CreateRestorePVCCalls != 0 || holdExists(t, c, restore) {
+				t.Fatal("nothing may be held or created for an unusable snapshot")
+			}
+		})
+	}
+}
+
+// restoreReconcilerFailingTargetCreate is a reconciler whose client fails
+// every DBInstance Create with createErr — a stand-in for the API server's
+// CRD validation, which the fake client doesn't evaluate.
+func restoreReconcilerFailingTargetCreate(t *testing.T, createErr error, objs ...client.Object) (*DBRestoreReconciler, client.Client) {
+	t.Helper()
+	c := ctrlfake.NewClientBuilder().
+		WithScheme(testutil.NewScheme(t)).
+		WithStatusSubresource(&dbaasv1.DBInstance{}, &dbaasv1.DBSnapshot{}, &dbaasv1.DBRestore{}).
+		WithObjects(objs...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*dbaasv1.DBInstance); ok {
+					return createErr
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+	return &DBRestoreReconciler{Client: c, APIReader: c, Harvester: stubWithPVCs(ourPVCForCapturedFixture()), DatabaseDefaults: operatorconfig.DatabaseDefaults{StorageClass: "longhorn"}}, c
+}
+
+func ourPVCForCapturedFixture() *corev1.PersistentVolumeClaim {
+	return ourPVC(capturedRestore(readySnapshot()), corev1.ClaimBound)
+}
+
+// The spec is immutable and the captured inputs frozen, so a target the API
+// server rejects as invalid can never be created: fail with the server's
+// reason rather than retrying forever behind a stale status message.
+func TestDBRestoreFailsWhenTargetIsRejectedAsInvalid(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	invalid := apierrors.NewInvalid(schema.GroupKind{Group: "dbaas.opencloud.wso2.com", Kind: "DBInstance"}, restore.Spec.TargetInstanceName,
+		field.ErrorList{field.Invalid(field.NewPath("spec", "dbName"), "rt-src-1", "should match '^[a-z_][a-z0-9_]{0,62}$'")})
+	r, c := restoreReconcilerFailingTargetCreate(t, invalid, restore, snap, heldBy(restore))
+
+	reconcileRestore(t, r, restore)
+
+	got := getRestore(t, c, restore)
+	wantStatus(t, got, dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTargetInvalid)
+	if !strings.Contains(got.Status.Message, "spec.dbName") {
+		t.Fatalf("Message = %q, want the API server's reason", got.Status.Message)
+	}
+	if holdExists(t, c, restore) {
+		t.Fatal("hold must be released once Failed")
+	}
+}
+
+// Any other error leaves the restore running, but status must say what's
+// happening — not keep describing an earlier pass (the e2e run showed
+// "waiting for PVC to become Bound (Pending)" for 40 minutes after it bound).
+func TestDBRestoreSurfacesRetryingErrorsInStatus(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	setRestoreProgress(restore, dbaasv1.RestoreStageRestoringVolume, dbaasv1.ReasonRestoreVolumeRestoring,
+		`waiting for restore PVC to become Bound (currently "Pending")`)
+	r, c := restoreReconcilerFailingTargetCreate(t, errors.New("etcdserver: request timed out"), restore, snap)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(restore)}); err == nil {
+		t.Fatal("a transient create error must be returned for retry")
+	}
+
+	got := getRestore(t, c, restore)
+	if got.Status.Stage == dbaasv1.RestoreStageFailed {
+		t.Fatal("a transient error must not fail the restore")
+	}
+	if !strings.Contains(got.Status.Message, "retrying after error") || !strings.Contains(got.Status.Message, "request timed out") {
+		t.Fatalf("Message = %q, want the error being retried", got.Status.Message)
 	}
 }

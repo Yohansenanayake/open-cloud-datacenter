@@ -33,6 +33,8 @@ import (
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/backup"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
@@ -47,10 +49,14 @@ import (
 // APIReader is an uncached reader for the hold Leases: this reconciler's
 // "is any restore still reading this source?" check is what lets it delete a
 // backend backup, and must not be answered from a stale cache.
+//
+// DatabaseDefaults resolves the source's defaulted settings when its
+// status.appliedSpec doesn't record them (see sourceMetadataFrom).
 type DBSnapshotReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Harvester harvester.ClientInterface
+	APIReader        client.Reader
+	Harvester        harvester.ClientInterface
+	DatabaseDefaults operatorconfig.DatabaseDefaults
 }
 
 func (r *DBSnapshotReconciler) holds() backup.Holds {
@@ -168,20 +174,26 @@ func (r *DBSnapshotReconciler) admitSnapshot(ctx context.Context, snap *dbaasv1.
 	// change before the backup finishes. Restore reads only this, never the
 	// live source, so it must reflect what was actually backed up.
 	if snap.Status.Source == nil {
-		snap.Status.Source = sourceMetadataFrom(&source)
+		snap.Status.Source = sourceMetadataFrom(&source, r.DatabaseDefaults)
 	}
 
 	return source, true, ctrl.Result{}, nil
 }
 
-func sourceMetadataFrom(source *dbaasv1.DBInstance) *dbaasv1.SourceMetadata {
+// sourceMetadataFrom records the source's *effective* settings — what it
+// actually runs with — not its spec as written. A restore inherits these
+// verbatim; recording a defaulted field as empty would make the target apply
+// its own default instead (e.g. dbName defaulting to the *target's* name, a
+// database the restored disk doesn't contain).
+func sourceMetadataFrom(source *dbaasv1.DBInstance, defaults operatorconfig.DatabaseDefaults) *dbaasv1.SourceMetadata {
+	eff := ensure.EffectiveSettingsFor(source, defaults)
 	return &dbaasv1.SourceMetadata{
 		InstanceUID:      source.UID,
-		DBName:           source.Spec.DBName,
-		MasterUsername:   source.Spec.MasterUsername,
-		EngineVersion:    source.Spec.EngineVersion,
-		Port:             source.Spec.Port,
-		StorageType:      source.Spec.StorageType,
+		DBName:           eff.DBName,
+		MasterUsername:   eff.MasterUsername,
+		EngineVersion:    eff.EngineVersion,
+		Port:             eff.Port,
+		StorageType:      eff.StorageType,
 		AllocatedStorage: source.Spec.AllocatedStorage,
 		ImageRevision:    source.Status.CurrentImageRevision,
 	}

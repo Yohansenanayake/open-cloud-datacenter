@@ -150,10 +150,7 @@ func (r *healthStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// Healthy: clear any Degraded, refresh the endpoint (the data-net IP can
 	// change after a restart or live migration), report ready.
 	inst.Status.RemoveCondition(dbaasv1.ConditionDegraded)
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
+	dbName := inst.EffectiveDBName()
 	inst.Status.Endpoint = &dbaasv1.Endpoint{
 		Address: readiness.IP,
 		Port:    port,

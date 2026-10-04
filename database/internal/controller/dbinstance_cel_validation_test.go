@@ -165,3 +165,67 @@ var _ = Describe("DBInstance immutable-field CEL rules", func() {
 		Expect(got.Spec.AllocatedStorage).To(Equal(30))
 	})
 })
+
+// dbName/masterUsername identifier rules, enforced by the real API server.
+var _ = Describe("DBInstance dbName and masterUsername identifier rules", func() {
+	ctx := context.Background()
+	counter := 0
+
+	create := func(dbName, masterUsername string) error {
+		counter++
+		inst := &dbaasv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("cel-ident-%d", counter), Namespace: "default"},
+			Spec: dbaasv1alpha1.DBInstanceSpec{
+				DBInstanceClass:  "db.t3.small",
+				AllocatedStorage: 20,
+				NetworkRef:       "default/vm-network",
+				DBName:           dbName,
+				MasterUsername:   masterUsername,
+			},
+		}
+		err := k8sClient.Create(ctx, inst)
+		if err == nil {
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, inst) })
+		}
+		return err
+	}
+
+	DescribeTable("accepts unquoted lowercase identifiers",
+		func(dbName, masterUsername string) {
+			Expect(create(dbName, masterUsername)).To(Succeed())
+		},
+		Entry("plain", "orders", "dbadmin"),
+		Entry("underscores and digits", "orders_db_2", "app_owner_1"),
+		Entry("leading underscore", "_orders", "_admin"),
+	)
+
+	DescribeTable("rejects names that need quoting or are reserved",
+		func(dbName, masterUsername, wantMessage string) {
+			err := create(dbName, masterUsername)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+			Expect(err.Error()).To(ContainSubstring(wantMessage))
+		},
+		Entry("dbName with a hyphen", "orders-db", "", "spec.dbName"),
+		Entry("dbName with uppercase", "Orders", "", "spec.dbName"),
+		Entry("dbName with $", "orders$", "", "spec.dbName"),
+		Entry("dbName starting with a digit", "1orders", "", "spec.dbName"),
+		Entry("dbName postgres", "postgres", "", "built-in PostgreSQL database"),
+		Entry("dbName template1", "template1", "", "built-in PostgreSQL database"),
+		Entry("masterUsername with a hyphen", "", "db-admin", "spec.masterUsername"),
+		Entry("masterUsername with uppercase", "", "Admin", "spec.masterUsername"),
+		Entry("masterUsername postgres", "", "postgres", "reserved role"),
+		Entry("masterUsername postgres_exporter", "", "postgres_exporter", "reserved role"),
+		Entry("masterUsername pg_ prefix", "", "pg_admin", "reserved role"),
+	)
+
+	// The default must always be writable back into spec.dbName — restore
+	// copies a source's effective dbName into the target's spec.
+	It("accepts DefaultDBName of any instance name as an explicit dbName", func() {
+		for _, instanceName := range []string{
+			"orders", "orders-db", "rt-src-1791115069", "a.b.c", "9lives", "postgres", "template0",
+			"x123456789-123456789-123456789-123456789-123456789-123456789-123456789",
+		} {
+			Expect(create(dbaasv1alpha1.DefaultDBName(instanceName), "")).To(Succeed(), "instance name %q", instanceName)
+		}
+	})
+})

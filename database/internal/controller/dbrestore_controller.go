@@ -100,6 +100,12 @@ func (r *DBRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	before := restore.DeepCopy()
 	teardownDone := false
 	defer func() {
+		// A pass that errors out returns before recording its outcome, which
+		// would leave status describing an earlier pass. Say what's actually
+		// happening instead (stage and reason stay as last derived).
+		if retErr != nil && !restoreFinished(&restore) {
+			restore.Status.Message = fmt.Sprintf("retrying after error: %v", retErr)
+		}
 		retErr = goerrors.Join(retErr, r.finishPass(ctx, before, &restore, teardownDone))
 	}()
 
@@ -267,6 +273,13 @@ func (r *DBRestoreReconciler) reconcileRestore(ctx context.Context, restore *dba
 	// 7. Converge the target DBInstance.
 	if target == nil {
 		created, err := r.createTarget(ctx, restore)
+		if apierrors.IsInvalid(err) {
+			// The spec is immutable and its inputs frozen, so the same
+			// rejection would repeat forever.
+			failRestore(restore, dbaasv1.ReasonRestoreTargetInvalid,
+				fmt.Sprintf("the API server rejected DBInstance %q: %v", restore.Spec.TargetInstanceName, err))
+			return ctrl.Result{}, nil
+		}
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -290,6 +303,15 @@ func (r *DBRestoreReconciler) captureSnapshot(ctx context.Context, restore *dbaa
 	if snap.Status.Source == nil {
 		failRestore(restore, dbaasv1.ReasonRestoreInvalidSnapshotState,
 			fmt.Sprintf("DBSnapshot %q is Ready but has no captured source metadata", snap.Name))
+		return false, ctrl.Result{}, nil
+	}
+	// The target's guest verifies the restored cluster against exactly these
+	// values, so an empty one would only surface as a VM that never becomes
+	// ready. Fail here, with a reason, before creating anything.
+	if src := snap.Status.Source; src.DBName == "" || src.MasterUsername == "" || src.EngineVersion == "" {
+		failRestore(restore, dbaasv1.ReasonRestoreInvalidSnapshotState,
+			fmt.Sprintf("DBSnapshot %q does not record the source's effective dbName/masterUsername/engineVersion (got %q/%q/%q); take a new snapshot",
+				snap.Name, src.DBName, src.MasterUsername, src.EngineVersion))
 		return false, ctrl.Result{}, nil
 	}
 	if restore.Spec.AllocatedStorage < snap.Status.Source.AllocatedStorage {
