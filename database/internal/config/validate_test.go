@@ -84,3 +84,16 @@ func TestValidateRejectsNonPositiveRestoreRecoveryTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRequiresRestoreTimeoutToExceedRecoveryTimeout(t *testing.T) {
+	for _, value := range []time.Duration{0, time.Hour, 30 * time.Minute} {
+		cfg := Default()
+		cfg.Restore.RecoveryTimeout = time.Hour
+		cfg.Restore.Timeout = value
+
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "restore.timeout") {
+			t.Fatalf("Validate() with Timeout = %v error = %v, want restore.timeout field", value, err)
+		}
+	}
+}

@@ -207,6 +207,14 @@ spec:
                   DataVolumeSnapshotName mirrors the snapshot's own recorded value —
                   the restore PVC's spec.dataSource.
                 type: string
+              deadline:
+                description: |-
+                  Deadline is when this restore times out: its creation time plus the
+                  operator's restore.timeout. Shown for visibility only — the
+                  controller recomputes it every pass from metadata.creationTimestamp
+                  and never reads it back.
+                format: date-time
+                type: string
               message:
                 description: Message is a human-readable detail for Reason.
                 type: string

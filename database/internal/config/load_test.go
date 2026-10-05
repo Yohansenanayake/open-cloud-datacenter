@@ -45,6 +45,9 @@ func TestLoadDefaults(t *testing.T) {
 	if got.Restore.RecoveryTimeout != time.Hour {
 		t.Fatalf("Restore.RecoveryTimeout = %v, want 1h", got.Restore.RecoveryTimeout)
 	}
+	if got.Restore.Timeout != 6*time.Hour {
+		t.Fatalf("Restore.Timeout = %v, want 6h", got.Restore.Timeout)
+	}
 	if len(got.InstanceClasses) != len(want.InstanceClasses) {
 		t.Fatalf("InstanceClasses has %d entries, want %d", len(got.InstanceClasses), len(want.InstanceClasses))
 	}

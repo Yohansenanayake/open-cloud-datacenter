@@ -169,6 +169,7 @@ func main() {
 		Client:           mgr.GetClient(),
 		Harvester:        hvClient,
 		DatabaseDefaults: cfg.DatabaseDefaults,
+		Restore:          cfg.Restore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbrestore")
 		os.Exit(1)

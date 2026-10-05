@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1065,5 +1066,178 @@ func TestDBRestoreSurfacesRetryingErrorsInStatus(t *testing.T) {
 	}
 	if !strings.Contains(got.Status.Message, "retrying after error") || !strings.Contains(got.Status.Message, "request timed out") {
 		t.Fatalf("Message = %q, want the error being retried", got.Status.Message)
+	}
+}
+
+// ---- deadline (restore.timeout) ----
+
+var deadlineNow = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+
+// createdAgo stamps restore as created `ago` before deadlineNow; the
+// reconciler's clock is pinned to deadlineNow and its timeout to 6h.
+func createdAgo(restore *dbaasv1.DBRestore, ago time.Duration) {
+	restore.CreationTimestamp = metav1.NewTime(deadlineNow.Add(-ago))
+}
+
+func newDeadlineReconciler(t *testing.T, stub *testutil.StubHarvester, objs ...client.Object) (*DBRestoreReconciler, client.Client) {
+	t.Helper()
+	r, c := newRestoreReconciler(t, stub, objs...)
+	r.Restore = operatorconfig.RestoreConfig{RecoveryTimeout: time.Hour, Timeout: 6 * time.Hour}
+	r.Now = func() time.Time { return deadlineNow }
+	return r, c
+}
+
+func TestDBRestoreSchedulesItsNextPassNoLaterThanTheDeadline(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	target := ourTarget(restore) // starting: no Ready condition, so no event-driven wake-up is guaranteed
+	restore.Status.TargetInstanceUID = target.UID
+	createdAgo(restore, 6*time.Hour-90*time.Second)
+	r, c := newDeadlineReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimBound)), restore, snap, target)
+
+	res := reconcileRestore(t, r, restore)
+
+	if res.RequeueAfter <= 0 || res.RequeueAfter > 90*time.Second {
+		t.Fatalf("RequeueAfter = %v, want a wake-up at the deadline (90s away)", res.RequeueAfter)
+	}
+	got := getRestore(t, c, restore)
+	wantStatus(t, got, dbaasv1.RestoreStageStartingDatabase, dbaasv1.ReasonRestoreTargetStarting)
+	if got.Status.Deadline == nil || !got.Status.Deadline.Time.Equal(restore.CreationTimestamp.Add(6*time.Hour)) {
+		t.Fatalf("status.deadline = %v, want creation + 6h", got.Status.Deadline)
+	}
+}
+
+func TestDBRestoreTimesOutBeforeTheTargetExists(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	createdAgo(restore, 7*time.Hour)
+	r, c := newDeadlineReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimPending)), restore, snap, heldBy(restore))
+
+	reconcileRestore(t, r, restore)
+
+	got := getRestore(t, c, restore)
+	wantStatus(t, got, dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTimedOut)
+	if !strings.Contains(got.Status.Message, "RestoringVolume") {
+		t.Fatalf("Message = %q, want the stage it was stuck in", got.Status.Message)
+	}
+	if holdExists(t, c, restore) {
+		t.Fatal("hold must be released once timed out")
+	}
+	if _, exists := targetExists(t, c, restore); exists {
+		t.Fatal("a timed-out restore must not go on to create its target")
+	}
+}
+
+func TestDBRestoreTimeoutDeletesTheUnfinishedTarget(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	target := ourTarget(restore) // never became ready
+	target.Finalizers = []string{dbaasv1.FinalizerName}
+	restore.Status.TargetInstanceUID = target.UID
+	createdAgo(restore, 7*time.Hour)
+	r, c := newDeadlineReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimBound)), restore, snap, target, heldBy(restore))
+
+	reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTimedOut)
+	if got, exists := targetExists(t, c, restore); exists && got.DeletionTimestamp.IsZero() {
+		t.Fatal("the unfinished target must be deleted on timeout")
+	}
+	if holdExists(t, c, restore) {
+		t.Fatal("hold must be released once timed out")
+	}
+}
+
+// The pass observes everything before the deadline is applied: a target
+// that turned ready right at the deadline is a success, not a timeout.
+func TestDBRestoreTargetReadyAtTheDeadlineSucceeds(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	target := withCondition(ourTarget(restore), dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "ready")
+	restore.Status.TargetInstanceUID = target.UID
+	createdAgo(restore, 7*time.Hour)
+	r, c := newDeadlineReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimBound)), restore, snap, target)
+
+	reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageSucceeded, dbaasv1.ReasonRestoreSucceeded)
+	if got, exists := targetExists(t, c, restore); !exists || !got.DeletionTimestamp.IsZero() {
+		t.Fatal("a ready target must never be deleted by the deadline")
+	}
+}
+
+// A restore stuck retrying an error still ends at its deadline.
+func TestDBRestoreTimesOutEvenWhileRetryingAnError(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	createdAgo(restore, 7*time.Hour)
+	r, c := restoreReconcilerFailingTargetCreate(t, errors.New("etcdserver: request timed out"), restore, snap)
+	r.Restore = operatorconfig.RestoreConfig{RecoveryTimeout: time.Hour, Timeout: 6 * time.Hour}
+	r.Now = func() time.Time { return deadlineNow }
+
+	reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTimedOut)
+}
+
+// The deadline is derived from metadata.creationTimestamp every pass, never
+// from recorded status: a status.deadline edited to the past doesn't end a
+// restore that still has time.
+func TestDBRestoreIgnoresRecordedDeadline(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	createdAgo(restore, time.Hour)
+	past := metav1.NewTime(deadlineNow.Add(-time.Hour))
+	restore.Status.Deadline = &past
+	r, c := newDeadlineReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimPending)), restore, snap)
+
+	reconcileRestore(t, r, restore)
+
+	got := getRestore(t, c, restore)
+	if got.Status.Stage == dbaasv1.RestoreStageFailed {
+		t.Fatalf("Status = %+v: a recorded deadline must not drive the timeout", got.Status)
+	}
+	if got.Status.Deadline == nil || !got.Status.Deadline.Time.Equal(restore.CreationTimestamp.Add(6*time.Hour)) {
+		t.Fatalf("status.deadline = %v, want it re-derived as creation + 6h", got.Status.Deadline)
+	}
+}
+
+// A restore that ended for its own reason in this pass keeps that reason,
+// even past its deadline — the timeout only applies to unfinished restores.
+func TestDBRestoreFailureReasonIsNotOverwrittenByTheDeadline(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	target := withCondition(ourTarget(restore), dbaasv1.ConditionAccepted, metav1.ConditionFalse, dbaasv1.ReasonInvalidClass, "unknown dbInstanceClass")
+	restore.Status.TargetInstanceUID = target.UID
+	createdAgo(restore, 7*time.Hour)
+	r, c := newDeadlineReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimBound)), restore, snap, target)
+
+	reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTargetRejected)
+}
+
+// The timeout deletes a target only after confirming it live: a target the
+// lagging cache still shows as starting, but that is ready on the API
+// server, is never deleted.
+func TestDBRestoreTimeoutNeverDeletesATargetReadyOnTheAPIServer(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	cached := ourTarget(restore)
+	restore.Status.TargetInstanceUID = cached.UID
+	createdAgo(restore, 7*time.Hour)
+	live := withCondition(ourTarget(restore), dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "ready")
+	r, c := splitReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimBound)),
+		[]client.Object{restore.DeepCopy(), snap.DeepCopy(), cached}, []client.Object{restore, snap, live})
+	r.Restore = operatorconfig.RestoreConfig{RecoveryTimeout: time.Hour, Timeout: 6 * time.Hour}
+	r.Now = func() time.Time { return deadlineNow }
+
+	reconcileRestore(t, r, restore)
+
+	if got, exists := targetExists(t, c, restore); !exists || !got.DeletionTimestamp.IsZero() {
+		t.Fatal("a target ready on the API server must not be deleted by the timeout")
+	}
+	if got := getRestore(t, c, restore); got.Status.Stage == dbaasv1.RestoreStageFailed {
+		t.Fatalf("Status = %+v, must not time out a target that is ready", got.Status)
 	}
 }

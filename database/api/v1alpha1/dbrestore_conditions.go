@@ -51,6 +51,7 @@ const (
 	ReasonRestoreTargetLost         ConditionReason = "TargetLost"
 
 	// Terminal / deletion.
+	ReasonRestoreTimedOut   ConditionReason = "RestoreTimedOut"
 	ReasonRestoreSucceeded  ConditionReason = "Succeeded"
 	ReasonRestoreCancelling ConditionReason = "Cancelling"
 )

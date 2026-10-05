@@ -22,6 +22,9 @@
 #      name conflict, cancellation (deleting an in-progress DBRestore deletes
 #      its target), and deleting the DBSnapshot mid-restore (the backend
 #      backup survives while the restore holds it).
+#   7. The restore deadline (skip with SKIP_DEADLINE=1): with a short
+#      restore.timeout a restore fails as RestoreTimedOut, status.deadline
+#      is creation + timeout, and the unfinished target is deleted.
 #
 # Usage: ./test-restore.sh [--cleanup]
 #   --cleanup  delete everything this run created on exit (including the
@@ -40,6 +43,19 @@
 #   SKIP_SOURCE_DELETE=1   skip phase 5 (restore after the source is gone)
 #   SKIP_NEGATIVE=1        skip the failure-path checks (phase 6)
 #   SKIP_SNAPSHOT_RACE=1   skip deleting the DBSnapshot mid-restore (last step)
+#   SKIP_DEADLINE=1        skip the restore-deadline phase (runs by default —
+#                          fine on a dev cluster). It RESTARTS THE SHARED
+#                          OPERATOR with a short restore.timeout
+#                          (DEADLINE_TIMEOUT_SECONDS [120]) and
+#                          restore.recoveryTimeout (DEADLINE_RECOVERY_SECONDS
+#                          [60]) via env vars, then puts the original
+#                          settings back — on exit too, whatever happens.
+#                          Refuses to run while any other DBRestore in the
+#                          cluster is unfinished (a short timeout would end
+#                          it). Needs permission to patch the operator
+#                          Deployment: OPERATOR_NS [dbaas-system],
+#                          OPERATOR_DEPLOY [dbaas-controller-manager],
+#                          OPERATOR_CONTAINER [manager].
 #
 # Requires: kubectl, psql, base64, GNU date; curl (optional, exporter check).
 
@@ -56,6 +72,11 @@ BACKUP_TIMEOUT="${BACKUP_TIMEOUT:-1200}"
 RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-2400}"
 FAIL_TIMEOUT="${FAIL_TIMEOUT:-180}"
 POLL="${POLL:-5}"
+OPERATOR_NS="${OPERATOR_NS:-dbaas-system}"
+OPERATOR_DEPLOY="${OPERATOR_DEPLOY:-dbaas-controller-manager}"
+OPERATOR_CONTAINER="${OPERATOR_CONTAINER:-manager}"
+DEADLINE_TIMEOUT_SECONDS="${DEADLINE_TIMEOUT_SECONDS:-120}"
+DEADLINE_RECOVERY_SECONDS="${DEADLINE_RECOVERY_SECONDS:-60}"
 VM_PASSWORD="${VM_PASSWORD:-e2e-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
 # YAML single-quoted scalar: a literal ' is written as ''.
 VM_PASSWORD_YAML="'${VM_PASSWORD//\'/\'\'}'"
@@ -203,6 +224,55 @@ diagnose_restore() { # diagnose_restore <restore> <target>
   fi
 }
 
+# ---------- operator configuration (deadline phase) ----------
+OPERATOR_RECONFIGURED=false
+declare -A OPERATOR_ENV_BEFORE=() # var -> original value; absent key = was unset
+DEADLINE_ENV_VARS=(DBAAS_RESTORE__TIMEOUT DBAAS_RESTORE__RECOVERY_TIMEOUT)
+
+ok() { kubectl -n "$OPERATOR_NS" "$@"; }
+operator_container_jsonpath() { echo "{.spec.template.spec.containers[?(@.name=='$OPERATOR_CONTAINER')]$1}"; }
+
+# operator_env_value <var>: prints the value and succeeds if the container
+# sets <var> (as a plain value), fails if it doesn't set it at all.
+operator_env_value() {
+  local names
+  names=$(ok get deploy "$OPERATOR_DEPLOY" -o jsonpath="$(operator_container_jsonpath '.env[*].name')" 2>/dev/null)
+  grep -qxF "$1" <<<"${names// /$'\n'}" || return 1
+  ok get deploy "$OPERATOR_DEPLOY" -o jsonpath="$(operator_container_jsonpath ".env[?(@.name=='$1')].value")"
+}
+
+operator_rollout() {
+  ok rollout status deploy/"$OPERATOR_DEPLOY" --timeout=300s >/dev/null
+}
+
+reconfigure_operator() { # reconfigure_operator <timeout-seconds> <recovery-seconds>
+  local v
+  for v in "${DEADLINE_ENV_VARS[@]}"; do
+    if val=$(operator_env_value "$v"); then OPERATOR_ENV_BEFORE[$v]="$val"; fi
+  done
+  OPERATOR_RECONFIGURED=true
+  ok set env deploy/"$OPERATOR_DEPLOY" -c "$OPERATOR_CONTAINER" \
+    "DBAAS_RESTORE__TIMEOUT=${1}s" "DBAAS_RESTORE__RECOVERY_TIMEOUT=${2}s" >/dev/null && operator_rollout
+}
+
+# restore_operator puts back exactly what was there before (a value, or no
+# variable at all). Idempotent; safe to call from the exit handler.
+restore_operator() {
+  [[ "$OPERATOR_RECONFIGURED" == "true" ]] || return 0
+  local v args=()
+  for v in "${DEADLINE_ENV_VARS[@]}"; do
+    if [[ -v "OPERATOR_ENV_BEFORE[$v]" ]]; then args+=("$v=${OPERATOR_ENV_BEFORE[$v]}"); else args+=("$v-"); fi
+  done
+  if ok set env deploy/"$OPERATOR_DEPLOY" -c "$OPERATOR_CONTAINER" "${args[@]}" >/dev/null && operator_rollout; then
+    OPERATOR_RECONFIGURED=false
+    info "Operator restore settings put back (${args[*]})"
+    return 0
+  fi
+  printf '\033[1;31mOPERATOR NOT RESTORED\033[0m put it back by hand:\n  kubectl -n %s set env deploy/%s -c %s %s\n' \
+    "$OPERATOR_NS" "$OPERATOR_DEPLOY" "$OPERATOR_CONTAINER" "${args[*]}"
+  return 1
+}
+
 # ---------- resources ----------
 record_pvcs() { # record_pvcs <instance> — remember its disks for --cleanup
   local d o
@@ -237,6 +307,7 @@ EOF
 
 on_exit() {
   local code=$?
+  restore_operator || code=1
   printf '\n\033[1m%d passed, %d failed\033[0m (run %s)\n' "$PASS" "$FAIL" "$RUN_ID"
   if [[ "$CLEANUP" != "true" || "$code" != "0" || "$FAIL" != "0" ]]; then
     [[ "$CLEANUP" == "true" ]] && info "Run failed — keeping every resource for inspection despite --cleanup"
@@ -251,6 +322,8 @@ on_exit() {
   local r t uid
   for t in "${CREATED_TARGETS[@]}" "$SOURCE"; do
     exists dbinstance "$t" && record_pvcs "$t"
+    mapfile -t -O "${#CLEANUP_PVCS[@]}" CLEANUP_PVCS < <(
+      kc get pvc -o name 2>/dev/null | sed 's|^persistentvolumeclaim/||' | grep -E "^pg-${t}-" || true)
   done
   for r in "${CREATED_RESTORES[@]}"; do
     uid=$(jp dbrestore "$r" '{.metadata.uid}')
@@ -509,14 +582,69 @@ phase_failure_paths() {
 }
 
 # =====================================================================
-# Phase 7 — deleting the DBSnapshot while a restore reads from it (last:
+# Phase 7 (skip with SKIP_DEADLINE=1) — restore deadline. Restarts the shared
+# operator with a short restore.timeout, so a normal restore (~5 minutes
+# here) times out while its target is starting; restores the operator
+# afterwards. Runs before the snapshot-delete phase, which consumes the
+# snapshot.
+# =====================================================================
+time_epoch() { date -u -d "$1" +%s 2>/dev/null; }
+
+phase_deadline() {
+  local r="rt-deadline-$RUN_ID" t="rt-tgt-deadline-$RUN_ID" others args created deadline
+  say "Phase 7: restore deadline (operator restarted with restore.timeout=${DEADLINE_TIMEOUT_SECONDS}s)"
+
+  args=$(ok get deploy "$OPERATOR_DEPLOY" -o jsonpath="$(operator_container_jsonpath '.args')" 2>/dev/null)
+  if [[ "$args" == *"--restore."* ]]; then
+    fail "operator sets restore.* by flag ($args), which would override the env vars — skipping the deadline phase"
+    return
+  fi
+  others=$(kubectl get dbrestore -A -l "dbaas-e2e/run!=$RUN_ID" \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}={.status.stage}{"\n"}{end}' 2>/dev/null |
+    grep -vE '=(Succeeded|Failed)$' | grep -v '^$' || true)
+  if [[ -n "$others" ]]; then
+    info "Skipping: other unfinished DBRestores in the cluster would be ended by a short timeout:"
+    printf '  %s\n' $others
+    return
+  fi
+
+  info "Restarting the operator with DBAAS_RESTORE__TIMEOUT=${DEADLINE_TIMEOUT_SECONDS}s DBAAS_RESTORE__RECOVERY_TIMEOUT=${DEADLINE_RECOVERY_SECONDS}s"
+  reconfigure_operator "$DEADLINE_TIMEOUT_SECONDS" "$DEADLINE_RECOVERY_SECONDS" \
+    || { fail "could not reconfigure the operator"; return; }
+  pass "operator restarted with a short restore deadline"
+
+  create_restore "$r" "$t" "$SNAPSHOT" "$ALLOCATED_STORAGE"
+  wait_restore_terminal "$r" $((DEADLINE_TIMEOUT_SECONDS + 300))
+  check "DBRestore/$r timed out" "Failed/RestoreTimedOut" "$(restore_stage "$r")/$(restore_reason "$r")"
+  [[ "$(jp dbrestore "$r" '{.status.message}')" == *"last stage"* ]] \
+    && pass "timeout message names the stage it was stuck in" \
+    || fail "timeout message doesn't name the stage: $(jp dbrestore "$r" '{.status.message}')"
+
+  created=$(time_epoch "$(jp dbrestore "$r" '{.metadata.creationTimestamp}')")
+  deadline=$(time_epoch "$(jp dbrestore "$r" '{.status.deadline}')")
+  check "status.deadline is creation + restore.timeout" "$DEADLINE_TIMEOUT_SECONDS" "$(( ${deadline:-0} - ${created:-0} ))"
+
+  if not_exists dbinstance "$t" || [[ -n "$(jp dbinstance "$t" '{.metadata.deletionTimestamp}')" ]]; then
+    pass "the unfinished target DBInstance/$t was deleted"
+  else
+    fail "the unfinished target DBInstance/$t is still running after the timeout"
+  fi
+  not_exists lease "$(restore_lease "$r")" && pass "restore hold released after the timeout" \
+    || fail "restore hold left behind by the timed-out DBRestore/$r"
+
+  info "Putting the operator's restore settings back"
+  restore_operator && pass "operator restore settings restored" || fail "operator restore settings NOT restored"
+}
+
+# =====================================================================
+# Phase 8 — deleting the DBSnapshot while a restore reads from it (last:
 # it consumes the snapshot)
 # =====================================================================
 backup_exists() { kc get virtualmachinebackups.harvesterhci.io "$SNAPSHOT" >/dev/null 2>&1; }
 
 phase_snapshot_delete_race() {
   local r="rt-race-$RUN_ID" t="rt-tgt-race-$RUN_ID" lease violated=0
-  say "Phase 7: delete DBSnapshot/$SNAPSHOT while DBRestore/$r is reading it"
+  say "Phase 8: delete DBSnapshot/$SNAPSHOT while DBRestore/$r is reading it"
   create_restore "$r" "$t" "$SNAPSHOT" "$ALLOCATED_STORAGE"
   wait_until "DBRestore/$r to take its restore hold" "$FAIL_TIMEOUT" restore_holds "$r" || return
   lease=$(restore_lease "$r")
@@ -555,6 +683,7 @@ main() {
   phase_restore_live_source
   [[ "${SKIP_SOURCE_DELETE:-0}" == "1" ]] || phase_restore_after_source_deleted
   [[ "${SKIP_NEGATIVE:-0}" == "1" ]] || phase_failure_paths
+  [[ "${SKIP_DEADLINE:-0}" == "1" ]] || phase_deadline
   [[ "${SKIP_SNAPSHOT_RACE:-0}" == "1" ]] || phase_snapshot_delete_race
 
   (( FAIL == 0 )) || exit 1

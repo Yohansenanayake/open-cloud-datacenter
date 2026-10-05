@@ -41,11 +41,37 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
+// Restore.Timeout bounds a whole restore (see enforceDeadline); Now is the
+// clock, overridable in tests.
 type DBRestoreReconciler struct {
 	client.Client
 	APIReader        client.Reader
 	Harvester        harvester.ClientInterface
 	DatabaseDefaults operatorconfig.DatabaseDefaults
+	Restore          operatorconfig.RestoreConfig
+	Now              func() time.Time
+}
+
+func (r *DBRestoreReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// deadline is when restore times out: its creation time plus
+// restore.timeout. Derived every pass from a fact the API server set and
+// nobody can change, never from recorded status. ok is false only for an
+// object with no creation time (never the case on a real API server).
+func (r *DBRestoreReconciler) deadline(restore *dbaasv1.DBRestore) (time.Time, bool) {
+	if restore.CreationTimestamp.IsZero() {
+		return time.Time{}, false
+	}
+	timeout := r.Restore.Timeout
+	if timeout <= 0 {
+		timeout = operatorconfig.Default().Restore.Timeout
+	}
+	return restore.CreationTimestamp.Add(timeout), true
 }
 
 func (r *DBRestoreReconciler) holds() backup.Holds {
@@ -160,15 +186,83 @@ func restoreFinished(restore *dbaasv1.DBRestore) bool {
 	return restore.Status.Stage == dbaasv1.RestoreStageSucceeded || restore.Status.Stage == dbaasv1.RestoreStageFailed
 }
 
-// reconcileRestore runs one pass of the (non-deletion) restore. Each gate
-// below re-observes what it depends on from the cluster; nothing here trusts
-// that an object seen on an earlier pass still exists or is still ours.
+// reconcileRestore runs one (non-deletion) pass, then applies the restore's
+// deadline to its outcome.
 func (r *DBRestoreReconciler) reconcileRestore(ctx context.Context, restore *dbaasv1.DBRestore) (ctrl.Result, error) {
 	// A restore is a one-time operation, like a Job: once it has ended there
 	// is nothing further to converge (finishPass still releases the hold).
 	if restoreFinished(restore) {
 		return ctrl.Result{}, nil
 	}
+	res, err := r.reconcileRestorePass(ctx, restore)
+	return r.enforceDeadline(ctx, restore, res, err)
+}
+
+// enforceDeadline applies restore.timeout to the outcome of a pass. It runs
+// after the pass has observed everything, so a target that became ready
+// right at the deadline counts as a success, not a timeout. An unfinished
+// restore past its deadline fails as RestoreTimedOut — even if the pass
+// itself errored, so a restore stuck retrying an error still ends — and its
+// unfinished target is deleted, like a rejected one. Otherwise the next
+// pass is scheduled no later than the deadline: StartingDatabase waits on
+// DBInstance events, which a quietly stuck target never sends.
+func (r *DBRestoreReconciler) enforceDeadline(ctx context.Context, restore *dbaasv1.DBRestore, res ctrl.Result, passErr error) (ctrl.Result, error) {
+	deadline, ok := r.deadline(restore)
+	if !ok || restoreFinished(restore) {
+		return res, passErr
+	}
+	restore.Status.Deadline = &metav1.Time{Time: deadline}
+
+	remaining := deadline.Sub(r.now())
+	if remaining > 0 {
+		if passErr == nil && (res.RequeueAfter == 0 || res.RequeueAfter > remaining) {
+			res.RequeueAfter = remaining
+		}
+		return res, passErr
+	}
+
+	// Timed out. Any target this restore created and that isn't ready (a
+	// ready one would have made this pass a success) is torn down — but
+	// only once confirmed against the API server, never from a cache.
+	stuck := fmt.Sprintf("%s: %s", restore.Status.Stage, restore.Status.Reason)
+	live, owned, err := r.observeTarget(ctx, r.APIReader, restore)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if owned && live.DeletionTimestamp.IsZero() {
+		if live.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+			return ctrl.Result{Requeue: true}, nil // ready after all — the next pass records success
+		}
+		if res, err := r.deleteConfirmedTarget(ctx, live); err != nil || res.Requeue {
+			return res, err
+		}
+	}
+	timeout := deadline.Sub(restore.CreationTimestamp.Time)
+	failRestore(restore, dbaasv1.ReasonRestoreTimedOut,
+		fmt.Sprintf("restore did not finish within %s (last stage %s)", timeout, stuck))
+	return ctrl.Result{}, nil
+}
+
+// deleteConfirmedTarget deletes target, preconditioned on the exact object
+// the caller just confirmed against the API server. The delete is durable
+// once issued — DBInstanceReconciler's own finalizer finishes it — so the
+// caller can mark the restore Failed right away. A conflict means the
+// target changed since it was confirmed: requeue and re-judge.
+func (r *DBRestoreReconciler) deleteConfirmedTarget(ctx context.Context, target *dbaasv1.DBInstance) (ctrl.Result, error) {
+	uid, rv := target.UID, target.ResourceVersion
+	if err := r.Delete(ctx, target, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// reconcileRestorePass runs one pass of the (non-deletion) restore. Each
+// gate below re-observes what it depends on from the cluster; nothing here
+// trusts that an object seen on an earlier pass still exists or is ours.
+func (r *DBRestoreReconciler) reconcileRestorePass(ctx context.Context, restore *dbaasv1.DBRestore) (ctrl.Result, error) {
 
 	// 1. Capture the snapshot's inputs, once. Needed first: the hold is
 	// labeled with the captured source UID, and the PVC identity check
@@ -563,17 +657,10 @@ func (r *DBRestoreReconciler) observeTargetReadiness(ctx context.Context, restor
 		if live == nil || !owned || !live.DeletionTimestamp.IsZero() || !targetRejected(live) {
 			return ctrl.Result{Requeue: true}, nil // re-derive next pass from fresh state
 		}
-		// Tear the target down (design §7). The delete is durable once
-		// issued — DBInstanceReconciler's own finalizer finishes it — so the
-		// restore can be marked Failed right away, with no "mid-teardown"
-		// state to remember across passes. The DBRestore survives as the
-		// diagnostic record. Preconditioned on the exact object confirmed.
-		uid, rv := live.UID, live.ResourceVersion
-		if err := r.Delete(ctx, live, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
-			if apierrors.IsConflict(err) {
-				return ctrl.Result{Requeue: true}, nil // changed since confirmed — re-judge
-			}
-			return ctrl.Result{}, err
+		// Tear the target down (design §7); the DBRestore survives as the
+		// diagnostic record.
+		if res, err := r.deleteConfirmedTarget(ctx, live); err != nil || res.Requeue {
+			return res, err
 		}
 		accepted := live.Status.GetCondition(dbaasv1.ConditionAccepted)
 		failRestore(restore, dbaasv1.ReasonRestoreTargetRejected,

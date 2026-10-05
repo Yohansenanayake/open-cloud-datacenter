@@ -164,6 +164,13 @@ type DBRestoreStatus struct {
 	// +optional
 	TargetInstanceUID types.UID `json:"targetInstanceUID,omitempty"`
 
+	// Deadline is when this restore times out: its creation time plus the
+	// operator's restore.timeout. Shown for visibility only — the
+	// controller recomputes it every pass from metadata.creationTimestamp
+	// and never reads it back.
+	// +optional
+	Deadline *metav1.Time `json:"deadline,omitempty"`
+
 	// ObservedGeneration tracks which spec version has been reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

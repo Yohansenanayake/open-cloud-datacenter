@@ -108,6 +108,12 @@ type RestoreConfig struct {
 	// failing the restore. Recovery time grows with the WAL the snapshot
 	// captured, so size this for the largest databases being restored.
 	RecoveryTimeout time.Duration `konf:"recoveryTimeout"`
+	// Timeout bounds a whole restore, measured from the DBRestore's
+	// creation: waiting for the snapshot, the volume restore, and the
+	// target becoming ready. A restore still unfinished at that point fails
+	// as RestoreTimedOut and its unfinished target is deleted. Must exceed
+	// RecoveryTimeout, which is only one part of it.
+	Timeout time.Duration `konf:"timeout"`
 }
 
 type ObservabilityConfig struct {

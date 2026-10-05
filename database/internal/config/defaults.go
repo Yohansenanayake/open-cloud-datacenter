@@ -56,6 +56,7 @@ func Default() Config {
 		},
 		Restore: RestoreConfig{
 			RecoveryTimeout: time.Hour,
+			Timeout:         6 * time.Hour,
 		},
 		Observability: ObservabilityConfig{
 			Grafana: GrafanaConfig{BaseURL: "https://grafana.monitoring.svc"},

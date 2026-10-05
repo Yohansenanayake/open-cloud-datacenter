@@ -59,6 +59,8 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 	set.String("databaseDefaults.osVersion", defaults.DatabaseDefaults.OSVersion,
 		"Default baked-image OS stream (internal/catalog key) for DBInstance provisioning and repave.")
 
+	set.Duration("restore.timeout", defaults.Restore.Timeout,
+		"How long a whole restore may take, from the DBRestore's creation, before it fails as RestoreTimedOut and its unfinished target is deleted. Must exceed restore.recoveryTimeout.")
 	set.Duration("restore.recoveryTimeout", defaults.Restore.RecoveryTimeout,
 		"How long a restored instance's first boot waits for PostgreSQL to finish recovering the restored data before failing the restore.")
 
