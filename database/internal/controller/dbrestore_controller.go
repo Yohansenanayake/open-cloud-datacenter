@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,11 +43,13 @@ import (
 )
 
 // Restore.Timeout bounds a whole restore (see enforceDeadline); Now is the
-// clock, overridable in tests.
+// clock, overridable in tests. Recorder emits an event for each status
+// transition (finishPass); nil disables events.
 type DBRestoreReconciler struct {
 	client.Client
 	APIReader        client.Reader
 	Harvester        harvester.ClientInterface
+	Recorder         record.EventRecorder
 	DatabaseDefaults operatorconfig.DatabaseDefaults
 	Restore          operatorconfig.RestoreConfig
 	Now              func() time.Time
@@ -148,24 +151,9 @@ func (r *DBRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // finishPass settles everything a pass must leave consistent, in order:
-//
-//  1. The restore hold, reconciled to its desired state: held until the
-//     restore is settled — ended (finished, or cancelled with its target
-//     torn down) with nothing of it left reading the snapshot (see
-//     settleRestorePVC). settled is derived from this pass's observations,
-//     and an ended restore re-derives it on every pass, which also heals a
-//     release that failed (or never happened) on an earlier one.
-//     Acquisition stays explicit in reconcileRestore, since the hold must be
-//     held *before* the snapshot is verified and the PVC created within the
-//     same pass.
-//  2. Status: one patch per pass, skipped when nothing changed. The patch
-//     is optimistic (it carries the resourceVersion the pass started from):
-//     a pass that started from a cached copy older than the object — e.g.
-//     one that hasn't yet seen this controller's own last status write —
-//     must not overwrite what's there, such as a terminal reason. Such a
-//     pass is stale: it writes nothing further and is requeued.
-//  3. The finalizer, removed only once settled AND the hold is confirmed
-//     released — so the finalizer itself guarantees release.
+//  1. The restore hold, r
+//  2. Status
+//  3. The finalizer
 func (r *DBRestoreReconciler) finishPass(ctx context.Context, before, restore *dbaasv1.DBRestore, settled bool) (stale bool, err error) {
 	deleting := !restore.DeletionTimestamp.IsZero()
 	var errs []error
@@ -188,6 +176,8 @@ func (r *DBRestoreReconciler) finishPass(ctx context.Context, before, restore *d
 			return true, goerrors.Join(errs...)
 		case err != nil && (!deleting || !apierrors.IsNotFound(err)):
 			errs = append(errs, fmt.Errorf("patch DBRestore status: %w", err))
+		case err == nil && restore.Status.Reason != before.Status.Reason:
+			r.recordTransition(restore)
 		}
 	}
 
@@ -197,6 +187,19 @@ func (r *DBRestoreReconciler) finishPass(ctx context.Context, before, restore *d
 		}
 	}
 	return false, goerrors.Join(errs...)
+}
+
+// recordTransition announces the restore's new reason: a Warning for a
+// failure, Normal for progress (including success and cancellation).
+func (r *DBRestoreReconciler) recordTransition(restore *dbaasv1.DBRestore) {
+	if r.Recorder == nil {
+		return
+	}
+	eventType := corev1.EventTypeNormal
+	if restore.Status.Stage == dbaasv1.RestoreStageFailed {
+		eventType = corev1.EventTypeWarning
+	}
+	r.Recorder.Event(restore, eventType, restore.Status.Reason, restore.Status.Message)
 }
 
 func restoreFinished(restore *dbaasv1.DBRestore) bool {
@@ -273,8 +276,15 @@ func (r *DBRestoreReconciler) settleRestorePVC(ctx context.Context, restore *dba
 	if !pvc.DeletionTimestamp.IsZero() {
 		return false, nil
 	}
-	if err := r.Harvester.DeletePVCWithUID(ctx, restore.Namespace, pvcName, pvc.UID); err != nil && !apierrors.IsConflict(err) {
+	if err := r.Harvester.DeletePVCWithUID(ctx, restore.Namespace, pvcName, pvc.UID); err != nil {
+		if apierrors.IsConflict(err) {
+			return false, nil // replaced since we read it — re-judged next pass
+		}
 		return false, err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(restore, corev1.EventTypeNormal, string(dbaasv1.ReasonRestorePVCDeleted),
+			"deleted restore PVC %q: no target took it over", pvcName)
 	}
 	// An unused PVC usually goes at once; otherwise re-checked next pass.
 	if _, err := r.Harvester.GetPVC(ctx, restore.Namespace, pvcName); !apierrors.IsNotFound(err) {
@@ -510,6 +520,7 @@ func (r *DBRestoreReconciler) captureSnapshot(ctx context.Context, restore *dbaa
 
 	restore.Status.SnapshotUID = string(snap.UID)
 	restore.Status.SourceInstanceUID = snap.Status.Source.InstanceUID
+	restore.Status.SourceInstanceName = snap.Spec.SourceInstanceRef.Name
 	restore.Status.DataVolumeSnapshotName = snap.Status.DataVolumeSnapshotName
 	restore.Status.Resolved = &dbaasv1.ResolvedRestoreFields{
 		DBName:         snap.Status.Source.DBName,
@@ -717,8 +728,12 @@ func (r *DBRestoreReconciler) createTarget(ctx context.Context, restore *dbaasv1
 			Backup:           restore.Spec.Backup,
 			VMPassword:       restore.Spec.VMPassword,
 			RestoredFrom: &dbaasv1.RestoredFromRef{
-				DBRestoreName: restore.Name,
-				DBRestoreUID:  restore.UID,
+				DBRestoreName:      restore.Name,
+				DBRestoreUID:       restore.UID,
+				DBSnapshotName:     restore.Spec.SnapshotRef.Name,
+				DBSnapshotUID:      types.UID(restore.Status.SnapshotUID),
+				SourceInstanceName: restore.Status.SourceInstanceName,
+				SourceInstanceUID:  restore.Status.SourceInstanceUID,
 			},
 		},
 	}
@@ -867,6 +882,9 @@ func (r *DBRestoreReconciler) removeRestoreFinalizer(ctx context.Context, key cl
 func (r *DBRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&dbaasv1.DBRestore{}).

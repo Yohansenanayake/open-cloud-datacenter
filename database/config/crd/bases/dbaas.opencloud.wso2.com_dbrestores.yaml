@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.stage
       name: Stage
       type: string
+    - jsonPath: .status.reason
+      name: Reason
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -248,6 +251,11 @@ spec:
                   captured once at admission so a later rename or recreation of the
                   same-named snapshot can never silently redirect an in-progress
                   restore.
+                type: string
+              sourceInstanceName:
+                description: |-
+                  SourceInstanceName is the snapshot's spec.sourceInstanceRef.name,
+                  captured alongside SourceInstanceUID — provenance for the target.
                 type: string
               sourceInstanceUID:
                 description: |-

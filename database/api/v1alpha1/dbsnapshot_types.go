@@ -152,6 +152,7 @@ func (in *DBSnapshot) SetConditions(conditions []metav1.Condition) {
 // +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.sourceInstanceRef.name`
 // +kubebuilder:printcolumn:name="Origin",type=string,JSONPath=`.status.origin`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=='Ready')].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=='Ready')].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DBSnapshot represents one durable backup of a DBInstance. Namespaced —

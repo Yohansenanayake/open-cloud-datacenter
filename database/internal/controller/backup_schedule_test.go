@@ -270,6 +270,7 @@ func TestBackupSchedulePrunesAutomatedSnapshotsPastRetainCount(t *testing.T) {
 	}
 
 	assertSnapshotExists(t, r, oldest.Name, false)
+	assertEventReason(t, r, string(dbaasv1.ReasonScheduledSnapshotPruned))
 	assertSnapshotExists(t, r, middle.Name, true)
 	assertSnapshotExists(t, r, newest.Name, true)
 	assertSnapshotExists(t, r, manual.Name, true)

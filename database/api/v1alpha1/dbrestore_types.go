@@ -146,6 +146,11 @@ type DBRestoreStatus struct {
 	// +optional
 	SourceInstanceUID types.UID `json:"sourceInstanceUID,omitempty"`
 
+	// SourceInstanceName is the snapshot's spec.sourceInstanceRef.name,
+	// captured alongside SourceInstanceUID — provenance for the target.
+	// +optional
+	SourceInstanceName string `json:"sourceInstanceName,omitempty"`
+
 	// DataVolumeSnapshotName mirrors the snapshot's own recorded value —
 	// the restore PVC's spec.dataSource.
 	// +optional
@@ -191,6 +196,7 @@ const (
 // +kubebuilder:printcolumn:name="Snapshot",type=string,JSONPath=`.spec.snapshotRef.name`
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetInstanceName`
 // +kubebuilder:printcolumn:name="Stage",type=string,JSONPath=`.status.stage`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DBRestore represents one restore operation: a snapshot plus target-instance

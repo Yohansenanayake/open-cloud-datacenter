@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -91,6 +92,7 @@ func capturedRestore(snap *dbaasv1.DBSnapshot) *dbaasv1.DBRestore {
 		Stage:                  dbaasv1.RestoreStageRestoringVolume,
 		SnapshotUID:            string(snap.UID),
 		SourceInstanceUID:      snap.Status.Source.InstanceUID,
+		SourceInstanceName:     snap.Spec.SourceInstanceRef.Name,
 		DataVolumeSnapshotName: snap.Status.DataVolumeSnapshotName,
 		Resolved: &dbaasv1.ResolvedRestoreFields{
 			DBName:         snap.Status.Source.DBName,
@@ -295,7 +297,7 @@ func TestDBRestoreCapturesInputsHoldsAndCreatesLabeledPVC(t *testing.T) {
 		t.Fatalf("RequeueAfter = %v, want %v", res.RequeueAfter, restorePVCPollRequeue)
 	}
 	if got.Status.SnapshotUID != string(snap.UID) || got.Status.SourceInstanceUID != snap.Status.Source.InstanceUID ||
-		got.Status.DataVolumeSnapshotName != snap.Status.DataVolumeSnapshotName {
+		got.Status.SourceInstanceName != "orders" || got.Status.DataVolumeSnapshotName != snap.Status.DataVolumeSnapshotName {
 		t.Fatalf("captured identity = %+v, want it taken from the snapshot", got.Status)
 	}
 	want := dbaasv1.ResolvedRestoreFields{DBName: "appdb", MasterUsername: "dbadmin", EngineVersion: "16", Port: 5432, StorageType: "longhorn"}
@@ -685,8 +687,13 @@ func TestDBRestoreCreatesTargetOnceVolumeBoundAndRecordsItsUID(t *testing.T) {
 	if s.VMPassword != "debug-pw" {
 		t.Fatalf("target VMPassword = %q, want it passed through from DBRestore.spec.vmPassword", s.VMPassword)
 	}
-	if s.RestoredFrom == nil || s.RestoredFrom.DBRestoreName != restore.Name || s.RestoredFrom.DBRestoreUID != restore.UID {
-		t.Fatalf("RestoredFrom = %+v, want this DBRestore", s.RestoredFrom)
+	wantFrom := dbaasv1.RestoredFromRef{
+		DBRestoreName: restore.Name, DBRestoreUID: restore.UID,
+		DBSnapshotName: snap.Name, DBSnapshotUID: snap.UID,
+		SourceInstanceName: "orders", SourceInstanceUID: "orders-uid",
+	}
+	if s.RestoredFrom == nil || *s.RestoredFrom != wantFrom {
+		t.Fatalf("RestoredFrom = %+v, want %+v (durable provenance)", s.RestoredFrom, wantFrom)
 	}
 	got := getRestore(t, c, restore)
 	wantStatus(t, got, dbaasv1.RestoreStageStartingDatabase, dbaasv1.ReasonRestoreTargetStarting)
@@ -1458,10 +1465,82 @@ func TestDBRestoreStalePassNeverOverwritesANewerStatus(t *testing.T) {
 		},
 	})
 
+	recorder := record.NewFakeRecorder(10)
+	r.Recorder = recorder
+
 	res := reconcileRestore(t, r, restore)
 
 	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTimedOut)
 	if !res.Requeue {
 		t.Fatal("a stale pass must be requeued to re-derive from the current object")
+	}
+	if events := drainEvents(recorder); len(events) != 0 {
+		t.Fatalf("a stale pass emitted %v; it must emit nothing", events)
+	}
+}
+
+// ---- events ----
+
+// One event per transition, at the transition — none for passes that only
+// poll. A failure is a Warning.
+func TestDBRestoreAnnouncesEachTransitionOnce(t *testing.T) {
+	snap := readySnapshot()
+	restore := testRestore()
+	stub := stubWithPVCs()
+	r, c := newRestoreReconciler(t, stub, restore, snap)
+	recorder := record.NewFakeRecorder(20)
+	r.Recorder = recorder
+
+	reconcileRestore(t, r, restore) // creates the PVC
+	reconcileRestore(t, r, restore) // PVC still not Bound
+	stub.PVCs[restorePVCName(restore)].Status.Phase = corev1.ClaimBound
+	reconcileRestore(t, r, restore) // creates the target
+	reconcileRestore(t, r, restore) // target still starting
+
+	target, _ := targetExists(t, c, restore)
+	target.SetCurrentCondition(dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "ready")
+	if err := c.Status().Update(context.Background(), target); err != nil {
+		t.Fatalf("mark target Ready: %v", err)
+	}
+	reconcileRestore(t, r, restore)
+	reconcileRestore(t, r, restore) // finished: nothing new
+
+	want := []string{
+		"Normal VolumeRestoring ",
+		"Normal TargetStarting ",
+		"Normal Succeeded ",
+	}
+	events := drainEvents(recorder)
+	if len(events) != len(want) {
+		t.Fatalf("events = %q, want one each of %q", events, want)
+	}
+	for i, prefix := range want {
+		if !strings.HasPrefix(events[i], prefix) {
+			t.Fatalf("event %d = %q, want prefix %q", i, events[i], prefix)
+		}
+	}
+}
+
+func TestDBRestoreFailureIsAWarningAndPVCCleanupIsAnnounced(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	foreign := ourTarget(restore)
+	foreign.Spec.RestoredFrom = nil
+	r, _ := newRestoreReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimPending)), restore, snap, foreign)
+	recorder := record.NewFakeRecorder(10)
+	r.Recorder = recorder
+
+	reconcileRestore(t, r, restore)
+	reconcileRestore(t, r, restore)
+
+	events := drainEvents(recorder)
+	if eventsWithReason(events, string(dbaasv1.ReasonRestoreTargetNameConflict)) != 1 ||
+		eventsWithReason(events, string(dbaasv1.ReasonRestorePVCDeleted)) != 1 {
+		t.Fatalf("events = %q, want one TargetNameConflict and one RestorePVCDeleted", events)
+	}
+	for _, e := range events {
+		if strings.Contains(e, string(dbaasv1.ReasonRestoreTargetNameConflict)) && !strings.HasPrefix(e, corev1.EventTypeWarning) {
+			t.Fatalf("failure event %q must be a Warning", e)
+		}
 	}
 }

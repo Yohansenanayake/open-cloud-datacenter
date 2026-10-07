@@ -181,13 +181,15 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 	}
 
 	// Teardown spans several passes (waiting on a snapshot, then the VM), so
-	// announce only its start.
-	started := false
+	// announce its start and each wait once, on the transition.
+	prevReason := dbaasv1.ConditionReason("")
 	if prev := inst.Status.GetCondition(dbaasv1.ConditionDeletionBlocked); prev != nil {
-		switch dbaasv1.ConditionReason(prev.Reason) {
-		case dbaasv1.ReasonDeletionProgressing, dbaasv1.ReasonDeletionWaitingForSnapshot, dbaasv1.ReasonDeletionWaitingForVM:
-			started = true
-		}
+		prevReason = dbaasv1.ConditionReason(prev.Reason)
+	}
+	started := false
+	switch prevReason {
+	case dbaasv1.ReasonDeletionProgressing, dbaasv1.ReasonDeletionWaitingForSnapshot, dbaasv1.ReasonDeletionWaitingForVM:
+		started = true
 	}
 	inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,
 		dbaasv1.ReasonDeletionProgressing, "Tearing down resources")
@@ -200,7 +202,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 	}
 
 	// A backup still reading the VM must finish before the VM goes away.
-	if res, waiting, err := r.settleSnapshotHold(ctx, inst); err != nil || waiting {
+	if res, waiting, err := r.settleSnapshotHold(ctx, inst, prevReason); err != nil || waiting {
 		return res, err
 	}
 
@@ -221,7 +223,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 		return ctrl.Result{}, r.teardownFailed(inst, err)
 	}
 	if vmPresent {
-		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse, dbaasv1.ReasonDeletionWaitingForVM,
+		r.deletionWaiting(inst, prevReason, metav1.ConditionFalse, dbaasv1.ReasonDeletionWaitingForVM,
 			fmt.Sprintf("waiting for virtualmachine %q to be deleted", refs.VMName))
 		return ctrl.Result{RequeueAfter: deletionPollRequeue}, nil // the VM watch usually re-triggers sooner
 	}
@@ -277,7 +279,7 @@ func (r *DBInstanceReconciler) teardownFailed(inst *dbaasv1.DBInstance, err erro
 //
 // Restore holds are not waited on: a restore reads the snapshot's
 // VolumeSnapshot, which outlives this instance.
-func (r *DBInstanceReconciler) settleSnapshotHold(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, bool, error) {
+func (r *DBInstanceReconciler) settleSnapshotHold(ctx context.Context, inst *dbaasv1.DBInstance, prevReason dbaasv1.ConditionReason) (ctrl.Result, bool, error) {
 	holds := backup.Holds{Live: r.APIReader, Writer: r.Client}
 	leaseName := backup.SnapshotHoldName(inst.UID)
 	holder, held, err := holds.Held(ctx, inst.Namespace, leaseName)
@@ -290,12 +292,31 @@ func (r *DBInstanceReconciler) settleSnapshotHold(ctx context.Context, inst *dba
 			return ctrl.Result{}, false, err
 		}
 		if running {
-			inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue, dbaasv1.ReasonDeletionWaitingForSnapshot,
+			r.deletionWaiting(inst, prevReason, metav1.ConditionTrue, dbaasv1.ReasonDeletionWaitingForSnapshot,
 				fmt.Sprintf("waiting for DBSnapshot %q to finish before tearing down", snapName))
 			return ctrl.Result{RequeueAfter: deletionPollRequeue}, true, nil
 		}
+		if err := holds.Release(ctx, inst.Namespace, leaseName, holder); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		// Its DBSnapshot should have released it: worth surfacing.
+		if r.Recorder != nil {
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonStaleSnapshotHoldReleased),
+				"released snapshot hold left by DBSnapshot %q, which no longer needs it", snapName)
+		}
+		return ctrl.Result{}, false, nil
 	}
 	return ctrl.Result{}, false, holds.Release(ctx, inst.Namespace, leaseName, holder)
+}
+
+// deletionWaiting records what teardown is waiting on, announcing it once:
+// only when the previous pass wasn't already waiting on the same thing.
+func (r *DBInstanceReconciler) deletionWaiting(inst *dbaasv1.DBInstance, prevReason dbaasv1.ConditionReason,
+	status metav1.ConditionStatus, reason dbaasv1.ConditionReason, msg string) {
+	inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, status, reason, msg)
+	if r.Recorder != nil && prevReason != reason {
+		r.Recorder.Event(inst, corev1.EventTypeNormal, string(reason), msg)
+	}
 }
 
 // snapshotStillRunning reports whether DBSnapshot name still has a backup of

@@ -180,8 +180,15 @@ func (r *DBInstanceReconciler) pruneAutomatedSnapshots(ctx context.Context, inst
 
 	for _, snap := range ready[retainCount:] {
 		uid := snap.UID
-		if err := r.Delete(ctx, snap, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, snap, client.Preconditions{UID: &uid}); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			return fmt.Errorf("prune automated DBSnapshot %s: %w", snap.Name, err)
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonScheduledSnapshotPruned),
+				"Pruned automated snapshot %s (retaining the newest %d)", snap.Name, retainCount)
 		}
 	}
 	return nil

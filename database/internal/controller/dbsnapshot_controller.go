@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +58,7 @@ type DBSnapshotReconciler struct {
 	client.Client
 	APIReader        client.Reader
 	Harvester        harvester.ClientInterface
+	Recorder         record.EventRecorder // nil disables events
 	DatabaseDefaults operatorconfig.DatabaseDefaults
 }
 
@@ -252,11 +255,7 @@ func (r *DBSnapshotReconciler) acquireHold(ctx context.Context, snap *dbaasv1.DB
 	}
 	if !result.Acquired {
 		msg := fmt.Sprintf("waiting for %s to finish before this snapshot can start", result.HolderIdentity)
-		snap.Status.SetCondition(metav1.Condition{
-			Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionFalse,
-			Reason: string(dbaasv1.ReasonSnapshotHoldWaiting), Message: msg,
-		})
-		res, err = r.patchSnapshotStatus(ctx, snap, ctrl.Result{RequeueAfter: snapshotHoldRequeue})
+		res, err = r.setReady(ctx, snap, metav1.ConditionFalse, dbaasv1.ReasonSnapshotHoldWaiting, msg, ctrl.Result{RequeueAfter: snapshotHoldRequeue})
 		return false, res, err
 	}
 	return true, ctrl.Result{}, nil
@@ -280,29 +279,18 @@ func (r *DBSnapshotReconciler) trackBackup(ctx context.Context, snap *dbaasv1.DB
 		if err := r.holds().Release(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), holder); err != nil {
 			return ctrl.Result{}, err
 		}
-		snap.Status.SetCondition(metav1.Condition{
-			Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionFalse,
-			Reason: string(dbaasv1.ReasonSnapshotBackupFailed), Message: status.ErrorMessage,
-		})
-		return r.patchSnapshotStatus(ctx, snap, ctrl.Result{})
+		return r.setReady(ctx, snap, metav1.ConditionFalse, dbaasv1.ReasonSnapshotBackupFailed, status.ErrorMessage, ctrl.Result{})
 
 	case status.ReadyToUse:
 		if err := r.holds().Release(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), holder); err != nil {
 			return ctrl.Result{}, err
 		}
 		snap.Status.DataVolumeSnapshotName = status.DataVolumeSnapshotName
-		snap.Status.SetCondition(metav1.Condition{
-			Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionTrue,
-			Reason: string(dbaasv1.ReasonSnapshotBackupReady), Message: "backup is ready to use",
-		})
-		return r.patchSnapshotStatus(ctx, snap, ctrl.Result{})
+		return r.setReady(ctx, snap, metav1.ConditionTrue, dbaasv1.ReasonSnapshotBackupReady, "backup is ready to use", ctrl.Result{})
 
 	default:
-		snap.Status.SetCondition(metav1.Condition{
-			Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionFalse,
-			Reason: string(dbaasv1.ReasonSnapshotBackupInProgress), Message: "waiting for the backup to become ready",
-		})
-		return r.patchSnapshotStatus(ctx, snap, ctrl.Result{RequeueAfter: snapshotBackupPollRequeue})
+		return r.setReady(ctx, snap, metav1.ConditionFalse, dbaasv1.ReasonSnapshotBackupInProgress, "waiting for the backup to become ready",
+			ctrl.Result{RequeueAfter: snapshotBackupPollRequeue})
 	}
 }
 
@@ -333,8 +321,8 @@ func (r *DBSnapshotReconciler) confirmSourceLive(ctx context.Context, snap *dbaa
 
 // reconcileDelete releases any in-flight snapshot hold (safe no-op if we
 // don't hold it), waits out any restore reading this source's snapshots
-// (protected deletion), deletes the backend backup, and removes the
-// finalizer.
+// (protected deletion, shown as Ready=False/DeletionWaitingForRestore),
+// deletes the backend backup, and removes the finalizer.
 func (r *DBSnapshotReconciler) reconcileDelete(ctx context.Context, snap *dbaasv1.DBSnapshot) (ctrl.Result, error) {
 	var source dbaasv1.DBInstance
 	err := r.Get(ctx, types.NamespacedName{Namespace: snap.Namespace, Name: snap.Spec.SourceInstanceRef.Name}, &source)
@@ -358,7 +346,8 @@ func (r *DBSnapshotReconciler) reconcileDelete(ctx context.Context, snap *dbaasv
 			return ctrl.Result{}, holdErr
 		}
 		if held {
-			return ctrl.Result{RequeueAfter: snapshotHoldRequeue}, nil
+			msg := fmt.Sprintf("deletion is waiting for restores reading source DBInstance %q's snapshots to finish", snap.Spec.SourceInstanceRef.Name)
+			return r.setReady(ctx, snap, metav1.ConditionFalse, dbaasv1.ReasonSnapshotDeletionWaitingForRestore, msg, ctrl.Result{RequeueAfter: snapshotHoldRequeue})
 		}
 	}
 
@@ -389,20 +378,36 @@ func (r *DBSnapshotReconciler) removeSnapshotFinalizer(ctx context.Context, key 
 }
 
 func (r *DBSnapshotReconciler) rejectSnapshot(ctx context.Context, snap *dbaasv1.DBSnapshot, reason dbaasv1.ConditionReason, msg string) (ctrl.Result, error) {
-	snap.Status.SetCondition(metav1.Condition{
-		Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionFalse,
-		Reason: string(reason), Message: msg,
-	})
-	return r.patchSnapshotStatus(ctx, snap, ctrl.Result{})
+	return r.setReady(ctx, snap, metav1.ConditionFalse, reason, msg, ctrl.Result{})
 }
 
-func (r *DBSnapshotReconciler) patchSnapshotStatus(ctx context.Context, snap *dbaasv1.DBSnapshot, result ctrl.Result) (ctrl.Result, error) {
+// setReady sets the Ready condition and writes status — the one place the
+// snapshot's status is written. A write that changes the reason is
+// announced as an event, only once it has landed: the update carries the
+// resourceVersion, so a pass that started from a stale copy conflicts and
+// emits nothing.
+func (r *DBSnapshotReconciler) setReady(ctx context.Context, snap *dbaasv1.DBSnapshot, status metav1.ConditionStatus,
+	reason dbaasv1.ConditionReason, msg string, result ctrl.Result) (ctrl.Result, error) {
+	prev := ""
+	if cond := snap.Status.GetCondition(dbaasv1.ConditionSnapshotReady); cond != nil {
+		prev = cond.Reason
+	}
+	snap.Status.SetCondition(metav1.Condition{
+		Type: dbaasv1.ConditionSnapshotReady, Status: status, Reason: string(reason), Message: msg,
+	})
 	snap.Status.ObservedGeneration = snap.Generation
 	if err := r.Status().Update(ctx, snap); err != nil {
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		return ctrl.Result{}, err
+	}
+	if r.Recorder != nil && prev != string(reason) {
+		eventType := corev1.EventTypeNormal
+		if isTerminalSnapshotReason(reason) || reason == dbaasv1.ReasonSnapshotDeletionWaitingForRestore {
+			eventType = corev1.EventTypeWarning
+		}
+		r.Recorder.Event(snap, eventType, string(reason), msg)
 	}
 	return result, nil
 }
@@ -474,6 +479,9 @@ func removeString(list []string, s string) []string {
 func (r *DBSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &dbaasv1.DBSnapshot{}, snapshotSourceInstanceIdx, snapshotSourceIndexFunc); err != nil {
 		return err

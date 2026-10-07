@@ -54,4 +54,7 @@ const (
 	ReasonRestoreTimedOut   ConditionReason = "RestoreTimedOut"
 	ReasonRestoreSucceeded  ConditionReason = "Succeeded"
 	ReasonRestoreCancelling ConditionReason = "Cancelling"
+
+	// Event only: the restore deleted its own orphaned restore PVC.
+	ReasonRestorePVCDeleted ConditionReason = "RestorePVCDeleted"
 )

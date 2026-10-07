@@ -18,11 +18,14 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -735,5 +738,80 @@ func TestDBSnapshotCapturesSourceUnderTheHoldNotWhileWaiting(t *testing.T) {
 	got := getSnapshot(t, c, snap).Status.Source
 	if got == nil || got.AllocatedStorage != 40 || got.ImageRevision != "r2" {
 		t.Fatalf("Status.Source = %+v, want allocatedStorage 40 and imageRevision r2 (the source as backed up)", got)
+	}
+}
+
+// ---- events ----
+
+func TestDBSnapshotAnnouncesEachTransitionOnce(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	stub := &testutil.StubHarvester{}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+	recorder := record.NewFakeRecorder(10)
+	r.Recorder = recorder
+
+	reconcileSnapshot(t, r, snap)
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap)) // still in progress
+	stub.VMBackupStatus = backupReadyStatus()
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap))
+
+	events := drainEvents(recorder)
+	if len(events) != 2 || !strings.HasPrefix(events[0], "Normal BackupInProgress ") || !strings.HasPrefix(events[1], "Normal BackupReady ") {
+		t.Fatalf("events = %q, want one BackupInProgress then one BackupReady", events)
+	}
+}
+
+func TestDBSnapshotRejectionIsAWarning(t *testing.T) {
+	source := deletingSource()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	r, _ := newSnapshotReconciler(t, &testutil.StubHarvester{}, source, snap)
+	recorder := record.NewFakeRecorder(10)
+	r.Recorder = recorder
+
+	reconcileSnapshot(t, r, snap)
+
+	events := drainEvents(recorder)
+	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning SourceDeleting ") {
+		t.Fatalf("events = %q, want one Warning SourceDeleting", events)
+	}
+}
+
+// Blocked deletion is visible in status (Ready=False) and announced once,
+// however long the restore keeps it waiting.
+func TestDBSnapshotDeletionBlockedByRestoreIsVisibleAndAnnouncedOnce(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	snap.Status.Source = &dbaasv1.SourceMetadata{InstanceUID: source.UID}
+	now := metav1.Now()
+	snap.DeletionTimestamp = &now
+	stub := &testutil.StubHarvester{VMBackupPresent: true}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+	recorder := record.NewFakeRecorder(10)
+	r.Recorder = recorder
+	restoreHold := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Name: backup.RestoreHoldName("some-restore-uid"), Namespace: source.Namespace,
+		Labels: map[string]string{backup.SourceUIDLabel: string(source.UID)},
+	}}
+	if err := c.Create(context.Background(), restoreHold); err != nil {
+		t.Fatalf("seed restore hold: %v", err)
+	}
+
+	reconcileSnapshot(t, r, snap)
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap))
+
+	cond := getSnapshot(t, c, snap).Status.GetCondition(dbaasv1.ConditionSnapshotReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonSnapshotDeletionWaitingForRestore) {
+		t.Fatalf("Ready = %+v, want False/DeletionWaitingForRestore", cond)
+	}
+	events := drainEvents(recorder)
+	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning DeletionWaitingForRestore ") {
+		t.Fatalf("events = %q, want exactly one Warning DeletionWaitingForRestore", events)
+	}
+	if stub.DeleteVMBackupCalls != 0 {
+		t.Fatal("the backend backup must survive while a restore holds it")
 	}
 }

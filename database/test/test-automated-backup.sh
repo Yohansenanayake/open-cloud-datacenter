@@ -5,13 +5,18 @@
 # (waiting for the real daily window isn't practical here), and verifies the
 # automated DBSnapshot gets created and completes.
 #
+# Then (Phase 7; skip with SKIP_DELETE_CHECK=1, which keeps the instance):
+# the automated snapshot is owned by its instance's UID, so deleting the
+# instance garbage-collects it — and its Harvester backup — along with the
+# instance's own disks.
+#
 # Requires kubectl >= 1.24 (jsonpath/create wait conditions, status
 # subresource patch) and GNU date.
 #
 # Usage: ./test-automated-backup.sh [--cleanup]
 # Config via env vars: NAMESPACE, INSTANCE_NAME, NETWORK_REF, DB_CLASS,
 # ALLOCATED_STORAGE, PROVISION_TIMEOUT, SCHEDULE_TIMEOUT, BACKUP_TIMEOUT,
-# POLL_INTERVAL
+# DELETE_TIMEOUT, POLL_INTERVAL, SKIP_DELETE_CHECK
 
 set -euo pipefail
 
@@ -25,19 +30,22 @@ ALLOCATED_STORAGE="${ALLOCATED_STORAGE:-20}"
 PROVISION_TIMEOUT="${PROVISION_TIMEOUT:-600}" # seconds to wait for status.phase=available
 SCHEDULE_TIMEOUT="${SCHEDULE_TIMEOUT:-120}"   # seconds to wait for status.backup / the DBSnapshot to appear
 BACKUP_TIMEOUT="${BACKUP_TIMEOUT:-600}"       # seconds to wait for the backend backup to finish
+DELETE_TIMEOUT="${DELETE_TIMEOUT:-600}"       # seconds to wait for the instance, its snapshot and disks to go
 POLL_INTERVAL="${POLL_INTERVAL:-5}"           # only used waiting for status.backup to first appear
 
 CLEANUP=false
 for arg in "$@"; do
   case "$arg" in
     --cleanup) CLEANUP=true ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
 
 DUE_TIME=""
 EXPECTED_SNAPSHOT_NAME=""
+INSTANCE_UID=""
+INSTANCE_DISKS=""
 BG_PIDS=()
 
 log() { printf '\n[%(%H:%M:%S)T] %s\n' -1 "$1"; }
@@ -59,8 +67,10 @@ on_exit() {
 
   [[ "$CLEANUP" == "true" ]] || { log "Leaving test resources in place (pass --cleanup to remove them)"; return; }
   log "Cleaning up test resources"
-  [[ -n "$EXPECTED_SNAPSHOT_NAME" ]] && kc delete dbsnapshot "$EXPECTED_SNAPSHOT_NAME" --ignore-not-found
-  kc delete dbinstance "$INSTANCE_NAME" --ignore-not-found
+  # The instance first: its automated snapshot goes with it (garbage
+  # collection); deleting the snapshot by name is only a backstop.
+  kc delete dbinstance "$INSTANCE_NAME" --ignore-not-found --timeout="${DELETE_TIMEOUT}s" || true
+  [[ -n "$EXPECTED_SNAPSHOT_NAME" ]] && kc delete dbsnapshot "$EXPECTED_SNAPSHOT_NAME" --ignore-not-found || true
 }
 trap on_exit EXIT
 
@@ -154,6 +164,28 @@ wait_snapshot_created() {
   log "DBSnapshot/$EXPECTED_SNAPSHOT_NAME created"
 }
 
+# Owned by the instance's UID (controller reference), so it goes with the
+# instance — and never with a same-named instance created later.
+verify_owner_reference() {
+  local owner
+  INSTANCE_UID=$(kc get dbinstance "$INSTANCE_NAME" -o jsonpath='{.metadata.uid}')
+  owner=$(kc get dbsnapshot "$EXPECTED_SNAPSHOT_NAME" \
+    -o jsonpath='{range .metadata.ownerReferences[*]}{.kind}/{.name}/{.uid}/controller={.controller}{"\n"}{end}')
+  grep -qxF "DBInstance/$INSTANCE_NAME/$INSTANCE_UID/controller=true" <<<"$owner" \
+    || fail "DBSnapshot/$EXPECTED_SNAPSHOT_NAME owners = '$owner', want a controller reference to DBInstance/$INSTANCE_NAME/$INSTANCE_UID"
+  log "DBSnapshot/$EXPECTED_SNAPSHOT_NAME is owned by DBInstance/$INSTANCE_NAME (UID $INSTANCE_UID)"
+}
+
+created_event_recorded() {
+  [[ -n "$(kc get events -o name --field-selector \
+    "involvedObject.kind=DBInstance,involvedObject.name=$INSTANCE_NAME,reason=ScheduledSnapshotCreated" 2>/dev/null)" ]]
+}
+
+verify_created_event() { # events are sent asynchronously: allow a moment
+  wait_for "a ScheduledSnapshotCreated event on DBInstance/$INSTANCE_NAME" 30 created_event_recorded
+  log "ScheduledSnapshotCreated event recorded on DBInstance/$INSTANCE_NAME"
+}
+
 ready_reason() {
   kc get dbsnapshot "$EXPECTED_SNAPSHOT_NAME" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null
 }
@@ -228,6 +260,41 @@ report() {
   log "PASS: automated scheduling created DBSnapshot/$EXPECTED_SNAPSHOT_NAME and its backup completed"
 }
 
+# ---- Phase 7: deleting the instance takes its automated snapshot and disks ----
+
+instance_disks() { # PVCs named for the instance: pg-<name>-<uid salt>-...
+  kc get pvc -o name 2>/dev/null | sed 's|^persistentvolumeclaim/||' | grep -E "^pg-${INSTANCE_NAME}-" || true
+}
+instance_gone() { ! kc get dbinstance "$INSTANCE_NAME" >/dev/null 2>&1; }
+snapshot_gone() { ! kc get dbsnapshot "$EXPECTED_SNAPSHOT_NAME" >/dev/null 2>&1; }
+vmbackup_gone() { ! kc get virtualmachinebackups.harvesterhci.io "$EXPECTED_SNAPSHOT_NAME" >/dev/null 2>&1; }
+disks_gone() { [[ -z "$(instance_disks)" ]]; }
+
+verify_deleted_with_instance() {
+  local backend=false
+  INSTANCE_DISKS=$(instance_disks | tr '\n' ' ')
+  [[ -n "$INSTANCE_DISKS" ]] || fail "found no PVCs named for DBInstance/$INSTANCE_NAME before deleting it"
+  kubectl get crd virtualmachinebackups.harvesterhci.io >/dev/null 2>&1 && ! vmbackup_gone && backend=true
+
+  log "Deleting DBInstance/$INSTANCE_NAME (disks: $INSTANCE_DISKS)"
+  kc delete dbinstance "$INSTANCE_NAME" --wait=false >/dev/null
+  wait_for "DBInstance/$INSTANCE_NAME to be deleted" "$DELETE_TIMEOUT" instance_gone
+  log "DBInstance/$INSTANCE_NAME deleted"
+
+  wait_for "automated DBSnapshot/$EXPECTED_SNAPSHOT_NAME to be garbage-collected with its instance" "$DELETE_TIMEOUT" snapshot_gone
+  log "Automated DBSnapshot/$EXPECTED_SNAPSHOT_NAME went with its instance"
+  if [[ "$backend" == "true" ]]; then
+    wait_for "Harvester VirtualMachineBackup $EXPECTED_SNAPSHOT_NAME to be deleted" "$DELETE_TIMEOUT" vmbackup_gone
+    log "Its Harvester VirtualMachineBackup was deleted too"
+  else
+    log "VirtualMachineBackup not visible from this kubeconfig — skipping the backend check"
+  fi
+
+  wait_for "the instance's disks to be deleted" "$DELETE_TIMEOUT" disks_gone
+  log "The instance's disks were deleted ($INSTANCE_DISKS)"
+  log "PASS: deleting the instance removed its automated snapshot, its backup and its disks"
+}
+
 main() {
   require kubectl
   require date
@@ -238,10 +305,13 @@ main() {
   force_due
   trigger_reconcile
   wait_snapshot_created
+  verify_owner_reference
+  verify_created_event
   wait_backup_complete
   verify_schedule_advanced
   check_harvester_backend
   report
+  [[ "${SKIP_DELETE_CHECK:-0}" == "1" ]] || verify_deleted_with_instance
 }
 
 main

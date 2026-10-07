@@ -146,6 +146,11 @@ const (
 	// gating condition; see internal/controller/backup_schedule.go).
 	ReasonScheduledSnapshotCreated ConditionReason = "ScheduledSnapshotCreated"
 	ReasonScheduledSnapshotSkipped ConditionReason = "ScheduledSnapshotSkipped"
+	ReasonScheduledSnapshotPruned  ConditionReason = "ScheduledSnapshotPruned"
+
+	// Deletion event-only reason: teardown released a snapshot hold whose
+	// DBSnapshot no longer needed it — something failed to release it.
+	ReasonStaleSnapshotHoldReleased ConditionReason = "StaleSnapshotHoldReleased"
 )
 
 var knownConditionReasons = map[string]ConditionReason{
@@ -216,6 +221,8 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonRepaveApplied):                ReasonRepaveApplied,
 	string(ReasonScheduledSnapshotCreated):     ReasonScheduledSnapshotCreated,
 	string(ReasonScheduledSnapshotSkipped):     ReasonScheduledSnapshotSkipped,
+	string(ReasonScheduledSnapshotPruned):      ReasonScheduledSnapshotPruned,
+	string(ReasonStaleSnapshotHoldReleased):    ReasonStaleSnapshotHoldReleased,
 }
 
 // ParseConditionReason validates a reason already serialized in status.

@@ -606,3 +606,61 @@ func TestReconcileDeleteAnnouncesTeardownOnce(t *testing.T) {
 		t.Fatalf("%s events = %d, want 1 across two passes", dbaasv1.ReasonDeletionProgressing, announced)
 	}
 }
+
+// ---- events ----
+
+func TestReconcileDeleteAnnouncesEachWaitOnce(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	running := snapshotOf(inst, "orders-nightly", dbaasv1.ReasonSnapshotBackupInProgress, metav1.ConditionFalse)
+	stub := &stubHarvester{VMPresent: true}
+	r := newProvisionReconciler(t, stub, inst, running)
+	recorder := r.Recorder.(*record.FakeRecorder)
+	seedSnapshotHold(t, r, inst, snapshotHolderIdentity(running))
+
+	pass := func() {
+		t.Helper()
+		latest := &dbaasv1.DBInstance{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(inst), latest); err != nil {
+			t.Fatalf("get instance: %v", err)
+		}
+		if _, err := runReconcileDelete(ctx, r, latest); err != nil {
+			t.Fatalf("reconcileDelete: %v", err)
+		}
+	}
+	pass()
+	pass() // backup still running
+	if err := (backup.Holds{Live: r.Client, Writer: r.Client}).Release(ctx, inst.Namespace, backup.SnapshotHoldName(inst.UID), snapshotHolderIdentity(running)); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	pass()
+	pass() // VM still going
+
+	events := drainEvents(recorder)
+	for _, reason := range []dbaasv1.ConditionReason{dbaasv1.ReasonDeletionWaitingForSnapshot, dbaasv1.ReasonDeletionWaitingForVM} {
+		if n := eventsWithReason(events, string(reason)); n != 1 {
+			t.Fatalf("%s events = %d, want 1 (events %q)", reason, n, events)
+		}
+	}
+}
+
+// A snapshot hold its DBSnapshot should have released is surfaced; this
+// instance's own repave hold is released quietly.
+func TestReconcileDeleteWarnsOnlyAboutStaleSnapshotHolds(t *testing.T) {
+	for holder, wantWarnings := range map[string]int{snapshotHolderPrefix + "orders-gone": 1, "repave": 0} {
+		t.Run(holder, func(t *testing.T) {
+			inst := newDeletingInst()
+			r := newProvisionReconciler(t, &stubHarvester{}, inst)
+			seedSnapshotHold(t, r, inst, holder)
+
+			if _, err := runReconcileDelete(context.Background(), r, inst); err != nil {
+				t.Fatalf("reconcileDelete: %v", err)
+			}
+
+			events := drainEvents(r.Recorder.(*record.FakeRecorder))
+			if n := eventsWithReason(events, string(dbaasv1.ReasonStaleSnapshotHoldReleased)); n != wantWarnings {
+				t.Fatalf("StaleSnapshotHoldReleased events = %d, want %d (events %q)", n, wantWarnings, events)
+			}
+		})
+	}
+}

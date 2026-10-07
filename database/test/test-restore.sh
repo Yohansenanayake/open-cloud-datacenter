@@ -30,6 +30,9 @@
 #   7. The restore deadline (skip with SKIP_DEADLINE=1): with a short
 #      restore.timeout a restore fails as RestoreTimedOut, status.deadline
 #      is creation + timeout, and the unfinished target is deleted.
+#   8. Observability: restored targets record the snapshot and source they
+#      came from (spec.restoredFrom); restores, snapshot refusals and
+#      teardown waits are recorded as events (Warning for failures).
 #
 # Usage: ./test-restore.sh [--cleanup]
 #   --cleanup  delete everything this run created on exit — only if the run
@@ -232,6 +235,14 @@ restore_terminal() { local s; s=$(restore_stage "$1"); [[ "$s" == "Succeeded" ||
 restore_lease() { echo "${LEASE_PREFIX}$(jp dbrestore "$1" '{.metadata.uid}')"; }
 restore_holds() { exists lease "$(restore_lease "$1")"; }
 restore_uid() { jp dbrestore "$1" '{.metadata.uid}'; }
+
+# has_event <kind> <name> <reason> [type] — an event with that reason (and
+# type, if given) was recorded on the object. Events live ~1h; a run is shorter.
+has_event() {
+  local sel="involvedObject.kind=$1,involvedObject.name=$2,reason=$3"
+  [[ -n "${4:-}" ]] && sel="$sel,type=$4"
+  [[ -n "$(kc get events --field-selector "$sel" -o name 2>/dev/null)" ]]
+}
 
 # Disks. Every PVC of an instance is named pg-<instance>-<salt>-..., and a
 # restore PVC carries its DBRestore's UID label.
@@ -510,6 +521,15 @@ verify_target() { # verify_target <restore> <target>
     || fail "target data volume '$got' is not the restore PVC (want pg-${target}-restore-*)"
   check "target spec.restoredFrom names this DBRestore" \
     "$(jp dbrestore "$restore" '{.metadata.uid}')" "$(jp dbinstance "$target" '{.spec.restoredFrom.dbRestoreUID}')"
+  check "target spec.restoredFrom records the snapshot and source it came from" \
+    "$SNAPSHOT/$(jp dbsnapshot "$SNAPSHOT" '{.metadata.uid}')/$SOURCE" \
+    "$(jp dbinstance "$target" '{.spec.restoredFrom.dbSnapshotName}/{.spec.restoredFrom.dbSnapshotUID}/{.spec.restoredFrom.sourceInstanceName}')"
+  local ev missing=""
+  for ev in VolumeRestoring TargetStarting Succeeded; do
+    has_event DBRestore "$restore" "$ev" Normal || missing="$missing $ev"
+  done
+  [[ -z "$missing" ]] && pass "DBRestore/$restore recorded its transitions as events" \
+    || fail "DBRestore/$restore is missing events:$missing"
   check "DBRestore status records the target's UID" \
     "$(jp dbinstance "$target" '{.metadata.uid}')" "$(jp dbrestore "$restore" '{.status.targetInstanceUID}')"
   check "DBRestore status records the snapshot's UID" \
@@ -567,6 +587,8 @@ delete_source_during_backup() {
 
   if wait_until "the source's teardown to wait on DBSnapshot/$snap" 60 deletion_waits_for_snapshot "$SOURCE"; then
     pass "source deletion is waiting for the backup in progress"
+    has_event DBInstance "$SOURCE" DeletionWaitingForSnapshot && pass "the wait is announced as an event" \
+      || fail "no DeletionWaitingForSnapshot event on DBInstance/$SOURCE"
     if snapshot_terminal "$snap"; then
       info "DBSnapshot/$snap already finished — VM-untouched check not exercised this run"
     else
@@ -580,6 +602,8 @@ delete_source_during_backup() {
   create_snapshot "$late" "$SOURCE"
   wait_until "DBSnapshot/$late to be refused" 120 snapshot_rejected "$late" "SourceDeleting" \
     && pass "a snapshot requested after the source's deletion is refused (SourceDeleting)"
+  has_event DBSnapshot "$late" SourceDeleting Warning && pass "the refusal is a Warning event" \
+    || fail "no Warning SourceDeleting event on DBSnapshot/$late"
 
   wait_until "DBSnapshot/$snap to finish" "$BACKUP_TIMEOUT" snapshot_terminal "$snap"
   check "the backup in progress completed despite the source's deletion" "BackupReady" "$(snapshot_reason "$snap")"
@@ -632,6 +656,8 @@ expect_settled() {
 expect_failed() { # expect_failed <restore> <reason>
   wait_restore_terminal "$1" "$FAIL_TIMEOUT"
   check "DBRestore/$1 failed with $2" "Failed/$2" "$(restore_stage "$1")/$(restore_reason "$1")"
+  has_event DBRestore "$1" "$2" Warning && pass "the failure is a Warning event on DBRestore/$1" \
+    || fail "no Warning event $2 on DBRestore/$1"
   expect_settled "$1"
 }
 

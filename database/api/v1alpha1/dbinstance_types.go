@@ -210,7 +210,11 @@ type DBInstanceSpec struct {
 }
 
 // RestoredFromRef identifies the DBRestore that created a DBInstance — see
-// DBInstanceSpec.RestoredFrom.
+// DBInstanceSpec.RestoredFrom — and what it restored from. The snapshot and
+// source fields are durable provenance: set in the same Create() and
+// immutable, they keep answering "where did this database come from?" after
+// the DBRestore (a one-time request), the DBSnapshot and the source are all
+// gone.
 type RestoredFromRef struct {
 	// DBRestoreName is the name of the owning DBRestore, in the same
 	// namespace — for display and lookup only.
@@ -223,6 +227,19 @@ type RestoredFromRef struct {
 	// created it under.
 	// +required
 	DBRestoreUID types.UID `json:"dbRestoreUID"`
+
+	// DBSnapshotName and DBSnapshotUID identify the DBSnapshot restored from.
+	// +optional
+	DBSnapshotName string `json:"dbSnapshotName,omitempty"`
+	// +optional
+	DBSnapshotUID types.UID `json:"dbSnapshotUID,omitempty"`
+
+	// SourceInstanceName and SourceInstanceUID identify the DBInstance that
+	// snapshot was taken of, as the snapshot recorded it.
+	// +optional
+	SourceInstanceName string `json:"sourceInstanceName,omitempty"`
+	// +optional
+	SourceInstanceUID types.UID `json:"sourceInstanceUID,omitempty"`
 }
 
 // BackupSpec configures backup capability for a DBInstance. Continuous WAL

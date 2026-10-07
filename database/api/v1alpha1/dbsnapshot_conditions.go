@@ -37,4 +37,7 @@ const (
 	ReasonSnapshotBackupFailed         ConditionReason = "BackupFailed"
 	ReasonSnapshotFinalizerAdded       ConditionReason = "FinalizerAdded"
 	ReasonSnapshotDeletionInProgress   ConditionReason = "DeletionInProgress"
+	// ReasonSnapshotDeletionWaitingForRestore: Ready=False while deletion
+	// waits for a restore reading the source's snapshots to end.
+	ReasonSnapshotDeletionWaitingForRestore ConditionReason = "DeletionWaitingForRestore"
 )
