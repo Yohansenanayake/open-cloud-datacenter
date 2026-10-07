@@ -30,6 +30,112 @@ dbaas:
         unavailable: Unavailable
         error: Error
   instance:
+    actions:
+      connection: Connection Details
+      enableDeletionProtection: Turn On Deletion Protection
+      disableDeletionProtection: Turn Off Deletion Protection
+    delete:
+      protected: 'Deletion protection is enabled for {name}, so it cannot be deleted. Turn it off first with Turn Off Deletion Protection in the action menu of the instance.'
+      protectedMany: 'Deletion protection is enabled for {names}, so they cannot be deleted. Turn it off first with Turn Off Deletion Protection in the action menu of each instance, or deselect them.'
+      protectedHint: Turn off deletion protection to let the deletion finish. A deletion that has started cannot be cancelled.
+      warning: This permanently deletes the database VM, its data volume and its credentials Secrets. It cannot be undone.
+      warningWithBackups: This permanently deletes the database VM, its data volume, its credentials Secrets and its automated snapshots. Manual snapshots are kept. It cannot be undone.
+      deletingBanner: This database instance is being deleted.
+      blockedBanner: 'Deletion cannot finish: {message}'
+    events:
+      resource: Resource
+      date: Date
+      none: There are no events for this database instance.
+      forbidden: You do not have access to Events in this namespace.
+      source:
+        instance: Database Instance
+        vm: VM
+        pod: Pod
+        disk: Disk
+    connection:
+      notReady: Connection details appear once the database has an endpoint.
+      secretNotReady: The operator has not created this Secret yet.
+      connectionForbidden: You do not have access to the connection Secret, so only the endpoint from the instance status is shown.
+      passwordForbidden: You do not have access to the credentials Secret in this namespace.
+      loadError: Could not load the connection details.
+      retry: Retry
+      endpoint: Endpoint
+      host: Host
+      port: Port
+      dbName: Database
+      sslMode: SSL Mode
+      jdbcUrl: JDBC URL
+      psql: psql
+      credentials: Admin Credentials
+      username: Username
+      password: Password
+      show: Show
+      hide: Hide
+      copy: Copy
+      copied: Copied
+      caCert: CA Certificate
+      caCertDescription: Clients that verify the server certificate (SSL mode verify-ca or verify-full) need this CA certificate.
+      downloadCa: Download ca.crt
+    form:
+      tabs:
+        connection: Connection
+        basics: Basics
+        database: Database
+        network: Network
+        backup: Backup
+        advanced: Advanced
+        events: Events
+      instanceClass: Instance Class
+      instanceClassTooltip: Sets the CPU and memory of the database VM. You can also type a class name that your operator configuration defines.
+      classOption: '{name} ({cpu} vCPU, {memory} GiB)'
+      engineVersion: PostgreSQL Version
+      engineVersionTooltip: Cannot be changed after the instance is created.
+      engineDefault: Operator default
+      engineOption: 'PostgreSQL {version}'
+      allocatedStorage: Storage
+      allocatedStorageTooltip: Size of the data volume. It can be increased later but never reduced.
+      storageClass: Storage Class
+      storageClassTooltip: Cannot be changed after the instance is created.
+      storageClassDefault: Operator default
+      dbName: Database Name
+      dbNameTooltip: Initial database. Lowercase letters, digits and underscores, starting with a letter or underscore. Cannot be changed after the instance is created.
+      dbNamePlaceholder: 'Defaults to {name}'
+      masterUsername: Admin Username
+      masterUsernameTooltip: Lowercase letters, digits and underscores. The names postgres and postgres_exporter, and names starting with pg_, are reserved. Cannot be changed after the instance is created.
+      port: Port
+      defaultPlaceholder: 'Defaults to {value}'
+      credentialsInfo: The operator generates the admin password and stores it in a Secret in the same namespace as the instance. See the Connection tab once the instance is available.
+      network: Network
+      networkTooltip: Existing Harvester network the database VM attaches to. Cannot be changed after the instance is created.
+      networkPlaceholder: namespace/name
+      networkTypeVlan: VLAN
+      networkTypeOverlay: Overlay
+      networkInfo: The network must give the VM internet access during provisioning so it can install packages.
+      dnsServerIP: DNS Server IP
+      dnsServerIPPlaceholder: e.g. 10.0.0.10
+      dnsServerIPTooltip: Required on overlay (Kube-OVN VPC) networks, where the VM cannot reach the cluster DNS. Leave empty on VLAN networks.
+      backupEnabled: Enable backups
+      backupCreateOnly: Backups can only be turned on or off when the instance is created. Their settings can be changed later.
+      automatedBackupEnabled: Take automated daily snapshots
+      backupWindow: Backup Window (UTC)
+      backupWindowTooltip: 'Time range for the daily snapshot, e.g. 02:00-03:00.'
+      retainCount: Snapshots to Keep
+      retainCountTooltip: Number of the newest automated snapshots to keep. Older ones are deleted.
+      deletionProtection: Deletion protection
+      deletionProtectionDescription: While enabled, the operator refuses to delete this instance.
+      resizeWarning: Changing the instance class or storage size stops and restarts the database, so it will be briefly unavailable.
+    validation:
+      required: Required
+      nameTooLong: 'Must be at most {max} characters (the VM name adds a 9-character suffix).'
+      dnsLabel: Must contain only lowercase letters, digits and hyphens, and start and end with a letter or digit.
+      storageMin: 'Must be a whole number of at least {min} GiB.'
+      pgIdentifier: Must start with a lowercase letter or underscore and contain only lowercase letters, digits and underscores (max 63).
+      reservedDBName: 'Cannot be a built-in PostgreSQL database ({names}).'
+      reservedUsername: Cannot be postgres or postgres_exporter, or start with pg_.
+      port: Must be a whole number between 1 and 65535.
+      ipv4: Must be an IPv4 address.
+      backupWindow: 'Must be a UTC time range like 02:00-03:00.'
+      retainCount: Must be a whole number of at least 1.
     list:
       noRows: There are no database instances in the selected namespaces.
     state:
