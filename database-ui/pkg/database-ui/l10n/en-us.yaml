@@ -1,0 +1,42 @@
+product:
+  dbaas: DBaaS
+  dbaasManager: DBaaS
+
+typeLabel:
+  dbaas.opencloud.wso2.com.dbinstance: |-
+    {count, plural,
+      one { Database Instance }
+      other { Database Instances }
+    }
+
+dbaas:
+  manager:
+    clusters:
+      label: Clusters
+      title: DBaaS Clusters
+      description: Harvester clusters where you can manage databases.
+      none: No clusters with DBaaS are available to you.
+      manage: Manage
+      retry: Retry
+      actions: 'Actions for {name}'
+      tableHeaders:
+        harvesterVersion: Harvester Version
+        kubernetesVersion: Kubernetes Version
+        apiVersion: DBaaS API Version
+      unavailable: Rancher reports this cluster as not connected, so DBaaS could not be checked.
+      error: 'Could not check this cluster for DBaaS: {message}'
+      status:
+        available: Available
+        unavailable: Unavailable
+        error: Error
+  instance:
+    list:
+      noRows: There are no database instances in the selected namespaces.
+    state:
+      detail: Show state details
+      pendingChanges: Spec changes have not been applied by the operator yet.
+    tableHeaders:
+      engine: Engine
+      class: Class
+      storage: Storage
+      endpoint: Endpoint
