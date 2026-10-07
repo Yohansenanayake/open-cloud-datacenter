@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
@@ -61,6 +62,17 @@ type ClientInterface interface {
 
 	// DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
 	DeletePVC(ctx context.Context, ns, name string) error
+
+	// DeletePVCWithUID deletes a PVC only if it is still the object with
+	// uid — for a caller that has just verified that object is its own.
+	// NotFound is success; a replaced object is a Conflict error.
+	DeletePVCWithUID(ctx context.Context, ns, name string, uid types.UID) error
+
+	// MarkVMPVCsForRemoval reads the live VM and lists every PVC it mounts
+	// that owned accepts in Harvester's removedPersistentVolumeClaims
+	// annotation, so Harvester's VM finalizer deletes them with the VM.
+	// found is false when the VM no longer exists.
+	MarkVMPVCsForRemoval(ctx context.Context, ns, vmName string, owned func(pvcName string) bool) (found bool, err error)
 
 	// GetVMOSDiskImageID returns the Harvester ImageID ("namespace/name")
 	// recorded on the VM's current OS-disk PVC — ground truth for which

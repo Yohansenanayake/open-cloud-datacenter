@@ -66,15 +66,18 @@ func defaultScheduledInstantOn(inst *dbaasv1.DBInstance, dayOffset int) time.Tim
 	return scheduledInstant(inst.UID, 2*time.Hour, time.Hour, time.Now().UTC().AddDate(0, 0, dayOffset))
 }
 
-func readyAutomatedSnapshot(name, source string, age time.Duration) *dbaasv1.DBSnapshot {
+// readyAutomatedSnapshot builds a Ready automated snapshot the scheduler
+// created for owner: named for it, and owned by its UID.
+func readyAutomatedSnapshot(name string, owner *dbaasv1.DBInstance, age time.Duration) *dbaasv1.DBSnapshot {
 	snap := &dbaasv1.DBSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         "tenant-a",
 			Labels:            map[string]string{dbaasv1.LabelSnapshotOrigin: dbaasv1.SnapshotOriginAutomated},
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-age)),
+			OwnerReferences:   []metav1.OwnerReference{*instanceOwnerRef(owner)},
 		},
-		Spec: dbaasv1.DBSnapshotSpec{SourceInstanceRef: corev1.LocalObjectReference{Name: source}},
+		Spec: dbaasv1.DBSnapshotSpec{SourceInstanceRef: corev1.LocalObjectReference{Name: owner.Name}},
 	}
 	snap.Status.SetCondition(metav1.Condition{
 		Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionTrue,
@@ -228,6 +231,10 @@ func TestBackupScheduleCreatesDeterministicallyNamedSnapshotWhenDue(t *testing.T
 	if list[0].Spec.SourceInstanceRef.Name != inst.Name {
 		t.Fatalf("SourceInstanceRef = %q, want %q", list[0].Spec.SourceInstanceRef.Name, inst.Name)
 	}
+	// Owned by the instance's UID, so GC deletes it with the instance.
+	if !metav1.IsControlledBy(&list[0], inst) {
+		t.Fatalf("OwnerReferences = %+v, want controller ref to DBInstance %s (UID %s)", list[0].OwnerReferences, inst.Name, inst.UID)
+	}
 	assertEventReason(t, r, string(dbaasv1.ReasonScheduledSnapshotCreated))
 
 	// Re-entrant: reconciling again for the same due slot must not error or
@@ -249,11 +256,11 @@ func TestBackupSchedulePrunesAutomatedSnapshotsPastRetainCount(t *testing.T) {
 	future := metav1.NewTime(time.Now().Add(24 * time.Hour))
 	inst.Status.Backup = &dbaasv1.BackupStatus{NextScheduledSnapshotTime: &future} // not due this pass
 
-	oldest := readyAutomatedSnapshot("orders-auto-1", inst.Name, 3*time.Hour)
-	middle := readyAutomatedSnapshot("orders-auto-2", inst.Name, 2*time.Hour)
-	newest := readyAutomatedSnapshot("orders-auto-3", inst.Name, 1*time.Hour)
+	oldest := readyAutomatedSnapshot("orders-auto-1", inst, 3*time.Hour)
+	middle := readyAutomatedSnapshot("orders-auto-2", inst, 2*time.Hour)
+	newest := readyAutomatedSnapshot("orders-auto-3", inst, 1*time.Hour)
 	manual := testSnapshot() // survives regardless of count
-	notReady := readyAutomatedSnapshot("orders-auto-pending", inst.Name, 30*time.Minute)
+	notReady := readyAutomatedSnapshot("orders-auto-pending", inst, 30*time.Minute)
 	notReady.Status.Conditions = nil // not yet Ready: never counted or pruned
 
 	r := newScheduleReconciler(t, inst, oldest, middle, newest, manual, notReady)
@@ -269,12 +276,42 @@ func TestBackupSchedulePrunesAutomatedSnapshotsPastRetainCount(t *testing.T) {
 	assertSnapshotExists(t, r, notReady.Name, true)
 }
 
+// A same-named predecessor's automated snapshots (another UID) are not this
+// instance's to prune, nor counted against its retention; one already being
+// deleted is neither usable capacity nor deleted again.
+func TestBackupSchedulePruneIgnoresPredecessorAndDeletingSnapshots(t *testing.T) {
+	inst := backupEnabledInstance(true)
+	inst.Spec.Backup.Automated.RetainCount = 1
+	future := metav1.NewTime(time.Now().Add(24 * time.Hour))
+	inst.Status.Backup = &dbaasv1.BackupStatus{NextScheduledSnapshotTime: &future}
+
+	predecessor := inst.DeepCopy()
+	predecessor.UID = "orders-old-uid"
+	theirs := readyAutomatedSnapshot("orders-auto-old", predecessor, 5*time.Hour)
+	deleting := readyAutomatedSnapshot("orders-auto-4", inst, 30*time.Minute) // newest, but not capacity
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	older := readyAutomatedSnapshot("orders-auto-2", inst, 3*time.Hour)
+	newest := readyAutomatedSnapshot("orders-auto-3", inst, 1*time.Hour)
+
+	r := newScheduleReconciler(t, inst, theirs, deleting, older, newest)
+	if _, err := r.evaluateBackupSchedule(context.Background(), inst); err != nil {
+		t.Fatalf("evaluateBackupSchedule: %v", err)
+	}
+
+	assertSnapshotExists(t, r, theirs.Name, true)
+	assertSnapshotExists(t, r, deleting.Name, true) // still held by its finalizer
+	assertSnapshotExists(t, r, older.Name, false)
+	assertSnapshotExists(t, r, newest.Name, true)
+}
+
 func TestBackupSchedulePauseDoesNotPrune(t *testing.T) {
 	inst := backupEnabledInstance(false)
 	inst.Spec.Backup.Automated.RetainCount = 1
 
-	oldest := readyAutomatedSnapshot("orders-auto-1", inst.Name, 2*time.Hour)
-	newest := readyAutomatedSnapshot("orders-auto-2", inst.Name, 1*time.Hour)
+	oldest := readyAutomatedSnapshot("orders-auto-1", inst, 2*time.Hour)
+	newest := readyAutomatedSnapshot("orders-auto-2", inst, 1*time.Hour)
 	r := newScheduleReconciler(t, inst, oldest, newest)
 
 	if _, err := r.evaluateBackupSchedule(context.Background(), inst); err != nil {

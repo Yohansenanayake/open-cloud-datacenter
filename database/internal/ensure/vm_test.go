@@ -388,3 +388,23 @@ func TestEnsureVMRendersRestoreIDIntoCloudInit(t *testing.T) {
 		})
 	}
 }
+
+// OwnsPVCName is teardown's only filter on what it may delete: exactly this
+// instance's UID-salted disk names, never a same-named predecessor's or a
+// look-alike.
+func TestOwnsPVCNameAcceptsOnlyThisInstancesDisks(t *testing.T) {
+	inst := newProvisionInst() // disk identifier "orders-ordersui"
+	for name, want := range map[string]bool{
+		"pg-orders-ordersui-data":               true,
+		"pg-orders-ordersui-os":                 true,
+		"pg-orders-ordersui-os-ubuntu-noble-r2": true,
+		"pg-orders-0ldsalt0-data":               false, // a predecessor's
+		"pg-orders-ordersui-osx":                false,
+		"pg-orders-ordersui-data-copy":          false,
+		"shared-tools-disk":                     false,
+	} {
+		if got := OwnsPVCName(inst, name); got != want {
+			t.Errorf("OwnsPVCName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

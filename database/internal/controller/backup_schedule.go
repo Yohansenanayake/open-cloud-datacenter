@@ -117,12 +117,17 @@ func (r *DBInstanceReconciler) attemptScheduledSnapshot(ctx context.Context, ins
 		return nil
 	}
 
+	// Owned by the instance, so the garbage collector deletes automated
+	// snapshots once their instance is gone — matched by UID, never by
+	// name — while manual snapshots (never owned) survive it. Each GC
+	// delete still goes through the DBSnapshot's own protected deletion.
 	name := fmt.Sprintf("%s-auto-%s", inst.Name, scheduledFor.Format(automatedSnapshotDateFmt))
 	snap := &dbaasv1.DBSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: inst.Namespace,
-			Labels:    map[string]string{dbaasv1.LabelSnapshotOrigin: dbaasv1.SnapshotOriginAutomated},
+			Name:            name,
+			Namespace:       inst.Namespace,
+			Labels:          map[string]string{dbaasv1.LabelSnapshotOrigin: dbaasv1.SnapshotOriginAutomated},
+			OwnerReferences: []metav1.OwnerReference{*instanceOwnerRef(inst)},
 		},
 		Spec: dbaasv1.DBSnapshotSpec{
 			SourceInstanceRef: corev1.LocalObjectReference{Name: inst.Name},
@@ -141,13 +146,14 @@ func (r *DBInstanceReconciler) attemptScheduledSnapshot(ctx context.Context, ins
 }
 
 // pruneAutomatedSnapshots deletes automated DBSnapshots past retainCount,
-// keeping the newest. Only Ready ones count or are pruned — a failed or
-// still-in-progress one is neither retained capacity nor a deletion target.
+// keeping the newest. Only this instance's own (owned by its UID — a
+// same-named predecessor's are never touched), Ready, not-yet-deleting ones
+// count or are pruned: a failed, in-progress or already-deleting one is
+// neither retained capacity nor a deletion target.
 //
-// No restore-hold check yet: restore (Phase 6/7) doesn't exist, so there is
-// nothing that could be holding one of these past its retention count today.
-// That phase must add the check before this can temporarily over-retain one
-// the way spec §3.3 describes.
+// No restore-hold check here: DBSnapshot deletion itself waits for any
+// restore reading the source's snapshots, so a pruned snapshot a restore
+// still needs is over-retained (spec §3.3) until that restore ends.
 func (r *DBInstanceReconciler) pruneAutomatedSnapshots(ctx context.Context, inst *dbaasv1.DBInstance, retainCount int) error {
 	var list dbaasv1.DBSnapshotList
 	if err := r.List(ctx, &list, client.InNamespace(inst.Namespace),
@@ -159,8 +165,10 @@ func (r *DBInstanceReconciler) pruneAutomatedSnapshots(ctx context.Context, inst
 
 	ready := make([]*dbaasv1.DBSnapshot, 0, len(list.Items))
 	for i := range list.Items {
-		if list.Items[i].Status.IsConditionTrue(dbaasv1.ConditionSnapshotReady) {
-			ready = append(ready, &list.Items[i])
+		snap := &list.Items[i]
+		if metav1.IsControlledBy(snap, inst) && snap.DeletionTimestamp.IsZero() &&
+			snap.Status.IsConditionTrue(dbaasv1.ConditionSnapshotReady) {
+			ready = append(ready, snap)
 		}
 	}
 	if len(ready) <= retainCount {
@@ -171,7 +179,8 @@ func (r *DBInstanceReconciler) pruneAutomatedSnapshots(ctx context.Context, inst
 	})
 
 	for _, snap := range ready[retainCount:] {
-		if err := r.Delete(ctx, snap); err != nil && !apierrors.IsNotFound(err) {
+		uid := snap.UID
+		if err := r.Delete(ctx, snap, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("prune automated DBSnapshot %s: %w", snap.Name, err)
 		}
 	}

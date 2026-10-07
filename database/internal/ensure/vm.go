@@ -19,6 +19,7 @@ package ensure
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -102,6 +103,43 @@ func restoreIDFor(inst *dbaasv1.DBInstance) string {
 // preserve pre-dates this convention on a live cluster.
 func dataVolumeNameFor(inst *dbaasv1.DBInstance) string {
 	return harvester.DataVolumeName(diskIdentifierFor(inst))
+}
+
+// osDiskPVCNameFor is the OS-disk PVC name an instance's VM is created with.
+// Repave later moves the VM onto "<this>-<image>" (SwapVMOSDisk).
+func osDiskPVCNameFor(inst *dbaasv1.DBInstance) string {
+	return fmt.Sprintf("pg-%s-os", diskIdentifierFor(inst))
+}
+
+// OwnsPVCName reports whether name is one of inst's own disk PVCs: its data
+// disk, its original OS disk, or a repaved OS disk. Every one embeds the
+// instance's UID-salted disk identifier, so a same-named instance from
+// before a delete-and-recreate never matches. Teardown deletes nothing
+// this rejects.
+func OwnsPVCName(inst *dbaasv1.DBInstance, name string) bool {
+	osDisk := osDiskPVCNameFor(inst)
+	return name == dataVolumeNameFor(inst) || name == osDisk || strings.HasPrefix(name, osDisk+"-")
+}
+
+// TeardownPVCNames returns the PVC names teardown deletes directly once the
+// VM is gone: the deterministic data and original OS-disk names, plus the
+// recorded OS-disk names repave may have moved to (kept only if
+// OwnsPVCName accepts them). Harvester deletes whatever the live VM mounted
+// (MarkVMPVCsForRemoval); this is the backstop for a VM that was already
+// gone, or whose annotation never landed.
+func TeardownPVCNames(inst *dbaasv1.DBInstance) []string {
+	names := []string{dataVolumeNameFor(inst), osDiskPVCNameFor(inst)}
+	for _, recorded := range []string{inst.Status.Resources.OSDiskPVCName, inst.Status.Resources.PendingDeleteOSDiskPVCName} {
+		if recorded != "" && OwnsPVCName(inst, recorded) && !slices.Contains(names, recorded) {
+			names = append(names, recorded)
+		}
+	}
+	return names
+}
+
+// VMNameFor exports vmNameFor for teardown.
+func VMNameFor(inst *dbaasv1.DBInstance) string {
+	return vmNameFor(inst)
 }
 
 // ownerRefFor builds the controller owner reference the provider stamps on the
@@ -214,7 +252,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 
 	dataVolumeName := dataVolumeNameFor(inst)
 	inst.Status.Resources.DataVolumeName = dataVolumeName
-	osDiskPVCName := fmt.Sprintf("pg-%s-os", diskIdentifierFor(inst))
+	osDiskPVCName := osDiskPVCNameFor(inst)
 
 	// Material was already resolved (and its three durable Secrets created)
 	// by ensureCredentials earlier in the step order; this re-read is cheap.

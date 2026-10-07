@@ -123,6 +123,8 @@ const (
 	ReasonTeardownFailed              ConditionReason = "TeardownFailed"
 	ReasonOperatorSecretCleanupFailed ConditionReason = "OperatorSecretCleanupFailed"
 	ReasonDeletionProgressing         ConditionReason = "DeletionProgressing"
+	ReasonDeletionWaitingForSnapshot  ConditionReason = "DeletionWaitingForSnapshot"
+	ReasonDeletionWaitingForVM        ConditionReason = "DeletionWaitingForVM"
 
 	// ConditionImageDrift reasons.
 	ReasonOSUpdateAvailable           ConditionReason = "OSUpdateAvailable"
@@ -198,6 +200,8 @@ var knownConditionReasons = map[string]ConditionReason{
 	string(ReasonTeardownFailed):               ReasonTeardownFailed,
 	string(ReasonOperatorSecretCleanupFailed):  ReasonOperatorSecretCleanupFailed,
 	string(ReasonDeletionProgressing):          ReasonDeletionProgressing,
+	string(ReasonDeletionWaitingForSnapshot):   ReasonDeletionWaitingForSnapshot,
+	string(ReasonDeletionWaitingForVM):         ReasonDeletionWaitingForVM,
 	string(ReasonOSUpdateAvailable):            ReasonOSUpdateAvailable,
 	string(ReasonEngineVersionEOL):             ReasonEngineVersionEOL,
 	string(ReasonImageUpToDate):                ReasonImageUpToDate,

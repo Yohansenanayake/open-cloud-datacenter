@@ -90,7 +90,7 @@ const (
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbrestores/finalizers,verbs=update
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbsnapshots,verbs=get;list;watch
 // +kubebuilder:rbac:groups=dbaas.opencloud.wso2.com,resources=dbinstances,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;create
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;create;delete
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;delete
 
@@ -124,7 +124,7 @@ func (r *DBRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	before := restore.DeepCopy()
-	teardownDone := false
+	settled := false
 	defer func() {
 		// A pass that errors out returns before recording its outcome, which
 		// would leave status describing an earlier pass. Say what's actually
@@ -132,34 +132,46 @@ func (r *DBRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if retErr != nil && !restoreFinished(&restore) {
 			restore.Status.Message = fmt.Sprintf("retrying after error: %v", retErr)
 		}
-		retErr = goerrors.Join(retErr, r.finishPass(ctx, before, &restore, teardownDone))
+		stale, err := r.finishPass(ctx, before, &restore, settled)
+		retErr = goerrors.Join(retErr, err)
+		if stale && retErr == nil {
+			result = ctrl.Result{Requeue: true} // re-derive from the object as it is now
+		}
 	}()
 
 	if deleting {
-		result, teardownDone, retErr = r.reconcileDelete(ctx, &restore)
-		return result, retErr
+		result, settled, retErr = r.reconcileDelete(ctx, &restore)
+	} else {
+		result, settled, retErr = r.reconcileRestore(ctx, &restore)
 	}
-	return r.reconcileRestore(ctx, &restore)
+	return result, retErr
 }
 
 // finishPass settles everything a pass must leave consistent, in order:
 //
-//  1. The restore hold, reconciled to its desired state: held exactly while
-//     the restore is unfinished. Releasing is derived from this pass's
-//     outcome, never from which branch ran — a DBRestore that is already
-//     Succeeded/Failed releases on every pass, which also heals a release
-//     that failed (or never happened) on an earlier one. Acquisition stays
-//     explicit in reconcileRestore, since the hold must be held *before*
-//     the snapshot is verified and the PVC created within the same pass.
-//  2. Status: one patch per pass, skipped when nothing changed.
-//  3. The finalizer, removed only once teardown is done AND the hold is
-//     confirmed released — so the finalizer itself guarantees release.
-func (r *DBRestoreReconciler) finishPass(ctx context.Context, before, restore *dbaasv1.DBRestore, teardownDone bool) error {
+//  1. The restore hold, reconciled to its desired state: held until the
+//     restore is settled — ended (finished, or cancelled with its target
+//     torn down) with nothing of it left reading the snapshot (see
+//     settleRestorePVC). settled is derived from this pass's observations,
+//     and an ended restore re-derives it on every pass, which also heals a
+//     release that failed (or never happened) on an earlier one.
+//     Acquisition stays explicit in reconcileRestore, since the hold must be
+//     held *before* the snapshot is verified and the PVC created within the
+//     same pass.
+//  2. Status: one patch per pass, skipped when nothing changed. The patch
+//     is optimistic (it carries the resourceVersion the pass started from):
+//     a pass that started from a cached copy older than the object — e.g.
+//     one that hasn't yet seen this controller's own last status write —
+//     must not overwrite what's there, such as a terminal reason. Such a
+//     pass is stale: it writes nothing further and is requeued.
+//  3. The finalizer, removed only once settled AND the hold is confirmed
+//     released — so the finalizer itself guarantees release.
+func (r *DBRestoreReconciler) finishPass(ctx context.Context, before, restore *dbaasv1.DBRestore, settled bool) (stale bool, err error) {
 	deleting := !restore.DeletionTimestamp.IsZero()
 	var errs []error
 
 	holdReleased := false
-	if restoreFinished(restore) || (deleting && teardownDone) {
+	if settled {
 		if err := r.holds().Release(ctx, restore.Namespace, backup.RestoreHoldName(restore.UID), string(restore.UID)); err != nil {
 			errs = append(errs, fmt.Errorf("release restore hold: %w", err))
 		} else {
@@ -169,17 +181,22 @@ func (r *DBRestoreReconciler) finishPass(ctx context.Context, before, restore *d
 
 	restore.Status.ObservedGeneration = restore.Generation
 	if !equality.Semantic.DeepEqual(before.Status, restore.Status) {
-		if err := r.Status().Patch(ctx, restore, client.MergeFrom(before)); err != nil && (!deleting || !apierrors.IsNotFound(err)) {
+		patch := client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})
+		err := r.Status().Patch(ctx, restore, patch)
+		switch {
+		case apierrors.IsConflict(err):
+			return true, goerrors.Join(errs...)
+		case err != nil && (!deleting || !apierrors.IsNotFound(err)):
 			errs = append(errs, fmt.Errorf("patch DBRestore status: %w", err))
 		}
 	}
 
-	if deleting && teardownDone && holdReleased {
+	if deleting && settled && holdReleased {
 		if err := r.removeRestoreFinalizer(ctx, client.ObjectKeyFromObject(restore)); err != nil {
 			errs = append(errs, fmt.Errorf("remove DBRestore finalizer: %w", err))
 		}
 	}
-	return goerrors.Join(errs...)
+	return false, goerrors.Join(errs...)
 }
 
 func restoreFinished(restore *dbaasv1.DBRestore) bool {
@@ -187,15 +204,92 @@ func restoreFinished(restore *dbaasv1.DBRestore) bool {
 }
 
 // reconcileRestore runs one (non-deletion) pass, then applies the restore's
-// deadline to its outcome.
-func (r *DBRestoreReconciler) reconcileRestore(ctx context.Context, restore *dbaasv1.DBRestore) (ctrl.Result, error) {
+// deadline to its outcome. settled reports that the restore has ended and
+// left nothing reading its snapshot.
+func (r *DBRestoreReconciler) reconcileRestore(ctx context.Context, restore *dbaasv1.DBRestore) (ctrl.Result, bool, error) {
 	// A restore is a one-time operation, like a Job: once it has ended there
-	// is nothing further to converge (finishPass still releases the hold).
-	if restoreFinished(restore) {
-		return ctrl.Result{}, nil
+	// is nothing further to converge — only its leftovers to settle.
+	if !restoreFinished(restore) {
+		res, err := r.reconcileRestorePass(ctx, restore)
+		res, err = r.enforceDeadline(ctx, restore, res, err)
+		if err != nil || !restoreFinished(restore) {
+			return res, false, err
+		}
 	}
-	res, err := r.reconcileRestorePass(ctx, restore)
-	return r.enforceDeadline(ctx, restore, res, err)
+	return r.settle(ctx, restore)
+}
+
+// settle wraps settleRestorePVC as a pass outcome: a PVC still going away
+// is polled, since nothing watched announces its deletion.
+func (r *DBRestoreReconciler) settle(ctx context.Context, restore *dbaasv1.DBRestore) (ctrl.Result, bool, error) {
+	gone, err := r.settleRestorePVC(ctx, restore)
+	switch {
+	case err != nil:
+		return ctrl.Result{}, false, err
+	case !gone:
+		return ctrl.Result{RequeueAfter: restorePVCPollRequeue}, false, nil
+	}
+	return ctrl.Result{}, true, nil
+}
+
+// settleRestorePVC deletes the restore PVC of a restore that ended without
+// handing it to a target, and reports gone once nothing of this restore is
+// left using it.
+//
+// A target that claims this restore (spec.restoredFrom) mounts the PVC as
+// its data disk — even a failed or deleting one — and its own teardown
+// deletes it; a Succeeded restore's PVC is such a target's. Otherwise
+// nothing else ever will. Only a PVC carrying this restore's UID label is
+// touched (never a RestorePVCConflict one), and only after a live read
+// confirms no target claims it. Until the PVC is gone the hold stays: an
+// abandoned PVC may still be copying from the VolumeSnapshot the hold
+// protects.
+func (r *DBRestoreReconciler) settleRestorePVC(ctx context.Context, restore *dbaasv1.DBRestore) (bool, error) {
+	if restore.Status.Stage == dbaasv1.RestoreStageSucceeded {
+		return true, nil
+	}
+	pvcName := ensure.RestoreDataVolumeName(restore.Spec.TargetInstanceName, restore.UID)
+	pvc, err := r.Harvester.GetPVC(ctx, restore.Namespace, pvcName)
+	switch {
+	case apierrors.IsNotFound(err):
+		return true, nil
+	case err != nil:
+		return false, err
+	case pvc.Labels[dbaasv1.LabelDBRestoreUID] != string(restore.UID):
+		return true, nil // not ours to delete, and not reading our snapshot
+	}
+
+	// Cached first: a claimant only ever stops us, so trusting a cache
+	// that still shows one is safe. Deleting needs the live answer.
+	for _, reader := range []client.Reader{r.Client, r.APIReader} {
+		target, _, err := r.observeTarget(ctx, reader, restore)
+		if err != nil {
+			return false, err
+		}
+		if claimsRestore(target, restore) {
+			return true, nil
+		}
+	}
+	if !pvc.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	if err := r.Harvester.DeletePVCWithUID(ctx, restore.Namespace, pvcName, pvc.UID); err != nil && !apierrors.IsConflict(err) {
+		return false, err
+	}
+	// An unused PVC usually goes at once; otherwise re-checked next pass.
+	if _, err := r.Harvester.GetPVC(ctx, restore.Namespace, pvcName); !apierrors.IsNotFound(err) {
+		return false, client.IgnoreNotFound(err)
+	}
+	return true, nil
+}
+
+// claimsRestore reports whether target (nil: none) was created for restore:
+// its disk names derive from restore's UID, so it mounts restore's PVC. Wider
+// than ownsTarget on purpose — it ignores TargetInstanceUID, so even a
+// same-named instance created from a copied manifest protects the PVC it
+// would mount.
+func claimsRestore(target *dbaasv1.DBInstance, restore *dbaasv1.DBRestore) bool {
+	return target != nil && target.Spec.RestoredFrom != nil && target.Spec.RestoredFrom.DBRestoreUID == restore.UID
 }
 
 // enforceDeadline applies restore.timeout to the outcome of a pass. It runs
@@ -675,9 +769,10 @@ func (r *DBRestoreReconciler) observeTargetReadiness(ctx context.Context, restor
 }
 
 // reconcileDelete handles deletion of a DBRestore. Deleting an unfinished
-// restore cancels it: our target is deleted and, once it's confirmed gone,
-// teardownDone lets finishPass release the hold and remove the finalizer —
-// the same way deleting an in-progress Job cleans up its Pods (design §7).
+// restore cancels it: our target is deleted and, once it's confirmed gone
+// and the restore PVC settled, settled lets finishPass release the hold and
+// remove the finalizer — the same way deleting an in-progress Job cleans up
+// its Pods (design §7).
 //
 // Critical safety invariant: a target that has become ready has graduated
 // into an ordinary, independent database, and deleting this diagnostic
@@ -697,7 +792,7 @@ func (r *DBRestoreReconciler) reconcileDelete(ctx context.Context, restore *dbaa
 		return ctrl.Result{}, false, err
 	}
 	if !owned {
-		return ctrl.Result{}, true, nil // no target of ours — nothing to tear down
+		return r.settle(ctx, restore) // no target of ours — only the PVC may be left
 	}
 
 	liveReady := target.DeletionTimestamp.IsZero() && target.Status.IsConditionTrue(dbaasv1.ConditionReady)

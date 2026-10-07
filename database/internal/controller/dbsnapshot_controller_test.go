@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -551,5 +552,188 @@ func TestDBSnapshotAdmissionPrefersAppliedSpecOverCurrentDefaults(t *testing.T) 
 	got := getSnapshot(t, c, snap).Status.Source
 	if got == nil || got.DBName != "orders" || got.MasterUsername != "legacy_admin" || got.Port != 6432 || got.StorageType != "longhorn-fast" {
 		t.Fatalf("Status.Source = %+v, want the values recorded in status.appliedSpec", got)
+	}
+}
+
+// ---- source deletion ----
+
+func deletingSource() *dbaasv1.DBInstance {
+	source := availableSourceInstance()
+	now := metav1.Now()
+	source.DeletionTimestamp = &now
+	source.Finalizers = []string{dbaasv1.FinalizerName}
+	source.Status.Phase = dbaasv1.StatusDeleting
+	return source
+}
+
+func snapshotHoldHeld(t *testing.T, c client.Client, source *dbaasv1.DBInstance) bool {
+	t.Helper()
+	_, held, err := (backup.Holds{Live: c, Writer: c}).Held(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID))
+	if err != nil {
+		t.Fatalf("Held: %v", err)
+	}
+	return held
+}
+
+func TestDBSnapshotRejectsWhenSourceIsBeingDeleted(t *testing.T) {
+	source := deletingSource()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	stub := &testutil.StubHarvester{}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+
+	reconcileSnapshot(t, r, snap)
+
+	cond := getSnapshot(t, c, snap).Status.GetCondition(dbaasv1.ConditionSnapshotReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != string(dbaasv1.ReasonSnapshotSourceDeleting) {
+		t.Fatalf("Ready condition = %+v, want False/SourceDeleting", cond)
+	}
+	if stub.CreateVMBackupCalls != 0 || snapshotHoldHeld(t, c, source) {
+		t.Fatal("no backup may start, nor hold be taken, on a source being deleted")
+	}
+}
+
+// Check-then-lock: the cache may not have seen the source's deletion yet
+// when the hold is taken. The live re-check under the hold must catch it —
+// source teardown proceeds once it sees the hold free, so a backup started
+// here would read a VM being deleted.
+func TestDBSnapshotRechecksSourceLiveAfterTakingTheHold(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	stub := &testutil.StubHarvester{}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+	r.APIReader = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := cl.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if inst, ok := obj.(*dbaasv1.DBInstance); ok {
+				now := metav1.Now()
+				inst.DeletionTimestamp = &now // the API server already has the delete
+			}
+			return nil
+		},
+	})
+
+	reconcileSnapshot(t, r, snap)
+
+	cond := getSnapshot(t, c, snap).Status.GetCondition(dbaasv1.ConditionSnapshotReady)
+	if cond == nil || cond.Reason != string(dbaasv1.ReasonSnapshotSourceDeleting) {
+		t.Fatalf("Ready condition = %+v, want reason SourceDeleting", cond)
+	}
+	if stub.CreateVMBackupCalls != 0 {
+		t.Fatal("no backup may start once the live source is being deleted")
+	}
+	if snapshotHoldHeld(t, c, source) {
+		t.Fatal("the hold taken before the re-check must be released")
+	}
+}
+
+// A backup already running when its source starts deleting is tracked to
+// its end, not rejected: source teardown waits for its hold, and a rejected
+// snapshot would never release it.
+func TestDBSnapshotInFlightBackupFinishesWhileSourceDeletes(t *testing.T) {
+	source := deletingSource()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	snap.Status.Source = sourceMetadataFrom(availableSourceInstance(), operatorconfig.DatabaseDefaults{})
+	snap.Status.SetCondition(metav1.Condition{
+		Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionFalse,
+		Reason: string(dbaasv1.ReasonSnapshotBackupInProgress), Message: "waiting",
+	})
+	stub := &testutil.StubHarvester{VMBackupPresent: true}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+	if _, err := (backup.Holds{Live: c, Writer: c}).Acquire(context.Background(), source.Namespace, backup.SnapshotHoldName(source.UID),
+		snapshotHolderIdentity(snap), instanceOwnerRef(source), nil); err != nil {
+		t.Fatalf("seed our hold: %v", err)
+	}
+
+	reconcileSnapshot(t, r, snap)
+
+	cond := getSnapshot(t, c, snap).Status.GetCondition(dbaasv1.ConditionSnapshotReady)
+	if cond == nil || cond.Reason != string(dbaasv1.ReasonSnapshotBackupInProgress) {
+		t.Fatalf("Ready condition = %+v, want still BackupInProgress", cond)
+	}
+	if !snapshotHoldHeld(t, c, source) {
+		t.Fatal("the hold must stay while the backup runs")
+	}
+
+	stub.VMBackupStatus = backupReadyStatus()
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap))
+
+	cond = getSnapshot(t, c, snap).Status.GetCondition(dbaasv1.ConditionSnapshotReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready condition = %+v, want True", cond)
+	}
+	if snapshotHoldHeld(t, c, source) {
+		t.Fatal("the hold must be released once the backup is ready")
+	}
+	if stub.CreateVMBackupCalls != 0 {
+		t.Fatal("an existing backup must not be re-created")
+	}
+}
+
+// A same-named instance that replaced the source this snapshot admitted is
+// not its source.
+func TestDBSnapshotRejectsWhenSourceWasReplaced(t *testing.T) {
+	source := availableSourceInstance()
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	snap.Status.Source = &dbaasv1.SourceMetadata{InstanceUID: "the-original-uid"}
+	stub := &testutil.StubHarvester{VMBackupPresent: true}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+
+	reconcileSnapshot(t, r, snap)
+
+	cond := getSnapshot(t, c, snap).Status.GetCondition(dbaasv1.ConditionSnapshotReady)
+	if cond == nil || cond.Reason != string(dbaasv1.ReasonSnapshotSourceNotFound) {
+		t.Fatalf("Ready condition = %+v, want reason SourceNotFound", cond)
+	}
+}
+
+// A snapshot waiting on the hold (e.g. behind a repave) records nothing yet:
+// what it records must be the source as backed up, read under the hold —
+// not as it was before a resize or repave that ran while it waited.
+func TestDBSnapshotCapturesSourceUnderTheHoldNotWhileWaiting(t *testing.T) {
+	ctx := context.Background()
+	source := availableSourceInstance()
+	source.Status.CurrentImageRevision = "r1"
+	snap := testSnapshot()
+	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
+	stub := &testutil.StubHarvester{}
+	r, c := newSnapshotReconciler(t, stub, source, snap)
+	holds := backup.Holds{Live: c, Writer: c}
+	if _, err := holds.Acquire(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), "repave", instanceOwnerRef(source), nil); err != nil {
+		t.Fatalf("seed repave hold: %v", err)
+	}
+
+	reconcileSnapshot(t, r, snap)
+	if got := getSnapshot(t, c, snap); got.Status.Source != nil {
+		t.Fatalf("Status.Source = %+v recorded while waiting for the hold, want nil", got.Status.Source)
+	}
+
+	// Repave and a resize finish, then release the hold.
+	var latest dbaasv1.DBInstance
+	if err := c.Get(ctx, client.ObjectKeyFromObject(source), &latest); err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	latest.Spec.AllocatedStorage = 40
+	if err := c.Update(ctx, &latest); err != nil {
+		t.Fatalf("update source: %v", err)
+	}
+	latest.Status.CurrentImageRevision = "r2"
+	if err := c.Status().Update(ctx, &latest); err != nil {
+		t.Fatalf("update source status: %v", err)
+	}
+	if err := holds.Release(ctx, source.Namespace, backup.SnapshotHoldName(source.UID), "repave"); err != nil {
+		t.Fatalf("release repave hold: %v", err)
+	}
+
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap))
+
+	got := getSnapshot(t, c, snap).Status.Source
+	if got == nil || got.AllocatedStorage != 40 || got.ImageRevision != "r2" {
+		t.Fatalf("Status.Source = %+v, want allocatedStorage 40 and imageRevision r2 (the source as backed up)", got)
 	}
 }

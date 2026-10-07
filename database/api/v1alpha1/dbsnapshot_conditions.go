@@ -30,6 +30,7 @@ const (
 	ReasonSnapshotSourceNotFound       ConditionReason = "SourceNotFound"
 	ReasonSnapshotSourceBackupDisabled ConditionReason = "SourceBackupDisabled"
 	ReasonSnapshotSourceNotReady       ConditionReason = "SourceNotReady"
+	ReasonSnapshotSourceDeleting       ConditionReason = "SourceDeleting"
 	ReasonSnapshotHoldWaiting          ConditionReason = "SnapshotHoldWaiting"
 	ReasonSnapshotBackupInProgress     ConditionReason = "BackupInProgress"
 	ReasonSnapshotBackupReady          ConditionReason = "BackupReady"

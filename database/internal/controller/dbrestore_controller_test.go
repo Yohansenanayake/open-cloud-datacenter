@@ -1241,3 +1241,227 @@ func TestDBRestoreTimeoutNeverDeletesATargetReadyOnTheAPIServer(t *testing.T) {
 		t.Fatalf("Status = %+v, must not time out a target that is ready", got.Status)
 	}
 }
+
+// ---- the restore PVC of a restore that ends without a target ----
+
+func restorePVCExists(stub *testutil.StubHarvester, restore *dbaasv1.DBRestore) bool {
+	_, ok := stub.PVCs[restorePVCName(restore)]
+	return ok
+}
+
+// A restore that fails before any target takes its PVC deletes that PVC —
+// nothing else ever would — and releases the hold once it is gone.
+func TestDBRestoreFailedRestoreDeletesItsOrphanedPVC(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	foreign := ourTarget(restore)
+	foreign.Spec.RestoredFrom = nil
+	stub := stubWithPVCs(ourPVC(restore, corev1.ClaimPending))
+	r, c := newRestoreReconciler(t, stub, restore, snap, foreign)
+
+	reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTargetNameConflict)
+	if restorePVCExists(stub, restore) {
+		t.Fatal("the failed restore's PVC must be deleted")
+	}
+	if holdExists(t, c, restore) {
+		t.Fatal("hold must be released once the PVC is gone")
+	}
+}
+
+// While the PVC is still going away the hold stays: an abandoned PVC may
+// still be copying from the VolumeSnapshot the hold protects.
+func TestDBRestoreKeepsHoldUntilOrphanedPVCIsGone(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	foreign := ourTarget(restore)
+	foreign.Spec.RestoredFrom = nil
+	stub := stubWithPVCs(ourPVC(restore, corev1.ClaimPending))
+	stub.KeepDeletedPVCs = true
+	r, c := newRestoreReconciler(t, stub, restore, snap, foreign)
+
+	res := reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTargetNameConflict)
+	if !holdExists(t, c, restore) {
+		t.Fatal("hold must stay while the PVC is still being deleted")
+	}
+	if res.RequeueAfter != restorePVCPollRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v (nothing watched announces the PVC going)", res.RequeueAfter, restorePVCPollRequeue)
+	}
+
+	// A pass while it's still terminating neither deletes it again nor
+	// lets the hold go.
+	reconcileRestore(t, r, restore)
+	if len(stub.DeletedPVCNames) != 1 {
+		t.Fatalf("PVC deletes = %v, want exactly one", stub.DeletedPVCNames)
+	}
+	if !holdExists(t, c, restore) {
+		t.Fatal("hold must stay while the PVC is terminating")
+	}
+
+	delete(stub.PVCs, restorePVCName(restore)) // PVC protection lets it go
+	reconcileRestore(t, r, restore)
+	if holdExists(t, c, restore) {
+		t.Fatal("hold must be released once the PVC is gone")
+	}
+}
+
+// A PVC under our name that this restore didn't create is never deleted.
+func TestDBRestoreFailedRestoreNeverDeletesAPVCThatIsNotOurs(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	blank := ourPVC(restore, corev1.ClaimBound)
+	blank.Labels = nil
+	blank.Spec.DataSource = nil
+	stub := stubWithPVCs(blank)
+	r, c := newRestoreReconciler(t, stub, restore, snap)
+
+	reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestorePVCConflict)
+	if !restorePVCExists(stub, restore) || stub.DeletePVCCalls != 0 {
+		t.Fatal("a PVC this restore didn't create must never be deleted")
+	}
+	if holdExists(t, c, restore) {
+		t.Fatal("hold must be released: nothing of ours is left reading the snapshot")
+	}
+}
+
+// A target created for this restore mounts the PVC as its data disk — even
+// one being torn down, or a same-named replacement from a copied manifest —
+// so its own teardown deletes the PVC, never the restore.
+func TestDBRestoreFailedRestoreLeavesPVCToTargetsThatMountIt(t *testing.T) {
+	deleting := func(restore *dbaasv1.DBRestore) *dbaasv1.DBInstance {
+		target := ourTarget(restore)
+		now := metav1.Now()
+		target.DeletionTimestamp = &now
+		target.Finalizers = []string{dbaasv1.FinalizerName}
+		return target
+	}
+	replacement := func(restore *dbaasv1.DBRestore) *dbaasv1.DBInstance {
+		target := ourTarget(restore)
+		target.UID = "a-replacement-uid"
+		return target
+	}
+	for name, build := range map[string]func(*dbaasv1.DBRestore) *dbaasv1.DBInstance{
+		"our target being deleted": deleting,
+		"same-named replacement":   replacement,
+	} {
+		t.Run(name, func(t *testing.T) {
+			snap := readySnapshot()
+			restore := capturedRestore(snap)
+			restore.Status.TargetInstanceUID = "orders-restored-uid"
+			stub := stubWithPVCs(ourPVC(restore, corev1.ClaimBound))
+			r, c := newRestoreReconciler(t, stub, restore, snap, build(restore), heldBy(restore))
+
+			reconcileRestore(t, r, restore)
+
+			wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTargetLost)
+			if !restorePVCExists(stub, restore) || stub.DeletePVCCalls != 0 {
+				t.Fatal("a PVC a target mounts must be left to that target's teardown")
+			}
+			if holdExists(t, c, restore) {
+				t.Fatal("hold must be released: the PVC was Bound before any target existed")
+			}
+		})
+	}
+}
+
+// Deleting the PVC needs the live answer: a cache that hasn't seen the
+// target yet must not cost that target its data disk.
+func TestDBRestoreNeverDeletesThePVCOfATargetTheCacheHasNotSeen(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	failRestore(restore, dbaasv1.ReasonRestoreTargetLost, "lost")
+	target := ourTarget(restore)
+	stub := stubWithPVCs(ourPVC(restore, corev1.ClaimBound))
+	r, _ := splitReconciler(t, stub, []client.Object{restore}, []client.Object{restore, target})
+
+	reconcileRestore(t, r, restore)
+
+	if !restorePVCExists(stub, restore) || stub.DeletePVCCalls != 0 {
+		t.Fatal("the PVC of a target the API server has must not be deleted")
+	}
+}
+
+// Cancelling a restore that never created a target deletes its PVC before
+// the hold and finalizer go.
+func TestDBRestoreDeletionDeletesOrphanedPVC(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	deletingRestore(restore)
+	stub := stubWithPVCs(ourPVC(restore, corev1.ClaimPending))
+	r, c := newRestoreReconciler(t, stub, restore, heldBy(restore))
+
+	reconcileRestore(t, r, restore)
+
+	if restorePVCExists(stub, restore) {
+		t.Fatal("cancellation must delete the restore's own PVC")
+	}
+	var gone dbaasv1.DBRestore
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(restore), &gone); !apierrors.IsNotFound(err) {
+		t.Fatalf("DBRestore Get err = %v, want NotFound (finalizer removed)", err)
+	}
+}
+
+// A Succeeded restore's PVC is its target's data disk, whatever the target
+// is doing now.
+func TestDBRestoreDeletionOfSucceededRestoreKeepsThePVC(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	restore.Status.Stage = dbaasv1.RestoreStageSucceeded
+	restore.Status.TargetInstanceUID = "orders-restored-uid"
+	deletingRestore(restore)
+	stub := stubWithPVCs(ourPVC(restore, corev1.ClaimBound))
+	r, _ := newRestoreReconciler(t, stub, restore)
+
+	reconcileRestore(t, r, restore)
+
+	if !restorePVCExists(stub, restore) || stub.DeletePVCCalls != 0 {
+		t.Fatal("a Succeeded restore's PVC must never be deleted by the restore")
+	}
+}
+
+// e2e regression: the deadline pass deletes the target and records
+// RestoreTimedOut; the target's delete event re-runs the restore at once,
+// from a cached copy that hasn't seen that write. That stale pass sees its
+// own target being deleted — it must not overwrite RestoreTimedOut with
+// TargetLost.
+func TestDBRestoreStalePassNeverOverwritesANewerStatus(t *testing.T) {
+	ctx := context.Background()
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	target := ourTarget(restore)
+	now := metav1.Now()
+	target.DeletionTimestamp = &now
+	target.Finalizers = []string{dbaasv1.FinalizerName}
+	restore.Status.TargetInstanceUID = target.UID
+	setRestoreProgress(restore, dbaasv1.RestoreStageStartingDatabase, dbaasv1.ReasonRestoreTargetStarting, "waiting")
+	stub := stubWithPVCs(ourPVC(restore, corev1.ClaimBound))
+	r, c := newRestoreReconciler(t, stub, restore, snap, target)
+
+	staleCopy := getRestore(t, c, restore) // what the cache still has
+	timedOut := staleCopy.DeepCopy()
+	failRestore(timedOut, dbaasv1.ReasonRestoreTimedOut, "restore did not finish within 2m0s")
+	if err := c.Status().Update(ctx, timedOut); err != nil {
+		t.Fatalf("record the timeout: %v", err)
+	}
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if got, ok := obj.(*dbaasv1.DBRestore); ok {
+				staleCopy.DeepCopyInto(got)
+				return nil
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	res := reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, dbaasv1.ReasonRestoreTimedOut)
+	if !res.Requeue {
+		t.Fatal("a stale pass must be requeued to re-derive from the current object")
+	}
+}

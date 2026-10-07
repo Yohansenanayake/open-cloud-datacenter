@@ -16,21 +16,27 @@
 #   3. The target uses ITS OWN credentials: its Secret logs in, the source's
 #      master password does not, and the metrics exporter authenticates.
 #   4. Source and target are independent; deleting a Succeeded DBRestore
-#      never touches its target.
-#   5. Snapshot mode works after the source DBInstance is deleted.
+#      never touches its target, nor the target's disk.
+#   5. Deleting the source deletes its disks (data and OS PVCs), and Snapshot
+#      mode still works afterwards: the restore reads only the snapshot.
+#      Before that (skip with SKIP_HOLD_WAIT=1): deleting the source while a
+#      backup of it is running waits for the backup (VM untouched), refuses
+#      new snapshots, and finishes once the backup is Ready.
 #   6. Controller failure paths: missing snapshot, storage too small, target
 #      name conflict, cancellation (deleting an in-progress DBRestore deletes
 #      its target), and deleting the DBSnapshot mid-restore (the backend
-#      backup survives while the restore holds it).
+#      backup survives while the restore holds it). No failed, cancelled or
+#      timed-out restore leaves a PVC behind.
 #   7. The restore deadline (skip with SKIP_DEADLINE=1): with a short
 #      restore.timeout a restore fails as RestoreTimedOut, status.deadline
 #      is creation + timeout, and the unfinished target is deleted.
 #
 # Usage: ./test-restore.sh [--cleanup]
-#   --cleanup  delete everything this run created on exit (including the
-#              data PVCs, which the controller deliberately leaves behind) —
-#              only if the run passed: a failed run always keeps everything,
-#              so the evidence survives (the cleanup commands are printed)
+#   --cleanup  delete everything this run created on exit — only if the run
+#              passed: a failed run always keeps everything, so the evidence
+#              survives (the cleanup commands are printed). Deleting the
+#              DBInstances deletes their disks; any PVC still left after that
+#              is deleted too, as a backstop.
 #
 # Env (defaults in brackets):
 #   NAMESPACE [default]  NETWORK_REF [vm-network-001]  DB_CLASS [db.t3.medium]
@@ -41,6 +47,8 @@
 #   PROVISION_TIMEOUT [900]  BACKUP_TIMEOUT [1200]  RESTORE_TIMEOUT [2400]
 #   FAIL_TIMEOUT [180]  POLL [5]
 #   SKIP_SOURCE_DELETE=1   skip phase 5 (restore after the source is gone)
+#   SKIP_HOLD_WAIT=1       in phase 5, delete the source without a backup in
+#                          progress (saves one backup, ~2-3 minutes)
 #   SKIP_NEGATIVE=1        skip the failure-path checks (phase 6)
 #   SKIP_SNAPSHOT_RACE=1   skip deleting the DBSnapshot mid-restore (last step)
 #   SKIP_DEADLINE=1        skip the restore-deadline phase (runs by default —
@@ -106,8 +114,9 @@ RUN_LABEL="dbaas-e2e/run=$RUN_ID"
 LEASE_PREFIX="dbaas-restore-hold-"
 
 CREATED_RESTORES=()  # every DBRestore this run created
+CREATED_SNAPSHOTS=("$SNAPSHOT") # every DBSnapshot this run created
 CREATED_TARGETS=()   # every target DBInstance a restore was asked to create
-CLEANUP_PVCS=()      # data/OS PVCs to delete on --cleanup (left behind by design)
+CLEANUP_PVCS=()      # PVCs to delete on --cleanup if teardown left any behind
 EXPECTED_CHECKSUM=""
 SOURCE_MASTER_PW=""
 PASS=0
@@ -187,10 +196,34 @@ wait_available() { # wait_available <instance>
   wait_until "a master login to DBInstance/$1" 120 login_ok "$1"
 }
 
-snapshot_terminal() {
-  local r
-  r=$(jp dbsnapshot "$SNAPSHOT" '{.status.conditions[?(@.type=="Ready")].reason}')
+snapshot_reason() { jp dbsnapshot "$1" '{.status.conditions[?(@.type=="Ready")].reason}'; }
+snapshot_terminal() { # snapshot_terminal [snapshot] — default: the main one
+  local r; r=$(snapshot_reason "${1:-$SNAPSHOT}")
   [[ "$r" == "BackupReady" || "$r" == "BackupFailed" ]]
+}
+snapshot_rejected() { [[ "$(snapshot_reason "$1")" == "$2" ]]; } # <snapshot> <reason>
+# snapshot_holds <source-uid> <snapshot> — the source's snapshot hold names it.
+snapshot_holds() {
+  [[ "$(jp lease "dbaas-snapshot-hold-$1" '{.spec.holderIdentity}')" == "snapshot:$2" ]]
+}
+deletion_waits_for_snapshot() {
+  [[ "$(jp dbinstance "$1" '{.status.conditions[?(@.type=="DeletionBlocked")].reason}')" == "DeletionWaitingForSnapshot" ]]
+}
+
+create_snapshot() { # create_snapshot <snapshot> <source>
+  [[ " ${CREATED_SNAPSHOTS[*]} " == *" $1 "* ]] || CREATED_SNAPSHOTS+=("$1")
+  cat <<EOF | kubectl apply -f - >/dev/null
+apiVersion: dbaas.opencloud.wso2.com/v1alpha1
+kind: DBSnapshot
+metadata:
+  name: $1
+  namespace: $NAMESPACE
+  labels:
+    dbaas-e2e/run: "$RUN_ID"
+spec:
+  sourceInstanceRef:
+    name: $2
+EOF
 }
 
 restore_stage()  { jp dbrestore "$1" '{.status.stage}'; }
@@ -198,6 +231,19 @@ restore_reason() { jp dbrestore "$1" '{.status.reason}'; }
 restore_terminal() { local s; s=$(restore_stage "$1"); [[ "$s" == "Succeeded" || "$s" == "Failed" ]]; }
 restore_lease() { echo "${LEASE_PREFIX}$(jp dbrestore "$1" '{.metadata.uid}')"; }
 restore_holds() { exists lease "$(restore_lease "$1")"; }
+restore_uid() { jp dbrestore "$1" '{.metadata.uid}'; }
+
+# Disks. Every PVC of an instance is named pg-<instance>-<salt>-..., and a
+# restore PVC carries its DBRestore's UID label.
+instance_pvcs() { # instance_pvcs <instance>
+  kc get pvc -o name 2>/dev/null | sed 's|^persistentvolumeclaim/||' | grep -E "^pg-$1-" || true
+}
+no_instance_pvcs() { [[ -z "$(instance_pvcs "$1")" ]]; }
+restore_pvcs() { # restore_pvcs <restore-uid>
+  [[ -n "$1" ]] || return 0
+  kc get pvc -l "dbaas.opencloud.wso2.com/restore-uid=$1" -o name 2>/dev/null
+}
+no_restore_pvcs() { [[ -z "$(restore_pvcs "$1")" ]]; }
 
 wait_restore_terminal() { # wait_restore_terminal <restore> <timeout>
   info "Waiting up to ${2}s for DBRestore/$1 to finish"
@@ -314,8 +360,8 @@ on_exit() {
     info "Leaving test resources in place. To remove them later:"
     info "  kubectl -n $NAMESPACE delete dbrestore -l $RUN_LABEL"
     info "  kubectl -n $NAMESPACE delete dbinstance ${CREATED_TARGETS[*]:-} $SOURCE --ignore-not-found"
-    info "  kubectl -n $NAMESPACE delete dbsnapshot $SNAPSHOT --ignore-not-found"
-    info "  then the PVCs: kubectl -n $NAMESPACE get pvc | grep -E 'rt-(src|tgt)'"
+    info "  kubectl -n $NAMESPACE delete dbsnapshot ${CREATED_SNAPSHOTS[*]} --ignore-not-found"
+    info "  then check no disks are left: kubectl -n $NAMESPACE get pvc | grep -E 'rt-(src|tgt)'"
     exit "$code"
   fi
   say "Cleaning up"
@@ -331,12 +377,15 @@ on_exit() {
       kc get pvc -l "dbaas.opencloud.wso2.com/restore-uid=$uid" -o name 2>/dev/null | sed 's|^persistentvolumeclaim/||')
   done
   # DBRestores first (an in-progress one cancels its own target), then the
-  # instances, then the snapshot, then the disks left behind.
+  # instances (which delete their own disks), then the snapshot, then any
+  # disk still left as a backstop.
   kc delete dbrestore -l "$RUN_LABEL" --ignore-not-found --timeout=300s
   for t in "${CREATED_TARGETS[@]}" "$SOURCE"; do
     kc delete dbinstance "$t" --ignore-not-found --timeout=600s
   done
-  kc delete dbsnapshot "$SNAPSHOT" --ignore-not-found --timeout=600s
+  for t in "${CREATED_SNAPSHOTS[@]}"; do
+    kc delete dbsnapshot "$t" --ignore-not-found --timeout=600s
+  done
   for t in $(printf '%s\n' "${CLEANUP_PVCS[@]}" | sort -u); do
     kc delete pvc "$t" --ignore-not-found --timeout=120s
   done
@@ -390,18 +439,7 @@ EOF
   info "Seeded $ROWS rows; checksum $EXPECTED_CHECKSUM"
 
   say "Phase 1: snapshot DBSnapshot/$SNAPSHOT"
-  cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: dbaas.opencloud.wso2.com/v1alpha1
-kind: DBSnapshot
-metadata:
-  name: $SNAPSHOT
-  namespace: $NAMESPACE
-  labels:
-    dbaas-e2e/run: "$RUN_ID"
-spec:
-  sourceInstanceRef:
-    name: $SOURCE
-EOF
+  create_snapshot "$SNAPSHOT" "$SOURCE"
   info "Waiting up to ${BACKUP_TIMEOUT}s for the backup to finish"
   wait_until "DBSnapshot/$SNAPSHOT to finish" "$BACKUP_TIMEOUT" snapshot_terminal || die "snapshot never finished"
   [[ "$(jp dbsnapshot "$SNAPSHOT" '{.status.conditions[?(@.type=="Ready")].reason}')" == "BackupReady" ]] \
@@ -498,10 +536,53 @@ phase_restore_live_source() {
     "$(master_sql "$SOURCE" "$DB_NAME" "SELECT count(*) FROM restore_marker WHERE label = 'after-snapshot'")"
 
   say "Phase 4: deleting a Succeeded DBRestore never touches its target"
+  local data_pvc
+  data_pvc=$(jp dbinstance "$target" '{.status.resources.dataVolumeName}')
   kc delete dbrestore "$restore" --timeout=120s >/dev/null || fail "DBRestore/$restore did not delete within 120s"
   check "target DBInstance still exists" "yes" "$(exists dbinstance "$target" && echo yes || echo no)"
   check "target is not being deleted" "" "$(jp dbinstance "$target" '{.metadata.deletionTimestamp}')"
+  check "target's data disk (the restore PVC) is not being deleted" "yes/" \
+    "$(exists pvc "$data_pvc" && echo yes || echo no)/$(jp pvc "$data_pvc" '{.metadata.deletionTimestamp}')"
   login_ok "$target" && pass "target still serves logins" || fail "target no longer serves logins"
+}
+
+# =====================================================================
+# Phase 5a (skip with SKIP_HOLD_WAIT=1) — delete the source while a backup
+# of it is running: teardown must wait for the backup, leaving the VM alone,
+# and new snapshots must be refused. Issues the source's delete; Phase 5
+# waits for it to finish.
+# =====================================================================
+delete_source_during_backup() {
+  local snap="rt-snap-inflight-$RUN_ID" late="rt-snap-late-$RUN_ID" uid vm
+  say "Phase 5a: delete DBInstance/$SOURCE while DBSnapshot/$snap is backing it up"
+  uid=$(jp dbinstance "$SOURCE" '{.metadata.uid}')
+  vm=$(jp dbinstance "$SOURCE" '{.status.resources.vmName}')
+  create_snapshot "$snap" "$SOURCE"
+  if ! wait_until "DBSnapshot/$snap to take the snapshot hold" 120 snapshot_holds "$uid" "$snap"; then
+    kc delete dbinstance "$SOURCE" --wait=false >/dev/null
+    return
+  fi
+  kc delete dbinstance "$SOURCE" --wait=false >/dev/null
+  info "Deleted DBInstance/$SOURCE while DBSnapshot/$snap holds the snapshot hold"
+
+  if wait_until "the source's teardown to wait on DBSnapshot/$snap" 60 deletion_waits_for_snapshot "$SOURCE"; then
+    pass "source deletion is waiting for the backup in progress"
+    if snapshot_terminal "$snap"; then
+      info "DBSnapshot/$snap already finished — VM-untouched check not exercised this run"
+    else
+      check "the source's VM is still there, not being deleted, while the backup runs" "yes/" \
+        "$(exists virtualmachines.kubevirt.io "$vm" && echo yes || echo no)/$(jp virtualmachines.kubevirt.io "$vm" '{.metadata.deletionTimestamp}')"
+    fi
+  elif snapshot_terminal "$snap"; then
+    info "DBSnapshot/$snap finished before teardown looked — the wait was not exercised this run"
+  fi
+
+  create_snapshot "$late" "$SOURCE"
+  wait_until "DBSnapshot/$late to be refused" 120 snapshot_rejected "$late" "SourceDeleting" \
+    && pass "a snapshot requested after the source's deletion is refused (SourceDeleting)"
+
+  wait_until "DBSnapshot/$snap to finish" "$BACKUP_TIMEOUT" snapshot_terminal "$snap"
+  check "the backup in progress completed despite the source's deletion" "BackupReady" "$(snapshot_reason "$snap")"
 }
 
 # =====================================================================
@@ -511,10 +592,24 @@ phase_restore_after_source_deleted() {
   local restore="rt-restore2-$RUN_ID" target="rt-tgt2-$RUN_ID"
   say "Phase 5: delete the source, then restore from the snapshot"
   record_pvcs "$SOURCE"
-  kc delete dbinstance "$SOURCE" --timeout=600s >/dev/null || fail "source did not delete within 600s"
-  not_exists dbinstance "$SOURCE" && pass "source DBInstance deleted" || fail "source DBInstance still exists"
+  local disks
+  disks=$(instance_pvcs "$SOURCE" | tr '\n' ' ')
+  [[ -n "$disks" ]] && info "Source disks before deletion: $disks" || fail "found no PVCs named for the source before deleting it"
+  if [[ "${SKIP_HOLD_WAIT:-0}" == "1" ]]; then
+    kc delete dbinstance "$SOURCE" --wait=false >/dev/null
+  else
+    delete_source_during_backup
+  fi
+  wait_until "DBInstance/$SOURCE to be deleted" 600 not_exists dbinstance "$SOURCE" \
+    && pass "source DBInstance deleted"
+  wait_until "the source's disks to be deleted" 300 no_instance_pvcs "$SOURCE" \
+    && pass "deleting the source deleted its disks ($disks)"
   check "DBSnapshot is still Ready after its source is gone" "True" \
     "$(jp dbsnapshot "$SNAPSHOT" '{.status.conditions[?(@.type=="Ready")].status}')"
+  if [[ "${SKIP_HOLD_WAIT:-0}" != "1" ]]; then
+    check "the manual snapshot taken during deletion survives its source" "BackupReady" \
+      "$(snapshot_reason "rt-snap-inflight-$RUN_ID")"
+  fi
 
   create_restore "$restore" "$target" "$SNAPSHOT" "$ALLOCATED_STORAGE"
   wait_restore_terminal "$restore" "$RESTORE_TIMEOUT"
@@ -524,11 +619,20 @@ phase_restore_after_source_deleted() {
 # =====================================================================
 # Phase 6 — failure paths
 # =====================================================================
+# expect_settled <restore> — an ended restore leaves no PVC of its own and,
+# once that's gone, no hold (the hold outlives a PVC still being deleted).
+expect_settled() {
+  local uid; uid=$(restore_uid "$1")
+  wait_until "DBRestore/$1 to leave no restore PVC behind" 300 no_restore_pvcs "$uid" \
+    && pass "no restore PVC left behind by DBRestore/$1"
+  wait_until "DBRestore/$1 to release its restore hold" 60 not_exists lease "$(restore_lease "$1")" \
+    && pass "no restore hold left behind by DBRestore/$1"
+}
+
 expect_failed() { # expect_failed <restore> <reason>
   wait_restore_terminal "$1" "$FAIL_TIMEOUT"
   check "DBRestore/$1 failed with $2" "Failed/$2" "$(restore_stage "$1")/$(restore_reason "$1")"
-  not_exists lease "$(restore_lease "$1")" && pass "no restore hold left behind by DBRestore/$1" \
-    || fail "restore hold left behind by failed DBRestore/$1"
+  expect_settled "$1"
 }
 
 phase_failure_paths() {
@@ -569,6 +673,7 @@ phase_failure_paths() {
       info "DBRestore/$r already finished ($(restore_stage "$r")) — cancellation not exercised this run"
     else
       record_pvcs "$t"
+      local uid; uid=$(restore_uid "$r")
       kc delete dbrestore "$r" --wait=false >/dev/null
       wait_until "DBRestore/$r to be gone" 600 not_exists dbrestore "$r" \
         && pass "cancelled DBRestore/$r finished its cleanup"
@@ -577,6 +682,10 @@ phase_failure_paths() {
       else
         fail "cancellation left the in-progress target DBInstance/$t running"
       fi
+      wait_until "the cancelled target's disks to be deleted" 300 no_instance_pvcs "$t" \
+        && pass "cancellation left no disk of DBInstance/$t behind"
+      wait_until "the cancelled restore's PVC to be deleted" 300 no_restore_pvcs "$uid" \
+        && pass "cancellation left no restore PVC behind"
     fi
   fi
 }
@@ -629,8 +738,9 @@ phase_deadline() {
   else
     fail "the unfinished target DBInstance/$t is still running after the timeout"
   fi
-  not_exists lease "$(restore_lease "$r")" && pass "restore hold released after the timeout" \
-    || fail "restore hold left behind by the timed-out DBRestore/$r"
+  expect_settled "$r"
+  wait_until "the timed-out target's disks to be deleted" 300 no_instance_pvcs "$t" \
+    && pass "the timed-out target left no disk behind"
 
   info "Putting the operator's restore settings back"
   restore_operator && pass "operator restore settings restored" || fail "operator restore settings NOT restored"
@@ -664,7 +774,8 @@ phase_snapshot_delete_race() {
   case "$(restore_stage "$r")/$(restore_reason "$r")" in
     Succeeded/*) pass "restore finished first (its volume was already copied): Succeeded" ;;
     Failed/SnapshotDeleting|Failed/SnapshotNotFound|Failed/VolumeSnapshotMissing)
-      pass "restore failed closed on the deleted snapshot: $(restore_reason "$r")" ;;
+      pass "restore failed closed on the deleted snapshot: $(restore_reason "$r")"
+      expect_settled "$r" ;;
     *) fail "unexpected outcome for DBRestore/$r: $(restore_stage "$r")/$(restore_reason "$r")" ;;
   esac
   wait_until "DBSnapshot/$SNAPSHOT to finish deleting once the restore released it" 900 \

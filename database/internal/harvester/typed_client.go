@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -681,6 +682,60 @@ func (c *TypedClient) GetVMOSDiskPVCName(ctx context.Context, ns, vmName string)
 	return name, err
 }
 
+// MarkVMPVCsForRemoval lists, in the live VM's harvesterhci.io/
+// removedPersistentVolumeClaims annotation, every PVC the VM mounts that
+// owned accepts. Harvester's VM finalizer deletes the listed PVCs once the
+// VM is being removed — the same mechanism its UI uses to delete volumes
+// along with a VM. Deleting them through the VM is what keeps Harvester's
+// VM controller from recreating a blank PVC from volumeClaimTemplates, which
+// it stops doing only once the VM has a deletionTimestamp. Entries already
+// listed are kept. found is false (and nothing is done) when the VM is gone.
+func (c *TypedClient) MarkVMPVCsForRemoval(ctx context.Context, ns, vmName string, owned func(pvcName string) bool) (found bool, err error) {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, getErr := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			found = false
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		found = true
+		if vm.Spec.Template == nil {
+			return nil
+		}
+
+		existing := vm.Annotations[util.RemovedPVCsAnnotationKey]
+		listed := map[string]bool{}
+		var names []string
+		add := func(name string) {
+			if name = strings.TrimSpace(name); name != "" && !listed[name] {
+				listed[name] = true
+				names = append(names, name)
+			}
+		}
+		for _, name := range strings.Split(existing, ",") {
+			add(name)
+		}
+		for _, vol := range vm.Spec.Template.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && owned(vol.PersistentVolumeClaim.ClaimName) {
+				add(vol.PersistentVolumeClaim.ClaimName)
+			}
+		}
+		want := strings.Join(names, ",")
+		if want == existing {
+			return nil
+		}
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[util.RemovedPVCsAnnotationKey] = want
+		_, updateErr := c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
+		return updateErr
+	})
+	return found, err
+}
+
 // ResolveVMImageDisplayName returns the DisplayName of the
 // VirtualMachineImage identified by ns/name. See the ClientInterface doc
 // comment for why this indirection exists: GetVMOSDiskImageID's caller needs
@@ -799,6 +854,14 @@ func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, newI
 // DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
 func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
 	return ignoreNotFound(c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{}))
+}
+
+// DeletePVCWithUID deletes the PVC only if it is still the object with uid.
+// NotFound is success; a different object under the name is a Conflict.
+func (c *TypedClient) DeletePVCWithUID(ctx context.Context, ns, name string, uid types.UID) error {
+	return ignoreNotFound(c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}))
 }
 
 // CreateVMBackup requests a durable Harvester backup of sourceVMName. Always

@@ -19,11 +19,13 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
@@ -100,6 +102,7 @@ type StubHarvester struct {
 	OSDiskPVCNameErr error
 
 	CreateVMBackupErr    error
+	VMBackupPresent      bool
 	VMBackupStatus       harvester.VMBackupStatus
 	GetVMBackupStatusErr error
 	DeleteVMBackupErr    error
@@ -133,19 +136,102 @@ type StubHarvester struct {
 	LastRestorePVCName         string
 	LastRestorePVCSizeGB       int
 	LastRestorePVCStorageClass string
+
+	// VMPresent models the live VM for MarkVMPVCsForRemoval: false (the zero
+	// value) reads as "VM already gone". TeardownAll never clears it — a
+	// real VM delete takes time — so a test flips it to model the VM going
+	// away. VMPVCNames are the claims that VM mounts.
+	VMPresent       bool
+	VMPVCNames      []string
+	MarkVMPVCsErr   error
+	MarkVMPVCsCalls int
+	MarkedPVCNames  []string
+	// DeletedPVCNames records every PVC name DeletePVC/DeletePVCWithUID
+	// deleted, in order.
+	DeletedPVCNames []string
+	// KeepDeletedPVCs, when true, leaves a PVC deleted through either delete
+	// method in PVCs with a deletionTimestamp (as the PVC protection
+	// finalizer would while a pod still uses it) instead of removing it.
+	KeepDeletedPVCs bool
+}
+
+func (s *StubHarvester) MarkVMPVCsForRemoval(_ context.Context, _, _ string, owned func(string) bool) (bool, error) {
+	s.MarkVMPVCsCalls++
+	if s.MarkVMPVCsErr != nil {
+		return false, s.MarkVMPVCsErr
+	}
+	if !s.VMPresent {
+		return false, nil
+	}
+	for _, name := range s.VMPVCNames {
+		if owned(name) && !slices.Contains(s.MarkedPVCNames, name) {
+			s.MarkedPVCNames = append(s.MarkedPVCNames, name)
+		}
+	}
+	return true, nil
+}
+
+// DeletePVCWithUID returns a Conflict when the stored PVC has a different
+// UID, otherwise behaves like DeletePVC.
+func (s *StubHarvester) DeletePVCWithUID(_ context.Context, _, name string, uid types.UID) error {
+	s.DeletePVCCalls++
+	if s.DeletePVCErr != nil {
+		return s.DeletePVCErr
+	}
+	pvc, ok := s.PVCs[name]
+	if !ok {
+		return nil
+	}
+	if pvc.UID != uid {
+		return apierrors.NewConflict(schema.GroupResource{Resource: "persistentvolumeclaims"}, name, fmt.Errorf("precondition failed: UID"))
+	}
+	s.removePVC(name)
+	return nil
+}
+
+// removePVC records a successful delete and applies it to PVCs.
+func (s *StubHarvester) removePVC(name string) {
+	s.DeletedPVCNames = append(s.DeletedPVCNames, name)
+	pvc, ok := s.PVCs[name]
+	if !ok {
+		return
+	}
+	if s.KeepDeletedPVCs {
+		now := metav1.Now()
+		pvc.DeletionTimestamp = &now
+		return
+	}
+	delete(s.PVCs, name)
 }
 
 func (s *StubHarvester) CreateVMBackup(_ context.Context, _, _, sourceVMName string, _ *metav1.OwnerReference) error {
 	s.CreateVMBackupCalls++
 	s.LastVMBackupSourceVMName = sourceVMName
-	return s.CreateVMBackupErr
+	if s.CreateVMBackupErr != nil {
+		return s.CreateVMBackupErr
+	}
+	s.VMBackupPresent = true
+	return nil
 }
-func (s *StubHarvester) GetVMBackupStatus(_ context.Context, _, _, _ string) (harvester.VMBackupStatus, error) {
-	return s.VMBackupStatus, s.GetVMBackupStatusErr
+
+// GetVMBackupStatus reads as NotFound until the backup exists — created
+// through CreateVMBackup, or seeded with VMBackupPresent.
+func (s *StubHarvester) GetVMBackupStatus(_ context.Context, _, name, _ string) (harvester.VMBackupStatus, error) {
+	if s.GetVMBackupStatusErr != nil {
+		return harvester.VMBackupStatus{}, s.GetVMBackupStatusErr
+	}
+	if !s.VMBackupPresent {
+		return harvester.VMBackupStatus{}, apierrors.NewNotFound(schema.GroupResource{Group: "harvesterhci.io", Resource: "virtualmachinebackups"}, name)
+	}
+	return s.VMBackupStatus, nil
 }
 func (s *StubHarvester) DeleteVMBackup(_ context.Context, _, _ string) error {
 	s.DeleteVMBackupCalls++
-	return s.DeleteVMBackupErr
+	if s.DeleteVMBackupErr != nil {
+		return s.DeleteVMBackupErr
+	}
+	s.VMBackupPresent = false
+	return nil
 }
 func (s *StubHarvester) CreateRestorePVC(_ context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, labels map[string]string) error {
 	s.CreateRestorePVCCalls++
@@ -261,7 +347,11 @@ func (s *StubHarvester) SwapVMOSDisk(_ context.Context, _, _, instID, newImageRe
 func (s *StubHarvester) DeletePVC(_ context.Context, _, name string) error {
 	s.DeletePVCCalls++
 	s.LastDeletedPVCName = name
-	return s.DeletePVCErr
+	if s.DeletePVCErr != nil {
+		return s.DeletePVCErr
+	}
+	s.removePVC(name)
+	return nil
 }
 func (s *StubHarvester) GetVMOSDiskImageID(_ context.Context, _, _ string) (string, error) {
 	return s.OSDiskImageID, s.OSDiskImageIDErr
