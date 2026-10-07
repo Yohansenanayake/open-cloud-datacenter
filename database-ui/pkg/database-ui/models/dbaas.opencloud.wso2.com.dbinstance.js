@@ -1,7 +1,9 @@
 import SteveModel from '@shell/plugins/steve/steve-class';
 import { colorForState } from '@shell/plugins/dashboard-store/resource-class';
 import { ucFirst } from '@shell/utils/string';
+import { insertAt } from '@shell/utils/array';
 import { DB_PHASE } from '../types';
+import { DEFAULT_ALLOCATED_STORAGE_GIB, DEFAULT_INSTANCE_CLASS } from '../config/catalog';
 
 // Shown before the operator has reported a phase (e.g. a newly created instance)
 const PENDING = 'pending';
@@ -27,14 +29,44 @@ const PROBLEM_CONDITIONS = [
   'InterventionRequired',
   'CrashLoopHalted',
   'Degraded',
-  'DeletionBlocked',
   'StorageChangeRejected',
 ];
+
+// DeletionBlocked is True both while teardown waits for a running snapshot
+// (normal) and when teardown cannot proceed; only the latter is a problem.
+const DELETION_BLOCKED = 'DeletionBlocked';
+const DELETION_PROTECTED = 'DeletionProtected';
+const DELETION_PROBLEM_REASONS = [DELETION_PROTECTED, 'TeardownFailed', 'OperatorSecretCleanupFailed'];
 
 const DEFAULT_ENGINE = 'PostgreSQL';
 
 export default class DBInstance extends SteveModel {
+  // Create-form defaults. Optional fields stay unset so the operator's own
+  // defaults apply.
+  applyDefaults() {
+    this.spec = this.spec || {};
+    this.spec.dbInstanceClass = this.spec.dbInstanceClass || DEFAULT_INSTANCE_CLASS;
+    this.spec.allocatedStorage = this.spec.allocatedStorage || DEFAULT_ALLOCATED_STORAGE_GIB;
+  }
+
+  // No cards on the detail page: Shell's default Resources card lists the
+  // operator-owned child objects (VM, Secrets, ...), and with one card present
+  // Shell also adds a generic "Extras" card.
+  get cards() {
+    return [];
+  }
+
+  // Deletion has been requested. Shown as Deleting straight away, before the
+  // operator's first status update (it derives the same phase from this field).
+  get isDeleting() {
+    return !!this.metadata?.deletionTimestamp;
+  }
+
   get phase() {
+    if (this.isDeleting) {
+      return DB_PHASE.DELETING;
+    }
+
     return (this.status?.phase || PENDING).toLowerCase();
   }
 
@@ -47,6 +79,10 @@ export default class DBInstance extends SteveModel {
   }
 
   get stateColor() {
+    if (this.isDeleting && this.deletionProblem) {
+      return 'text-error';
+    }
+
     const color = PHASE_COLOR[this.phase];
 
     return color ? `text-${ color }` : colorForState(this.phase);
@@ -70,9 +106,17 @@ export default class DBInstance extends SteveModel {
       if (c.type === 'Accepted') {
         return c.status === 'False';
       }
+      if (c.type === DELETION_BLOCKED) {
+        return this.isDeleting && c.status === 'True' && DELETION_PROBLEM_REASONS.includes(c.reason);
+      }
 
       return PROBLEM_CONDITIONS.includes(c.type) && c.status === 'True';
     });
+  }
+
+  // Why deletion cannot finish, if it is stuck
+  get deletionProblem() {
+    return this.problemConditions.find((c) => c.type === DELETION_BLOCKED);
   }
 
   get hasProblem() {
@@ -98,6 +142,21 @@ export default class DBInstance extends SteveModel {
 
     this.problemConditions.forEach(add);
 
+    if (this.isDeleting) {
+      if (this.deletionProblem?.reason === DELETION_PROTECTED) {
+        add({ type: DELETION_BLOCKED, message: this.t('dbaas.instance.delete.protectedHint') });
+      }
+
+      // Teardown progress, e.g. waiting for a snapshot or for the VM to go away
+      const deletion = this.conditionFor(DELETION_BLOCKED);
+
+      if (deletion) {
+        add(deletion);
+      }
+
+      return out;
+    }
+
     const ready = this.conditionFor('Ready');
 
     if (ready && ready.status !== 'True' && this.phase !== DB_PHASE.STOPPED) {
@@ -109,6 +168,68 @@ export default class DBInstance extends SteveModel {
     }
 
     return out;
+  }
+
+  // --- Deletion (read by Shell's delete dialog) ---------------------------
+
+  // Disables the dialog's Delete button: the operator would refuse teardown,
+  // and a Kubernetes delete cannot be cancelled, leaving the instance stuck.
+  get preventDeletionMessage() {
+    if (this.spec?.deletionProtection && !this.isDeleting) {
+      return this.t('dbaas.instance.delete.protected', { name: this.nameDisplay });
+    }
+
+    return null;
+  }
+
+  get warnDeletionMessage() {
+    return this.spec?.backup ? this.t('dbaas.instance.delete.warningWithBackups') : this.t('dbaas.instance.delete.warning');
+  }
+
+  // Deleting destroys the data volume, so ask for the name to be typed
+  get confirmRemove() {
+    return true;
+  }
+
+  get _availableActions() {
+    const out = super._availableActions;
+    const canUpdate = this.canUpdate;
+    const protectedNow = !!this.spec?.deletionProtection;
+
+    insertAt(out, 0, {
+      action:  'goToConnection',
+      label:   this.t('dbaas.instance.actions.connection'),
+      icon:    'icon icon-network',
+      enabled: !!this.status?.endpoint?.address,
+    });
+
+    insertAt(out, 1, {
+      action:  protectedNow ? 'disableDeletionProtection' : 'enableDeletionProtection',
+      label:   this.t(protectedNow ? 'dbaas.instance.actions.disableDeletionProtection' : 'dbaas.instance.actions.enableDeletionProtection'),
+      icon:    protectedNow ? 'icon icon-unlock' : 'icon icon-lock',
+      enabled: canUpdate,
+    });
+
+    return out;
+  }
+
+  // Detail page, opened on its Connection tab
+  goToConnection() {
+    return this.currentRouter().push({ ...this.detailLocation, hash: '#connection' });
+  }
+
+  enableDeletionProtection() {
+    return this.setDeletionProtection(true);
+  }
+
+  disableDeletionProtection() {
+    return this.setDeletionProtection(false);
+  }
+
+  setDeletionProtection(enabled) {
+    return this.patch([{
+      op: 'add', path: '/spec/deletionProtection', value: enabled
+    }], {}, false, true);
   }
 
   get engineVersion() {
