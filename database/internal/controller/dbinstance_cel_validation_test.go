@@ -288,6 +288,22 @@ var _ = Describe("DBInstance and restore-target name rule", func() {
 			Expect(err.Error()).To(ContainSubstring("spec.targetInstanceName"))
 		}
 	})
+
+	// Both would otherwise be accepted and fail late: an empty snapshot
+	// name at lookup, an empty network only once the target is created.
+	It("rejects a restore with an empty snapshot name or network", func() {
+		noSnapshot := restore("cel-restore-no-snapshot", "orders-restored")
+		noSnapshot.Spec.SnapshotRef.Name = ""
+		err := k8sClient.Create(ctx, noSnapshot)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("snapshotRef.name must not be empty"))
+
+		noNetwork := restore("cel-restore-no-network", "orders-restored")
+		noNetwork.Spec.NetworkRef = ""
+		err = k8sClient.Create(ctx, noNetwork)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("spec.networkRef"))
+	})
 })
 
 // restoredFrom's field rule (self == oldSelf) only runs when both objects

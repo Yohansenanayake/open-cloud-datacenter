@@ -33,6 +33,7 @@ type DBRestoreSpec struct {
 	// namespace. Must be a completed (Ready) snapshot; no automatic
 	// latest-snapshot selection.
 	// +required
+	// +kubebuilder:validation:XValidation:rule="self.name != ''",message="snapshotRef.name must not be empty"
 	SnapshotRef corev1.LocalObjectReference `json:"snapshotRef"`
 
 	// Mode selects the recovery mechanism. Snapshot (default) uses only the
@@ -63,6 +64,7 @@ type DBRestoreSpec struct {
 	// NetworkRef is the target instance's network — user-specified, never
 	// inherited from the source (design §2.4).
 	// +required
+	// +kubebuilder:validation:MinLength=1
 	NetworkRef string `json:"networkRef"`
 
 	// StaticNetwork is the target instance's static IP config, if any —

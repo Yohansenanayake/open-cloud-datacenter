@@ -130,6 +130,7 @@ spec:
                 description: |-
                   NetworkRef is the target instance's network — user-specified, never
                   inherited from the source (design §2.4).
+                minLength: 1
                 type: string
               snapshotRef:
                 description: |-
@@ -148,6 +149,9 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: snapshotRef.name must not be empty
+                  rule: self.name != ''
               staticNetwork:
                 description: |-
                   StaticNetwork is the target instance's static IP config, if any —
