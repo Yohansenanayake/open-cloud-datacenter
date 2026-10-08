@@ -302,7 +302,6 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		MasterUser:             masterUser,
 		Port:                   specPortWithDefault(inst.Spec.Port, defaults.Port),
 		CloudInitSecretName:    cloudInitName,
-		DNSServerIP:            inst.Spec.DNSServerIP,
 		Owner:                  ownerRefFor(inst),
 	})
 	// Record the ref even on partial failure: the name is deterministic and

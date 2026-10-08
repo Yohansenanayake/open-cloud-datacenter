@@ -145,17 +145,6 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="staticNetwork is immutable after creation"
 	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
 
-	// DNSServerIP, when set, pins the VM's resolver via KubeVirt
-	// dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
-	// subnets: KubeVirt's bridge-mode virt-launcher runs an internal DHCP
-	// server that otherwise copies the launcher pod's cluster resolv.conf
-	// (unreachable cluster DNS) into the VM, so the VM can't resolve the apt
-	// archive and cloud-init's package install fails. The control plane
-	// (dc-api) supplies the per-VPC CoreDNS address here. Empty leaves
-	// KubeVirt's default DNS behaviour (correct for cluster-routable VLANs).
-	// +optional
-	DNSServerIP string `json:"dnsServerIP,omitempty"`
-
 	// VMPassword sets the default console/SSH password for the VM user
 	// (ubuntu). For development and debugging only — leave empty in
 	// production. Immutable after first reconcile.

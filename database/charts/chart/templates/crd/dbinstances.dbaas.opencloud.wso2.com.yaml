@@ -176,17 +176,6 @@ spec:
                   finalizer refuses to tear the instance down.
                   Mutable.
                 type: boolean
-              dnsServerIP:
-                description: |-
-                  DNSServerIP, when set, pins the VM's resolver via KubeVirt
-                  dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
-                  subnets: KubeVirt's bridge-mode virt-launcher runs an internal DHCP
-                  server that otherwise copies the launcher pod's cluster resolv.conf
-                  (unreachable cluster DNS) into the VM, so the VM can't resolve the apt
-                  archive and cloud-init's package install fails. The control plane
-                  (dc-api) supplies the per-VPC CoreDNS address here. Empty leaves
-                  KubeVirt's default DNS behaviour (correct for cluster-routable VLANs).
-                type: string
               engineVersion:
                 description: |-
                   EngineVersion is the PostgreSQL major version, e.g. "16". Resolved

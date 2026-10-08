@@ -210,12 +210,6 @@ type VMCreateParams struct {
 	// CloudInitSecretName is the pre-created ephemeral Secret (userdata +
 	// networkdata) this VM's cloudInitNoCloud volume references.
 	CloudInitSecretName string
-	// DNSServerIP, when non-empty, pins the VM's resolver via KubeVirt
-	// dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
-	// subnets to defeat the virt-launcher internal-DHCP DNS race (it would
-	// otherwise inject unreachable cluster DNS, breaking apt during
-	// cloud-init). Supplied by the control plane (per-VPC CoreDNS address).
-	DNSServerIP string
 	// Owner, when non-nil, is stamped as the controller owner reference on the
 	// VM this call creates, so Owns() watches fire and GC backs up the
 	// finalizer teardown.
