@@ -1544,3 +1544,92 @@ func TestDBRestoreFailureIsAWarningAndPVCCleanupIsAnnounced(t *testing.T) {
 		}
 	}
 }
+
+// ---- PVC failures with a target already created ----
+
+// A target whose restore PVC is lost, not ours, or gone can never become a
+// usable restore: it's torn down when the restore fails, as on the timeout
+// and rejection paths, rather than left running with nothing to delete it.
+func TestDBRestorePVCFailureTearsDownTheUnfinishedTarget(t *testing.T) {
+	lost := func(restore *dbaasv1.DBRestore) *corev1.PersistentVolumeClaim {
+		return ourPVC(restore, corev1.ClaimLost)
+	}
+	notOurs := func(restore *dbaasv1.DBRestore) *corev1.PersistentVolumeClaim {
+		pvc := ourPVC(restore, corev1.ClaimBound)
+		pvc.Labels = nil
+		return pvc
+	}
+	gone := func(*dbaasv1.DBRestore) *corev1.PersistentVolumeClaim { return nil }
+	for name, tc := range map[string]struct {
+		pvc  func(*dbaasv1.DBRestore) *corev1.PersistentVolumeClaim
+		want dbaasv1.ConditionReason
+	}{
+		"PVC lost":     {lost, dbaasv1.ReasonRestorePVCLost},
+		"PVC not ours": {notOurs, dbaasv1.ReasonRestorePVCConflict},
+		"PVC gone":     {gone, dbaasv1.ReasonRestorePVCLost},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snap := readySnapshot()
+			restore := capturedRestore(snap)
+			target := ourTarget(restore)
+			target.Finalizers = []string{dbaasv1.FinalizerName} // DBInstanceReconciler's own teardown gate
+			restore.Status.TargetInstanceUID = target.UID
+			var pvcs []*corev1.PersistentVolumeClaim
+			if pvc := tc.pvc(restore); pvc != nil {
+				pvcs = append(pvcs, pvc)
+			}
+			r, c := newRestoreReconciler(t, stubWithPVCs(pvcs...), restore, snap, target)
+
+			reconcileRestore(t, r, restore)
+
+			wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageFailed, tc.want)
+			if got, exists := targetExists(t, c, restore); exists && got.DeletionTimestamp.IsZero() {
+				t.Fatal("the unfinished target must be deleted when its restore fails")
+			}
+		})
+	}
+}
+
+// A target already Ready on the API server means the restore succeeded:
+// that's recorded, and the target is never deleted.
+func TestDBRestorePVCFailureNeverDeletesAReadyTarget(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	target := withCondition(ourTarget(restore), dbaasv1.ConditionReady, metav1.ConditionTrue, dbaasv1.ReasonDBInstanceReady, "ready")
+	restore.Status.TargetInstanceUID = target.UID
+	r, c := newRestoreReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimLost)), restore, snap, target)
+
+	reconcileRestore(t, r, restore)
+
+	wantStatus(t, getRestore(t, c, restore), dbaasv1.RestoreStageSucceeded, dbaasv1.ReasonRestoreSucceeded)
+	if got, exists := targetExists(t, c, restore); !exists || !got.DeletionTimestamp.IsZero() {
+		t.Fatal("a Ready target must never be deleted")
+	}
+}
+
+// The delete is preconditioned on the target just confirmed: if it changed
+// in between, the restore is re-judged next pass, not failed now.
+func TestDBRestorePVCFailureRequeuesWhenTheTargetChangedUnderIt(t *testing.T) {
+	snap := readySnapshot()
+	restore := capturedRestore(snap)
+	target := ourTarget(restore)
+	restore.Status.TargetInstanceUID = target.UID
+	r, c := newRestoreReconciler(t, stubWithPVCs(ourPVC(restore, corev1.ClaimLost)), restore, snap, target)
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*dbaasv1.DBInstance); ok {
+				return apierrors.NewConflict(schema.GroupResource{Resource: "dbinstances"}, obj.GetName(), fmt.Errorf("changed"))
+			}
+			return cl.Delete(ctx, obj, opts...)
+		},
+	})
+
+	res := reconcileRestore(t, r, restore)
+
+	if !res.Requeue {
+		t.Fatalf("result = %+v, want a requeue to re-judge the changed target", res)
+	}
+	if got := getRestore(t, c, restore); got.Status.Stage == dbaasv1.RestoreStageFailed {
+		t.Fatal("must not fail while the target couldn't be confirmed")
+	}
+}

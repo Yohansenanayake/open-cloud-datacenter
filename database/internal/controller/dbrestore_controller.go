@@ -425,14 +425,12 @@ func (r *DBRestoreReconciler) reconcileRestorePass(ctx context.Context, restore 
 	}
 	if pvc != nil {
 		if !isOurRestorePVC(pvc, restore) {
-			failRestore(restore, dbaasv1.ReasonRestorePVCConflict,
+			return r.failTearingDownTarget(ctx, restore, dbaasv1.ReasonRestorePVCConflict,
 				fmt.Sprintf("PVC %q exists but was not created by this restore from VolumeSnapshot %q", pvcName, restore.Status.DataVolumeSnapshotName))
-			return ctrl.Result{}, nil
 		}
 		if !pvc.DeletionTimestamp.IsZero() || pvc.Status.Phase == corev1.ClaimLost {
-			failRestore(restore, dbaasv1.ReasonRestorePVCLost,
+			return r.failTearingDownTarget(ctx, restore, dbaasv1.ReasonRestorePVCLost,
 				fmt.Sprintf("restore PVC %q is lost or being deleted (phase %q)", pvcName, pvc.Status.Phase))
-			return ctrl.Result{}, nil
 		}
 	}
 	pvcBound := pvc != nil && pvc.Status.Phase == corev1.ClaimBound
@@ -451,9 +449,8 @@ func (r *DBRestoreReconciler) reconcileRestorePass(ctx context.Context, restore 
 		if owned {
 			// The target's VM expects this PVC; recreating it now would race
 			// Harvester's VM controller, which would create a blank one.
-			failRestore(restore, dbaasv1.ReasonRestorePVCLost,
+			return r.failTearingDownTarget(ctx, restore, dbaasv1.ReasonRestorePVCLost,
 				fmt.Sprintf("restore PVC %q disappeared after DBInstance %q was created", pvcName, target.Name))
-			return ctrl.Result{}, nil
 		}
 		if err := r.createRestorePVC(ctx, restore, pvcName); err != nil {
 			return ctrl.Result{}, err
@@ -838,6 +835,31 @@ func setRestoreProgress(restore *dbaasv1.DBRestore, stage string, reason dbaasv1
 	restore.Status.Stage = stage
 	restore.Status.Reason = string(reason)
 	restore.Status.Message = msg
+}
+
+// failTearingDownTarget fails the restore after deleting the unfinished
+// target it created, as the timeout and rejection paths do (design §7): a
+// target whose restore PVC is lost or not ours can never become a usable
+// restore, and nothing else would delete it, or the disks it holds. The
+// target is confirmed live first. One that is already Ready means the
+// restore succeeded, so that is recorded instead and the target is never
+// touched — requeueing for it, as the timeout path does, would only hit
+// this same failure again before the readiness check.
+func (r *DBRestoreReconciler) failTearingDownTarget(ctx context.Context, restore *dbaasv1.DBRestore, reason dbaasv1.ConditionReason, msg string) (ctrl.Result, error) {
+	live, owned, err := r.observeTarget(ctx, r.APIReader, restore)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if owned && live.DeletionTimestamp.IsZero() {
+		if live.Status.IsConditionTrue(dbaasv1.ConditionReady) {
+			return r.observeTargetReadiness(ctx, restore, live)
+		}
+		if res, err := r.deleteConfirmedTarget(ctx, live); err != nil || res.Requeue {
+			return res, err
+		}
+	}
+	failRestore(restore, reason, msg)
+	return ctrl.Result{}, nil
 }
 
 func failRestore(restore *dbaasv1.DBRestore, reason dbaasv1.ConditionReason, msg string) {
