@@ -139,7 +139,6 @@ spec:
   allocatedStorage: 5
   dbName: testdb
   masterUsername: dbadmin
-  manageMasterUserPassword: true
   networkRef: <namespace>/<nad-name>
   running: true
 ```

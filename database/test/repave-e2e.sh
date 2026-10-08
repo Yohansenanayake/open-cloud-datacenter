@@ -334,7 +334,6 @@ spec:
   engineVersion: "${engine}"
   dbName: eoltest
   masterUsername: dbadmin
-  manageMasterUserPassword: true
   networkRef: ${netref}
   running: true
 YAML
@@ -731,7 +730,6 @@ spec:
   allocatedStorage: ${storage}
   dbName: badconfigtest
   masterUsername: dbadmin
-  manageMasterUserPassword: true
   networkRef: ${netref}
   running: true
 YAML
