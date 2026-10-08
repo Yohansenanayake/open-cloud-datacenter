@@ -14,8 +14,10 @@ COPY . .
 # may not be able to execute at all.
 ARG TARGETOS
 ARG TARGETARCH
+# Reported in the startup log, so a running pod says which release it is.
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-    go build -ldflags="-w -s" -o /registry-provisioner ./cmd/main.go
+    go build -ldflags="-w -s -X main.version=${VERSION}" -o /registry-provisioner ./cmd/main.go
 
 # --- Runtime image ---
 FROM gcr.io/distroless/static-debian12:nonroot
