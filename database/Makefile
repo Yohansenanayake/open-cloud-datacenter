@@ -106,6 +106,24 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+##@ Docs
+
+.PHONY: docs-install
+docs-install: ## Install docs site dependencies.
+	cd docs-site && npm install
+
+.PHONY: docs-serve
+docs-serve: ## Run the docs site dev server (http://localhost:3000).
+	cd docs-site && npm start
+
+.PHONY: docs-build
+docs-build: ## Build the docs site (fails on broken links).
+	cd docs-site && npm run build
+
+.PHONY: docs-preview
+docs-preview: docs-build ## Build, then serve the production build (search works here).
+	cd docs-site && npm run serve
+
 ##@ Build
 
 .PHONY: build
