@@ -41,11 +41,11 @@ type RobotAccount struct {
 }
 
 // NewClient returns a Harbor client that verifies the server certificate.
-func NewClient(baseURL, adminPassword string) *Client {
+func NewClient(baseURL, username, password string) *Client {
 	return &Client{
 		baseURL:  baseURL,
-		username: "admin",
-		password: adminPassword,
+		username: username,
+		password: password,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -55,94 +55,19 @@ func NewClient(baseURL, adminPassword string) *Client {
 	}
 }
 
-// Ping checks whether Harbor is up and accepting requests.
-func (c *Client) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/v2.0/ping", nil)
-	if err != nil {
-		return fmt.Errorf("build ping request: %w", err)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err // pods are not accepting connections yet
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("harbor ping returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
-// Configure sets Harbor system-level configuration.
-func (c *Client) Configure(ctx context.Context) error {
-	body := map[string]interface{}{
-		"auth_mode":                    "db_auth",
-		"project_creation_restriction": "adminonly",
-		"robot_token_duration":         365,
-		"self_registration":            false,
-		"read_only":                    false,
-	}
-	return c.put(ctx, "/api/v2.0/configurations", body)
-}
-
-// schedule is the subset of Harbor's schedule object this client needs. Harbor
-// uses the same shape for every scheduled system job.
-type schedule struct {
-	Schedule struct {
-		Type string `json:"type"`
-		Cron string `json:"cron"`
-	} `json:"schedule"`
-}
-
-// ensureSchedule points one of Harbor's scheduled system jobs at cron, creating
-// the schedule when absent and rewriting it only when it differs — the same
-// read-compare-write shape as EnsureProjectQuota. Harbor's cron carries six
-// fields, the first being seconds.
-func (c *Client) ensureSchedule(ctx context.Context, path, cron string) error {
-	var current schedule
-	if err := c.get(ctx, path, &current, http.StatusOK); err != nil {
-		return fmt.Errorf("get schedule %s: %w", path, err)
-	}
-	if current.Schedule.Type == "Schedule" && current.Schedule.Cron == cron {
-		return nil // already correct
-	}
-
-	body := map[string]interface{}{
-		"schedule": map[string]string{"type": "Schedule", "cron": cron},
-	}
-	// POST creates the schedule, PUT updates an existing one; Harbor rejects the
-	// wrong verb, so pick by whether one is already configured.
-	if current.Schedule.Type == "" || current.Schedule.Type == "None" {
-		return c.do(ctx, "POST", path, body, nil, http.StatusCreated, http.StatusOK)
-	}
-	return c.put(ctx, path, body)
-}
-
-// EnsureGCSchedule sets Harbor's garbage-collection schedule to cron, creating
-// it when absent and rewriting it only when it differs — the same
-// read-compare-write shape as EnsureProjectQuota.
+// VerifyAccess confirms Harbor answers and accepts these credentials.
 //
-// GC is not an optimisation here, it is what makes the operator's capacity
-// accounting sound. Deleting a project removes its manifests but leaves the
-// blobs on disk, and those orphaned blobs belong to no project's quota, so they
-// are invisible to both CommittedStorageBytes and UsedStorageBytes while still
-// consuming the registry volume. Without a sweep that term grows without bound
-// and nothing the operator measures can see it.
-//
-// delete_untagged is deliberately NOT set. It would additionally remove
-// artifacts that have lost their tag, which breaks any deployment pinning an
-// image by digest after a tag moves. It is also unnecessary for reclaiming a
-// deleted Registry: deleting the project removes its manifests, so its blobs
-// are already unreferenced and a plain sweep collects them.
-func (c *Client) EnsureGCSchedule(ctx context.Context, cron string) error {
-	return c.ensureSchedule(ctx, "/api/v2.0/system/gc/schedule", cron)
-}
-
-// EnsureScanAllSchedule sets Harbor's scan-all schedule to cron, so every
-// artifact is periodically rescanned against updated vulnerability data. A scan
-// records what was known at the time it ran, so without a repeating sweep a
-// CVE published after an image is pushed never appears against it.
-func (c *Client) EnsureScanAllSchedule(ctx context.Context, cron string) error {
-	return c.ensureSchedule(ctx, "/api/v2.0/system/scanAll/schedule", cron)
+// It calls /users/current rather than /ping, because /ping answers before
+// authentication: a Harbor reachable with the wrong credentials would look
+// healthy right up until the first Registry failed. Listing projects is not
+// enough either — that endpoint answers 200 anonymously once any project is
+// public. /users/current has no anonymous response: it is 401 without valid
+// credentials, and returns the acting user otherwise.
+func (c *Client) VerifyAccess(ctx context.Context) error {
+	var out struct {
+		Username string `json:"username"`
+	}
+	return c.get(ctx, "/api/v2.0/users/current", &out, http.StatusOK)
 }
 
 // CreateHarborProject creates a Harbor project with an initial storage quota
@@ -216,54 +141,6 @@ func (c *Client) EnsureProjectQuota(ctx context.Context, projectID, storageLimit
 		return fmt.Errorf("update quota %d: %w", quotas[0].ID, err)
 	}
 	return nil
-}
-
-// StorageTotals is the storage committed to and consumed by every project in a
-// Harbor instance.
-type StorageTotals struct {
-	// Committed is the sum of every project's hard storage limit. Projects with
-	// an unlimited quota (-1) are excluded, since they cannot be summed.
-	Committed int64
-	// Used is the sum of every project's actual consumption.
-	Used int64
-	// Unlimited counts projects whose quota is -1.
-	Unlimited int
-}
-
-// ProjectStorageTotals sums the hard limits and usage of every project quota in
-// Harbor. Harbor reports both on the quota object, so capacity planning needs
-// no metrics pipeline.
-func (c *Client) ProjectStorageTotals(ctx context.Context) (StorageTotals, error) {
-	var totals StorageTotals
-
-	for page := 1; page <= maxPages; page++ {
-		var quotas []struct {
-			Hard struct {
-				Storage int64 `json:"storage"`
-			} `json:"hard"`
-			Used struct {
-				Storage int64 `json:"storage"`
-			} `json:"used"`
-		}
-		path := fmt.Sprintf("/api/v2.0/quotas?reference=project&page=%d&page_size=%d", page, pageSize)
-		if err := c.get(ctx, path, &quotas, http.StatusOK); err != nil {
-			return StorageTotals{}, fmt.Errorf("list project quotas page %d: %w", page, err)
-		}
-		for _, q := range quotas {
-			if q.Hard.Storage < 0 {
-				totals.Unlimited++
-			} else {
-				totals.Committed += q.Hard.Storage
-			}
-			if q.Used.Storage > 0 {
-				totals.Used += q.Used.Storage
-			}
-		}
-		if len(quotas) < pageSize {
-			return totals, nil
-		}
-	}
-	return StorageTotals{}, fmt.Errorf("list project quotas: exceeded %d pages", maxPages)
 }
 
 // robotFullName is how Harbor names a project-scoped robot: the account created
@@ -385,6 +262,12 @@ func (c *Client) ListRepositories(ctx context.Context, projectName string) ([]st
 		path := fmt.Sprintf("/api/v2.0/projects/%s/repositories?page=%d&page_size=%d",
 			url.PathEscape(projectName), page, pageSize)
 		if err := c.get(ctx, path, &batch, http.StatusOK); err != nil {
+			// A project deleted outside the operator has nothing left to list.
+			// Reporting that as an error would hold the finalizer forever.
+			var se *StatusError
+			if errors.As(err, &se) && se.StatusCode == http.StatusNotFound {
+				return nil, nil
+			}
 			return nil, fmt.Errorf("list repositories in %s page %d: %w", projectName, page, err)
 		}
 		for _, repo := range batch {

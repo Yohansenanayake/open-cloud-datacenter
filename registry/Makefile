@@ -88,7 +88,7 @@ undeploy: kustomize ## Remove the operator from the cluster.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy-local
-deploy-local: kustomize ## Deploy using config/local — your real BASE_DOMAIN/STORAGE_CLASS (see config/local/manager_local_patch.yaml.example).
+deploy-local: kustomize ## Deploy using config/local — your real HARBOR_URL and credentials Secret (see config/local/manager_local_patch.yaml.example).
 	@test -f config/local/manager_local_patch.yaml || { \
 		echo "config/local/manager_local_patch.yaml not found."; \
 		echo "Copy config/local/manager_local_patch.yaml.example to config/local/manager_local_patch.yaml and fill in your real values first."; \

@@ -47,59 +47,91 @@ func TestRequireEnv(t *testing.T) {
 	})
 }
 
-func TestLoadErrorsWithoutBaseDomain(t *testing.T) {
-	t.Setenv("BASE_DOMAIN", "")
-	if _, err := Load(); err == nil {
-		t.Fatal("Load() error = nil, want an error when BASE_DOMAIN is unset")
-	}
-}
-
 func TestLoad(t *testing.T) {
-	t.Run("required BASE_DOMAIN present, defaults fill the rest", func(t *testing.T) {
-		t.Setenv("BASE_DOMAIN", "registry.example.com")
+	// Load requires both to be set; each subtest overrides from this baseline.
+	setRequired := func(t *testing.T) {
+		t.Setenv("HARBOR_URL", "https://registry.example.com")
+		t.Setenv("POD_NAMESPACE", "registry-system")
+	}
+
+	t.Run("required vars present, defaults fill the rest", func(t *testing.T) {
+		setRequired(t)
 		cfg, err := Load()
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
-		if cfg.Helm.BaseDomain != "registry.example.com" {
-			t.Errorf("Helm.BaseDomain = %q, want %q", cfg.Helm.BaseDomain, "registry.example.com")
+		if cfg.Harbor.URL != "https://registry.example.com" {
+			t.Errorf("Harbor.URL = %q, want %q", cfg.Harbor.URL, "https://registry.example.com")
 		}
-		if cfg.Helm.StorageClass != "longhorn" {
-			t.Errorf("Helm.StorageClass default = %q, want %q", cfg.Helm.StorageClass, "longhorn")
+		if cfg.Harbor.Namespace != "registry-system" {
+			t.Errorf("Harbor.Namespace = %q, want %q", cfg.Harbor.Namespace, "registry-system")
 		}
-		if cfg.Helm.CertIssuer != "letsencrypt-prod" {
-			t.Errorf("Helm.CertIssuer default = %q, want %q", cfg.Helm.CertIssuer, "letsencrypt-prod")
+		if cfg.Harbor.CredentialsSecret != "harbor-credentials" {
+			t.Errorf("Harbor.CredentialsSecret default = %q, want %q", cfg.Harbor.CredentialsSecret, "harbor-credentials")
 		}
 	})
 
-	t.Run("missing required BASE_DOMAIN errors rather than silently defaulting", func(t *testing.T) {
-		t.Setenv("BASE_DOMAIN", "")
+	t.Run("a trailing slash on HARBOR_URL is trimmed", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("HARBOR_URL", "https://registry.example.com/")
 		cfg, err := Load()
-		if err == nil {
-			t.Fatal("Load() error = nil, want an error when BASE_DOMAIN is unset")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
 		}
-		if cfg != nil {
-			t.Errorf("Load() config = %v, want nil alongside the error", cfg)
-		}
-		if !strings.Contains(err.Error(), "BASE_DOMAIN") {
-			t.Errorf("error = %v, want it to name BASE_DOMAIN", err)
+		// Paths are appended directly, so a trailing slash would produce "//api/...".
+		if cfg.Harbor.URL != "https://registry.example.com" {
+			t.Errorf("Harbor.URL = %q, want the trailing slash trimmed", cfg.Harbor.URL)
 		}
 	})
 
 	t.Run("env vars override every default", func(t *testing.T) {
-		t.Setenv("BASE_DOMAIN", "registry.example.com")
-		t.Setenv("STORAGE_CLASS", "custom-sc")
-		t.Setenv("CERT_ISSUER", "selfsigned-issuer")
+		setRequired(t)
+		t.Setenv("HARBOR_CREDENTIALS_SECRET", "custom-creds")
+		t.Setenv("METRICS_CERT_DIR", "/tmp/certs")
 
 		cfg, err := Load()
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
-		if cfg.Helm.StorageClass != "custom-sc" {
-			t.Errorf("Helm.StorageClass = %q, want override %q", cfg.Helm.StorageClass, "custom-sc")
+		if cfg.Harbor.CredentialsSecret != "custom-creds" {
+			t.Errorf("Harbor.CredentialsSecret = %q, want override %q", cfg.Harbor.CredentialsSecret, "custom-creds")
 		}
-		if cfg.Helm.CertIssuer != "selfsigned-issuer" {
-			t.Errorf("Helm.CertIssuer = %q, want override %q", cfg.Helm.CertIssuer, "selfsigned-issuer")
+		if cfg.MetricsCertDir != "/tmp/certs" {
+			t.Errorf("MetricsCertDir = %q, want override %q", cfg.MetricsCertDir, "/tmp/certs")
+		}
+	})
+
+	t.Run("missing required vars error rather than silently defaulting", func(t *testing.T) {
+		for _, missing := range []string{"HARBOR_URL", "POD_NAMESPACE"} {
+			t.Run(missing, func(t *testing.T) {
+				setRequired(t)
+				t.Setenv(missing, "")
+
+				cfg, err := Load()
+				if err == nil {
+					t.Fatalf("Load() error = nil, want an error when %s is unset", missing)
+				}
+				if cfg != nil {
+					t.Errorf("Load() config = %v, want nil alongside the error", cfg)
+				}
+				if !strings.Contains(err.Error(), missing) {
+					t.Errorf("error = %v, want it to name %s", err, missing)
+				}
+			})
+		}
+	})
+
+	t.Run("an unusable HARBOR_URL is rejected at startup", func(t *testing.T) {
+		// Every reconcile would fail identically for the same reason, so this
+		// belongs at startup as one clear message rather than per Registry.
+		for _, bad := range []string{"registry.example.com", "ftp://registry.example.com", "https://", "://nope"} {
+			t.Run(bad, func(t *testing.T) {
+				setRequired(t)
+				t.Setenv("HARBOR_URL", bad)
+				if _, err := Load(); err == nil {
+					t.Errorf("Load() error = nil, want HARBOR_URL %q rejected", bad)
+				}
+			})
 		}
 	})
 }

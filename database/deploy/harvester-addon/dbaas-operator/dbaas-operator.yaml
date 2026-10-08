@@ -1,0 +1,30 @@
+# Example Addon manifest — replace <registry> and <version> before applying.
+# See database/INSTALL.md for the full install walkthrough. For
+# local testing against your own GHCR (before WSO2 registry access exists —
+# see my-docs/release/D001 #1), copy this to dbaas-operator.local.yaml
+# (gitignored) and fill in your own values there — never commit a personal
+# registry path at this path.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dbaas-system
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: Addon
+metadata:
+  name: dbaas-operator
+  namespace: dbaas-system
+  labels:
+    addon.harvesterhci.io/experimental: "true"
+spec:
+  enabled: true
+  # Harvester's Addon CRD marks `repo` as required (key must be present),
+  # but the underlying klipper-helm install script only does `helm repo add`
+  # when REPO is non-empty — and `helm repo add` doesn't understand oci://.
+  # An explicit empty string satisfies the schema without breaking the OCI
+  # pull, which happens entirely through `chart` below.
+  repo: ""
+  chart: oci://<registry>/charts/dbaas-operator
+  version: <version>
+  valuesContent: |-
+    {}

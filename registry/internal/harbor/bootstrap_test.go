@@ -13,75 +13,7 @@ import (
 func newTestClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, "test-admin-pass"), srv
-}
-
-func TestPing(t *testing.T) {
-	tests := []struct {
-		name       string
-		statusCode int
-		wantErr    bool
-	}{
-		{"harbor up", http.StatusOK, false},
-		{"pods scheduled but not ready", http.StatusServiceUnavailable, true},
-		{"harbor core crashed", http.StatusInternalServerError, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cli, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/v2.0/ping" {
-					t.Errorf("Ping hit unexpected path %q", r.URL.Path)
-				}
-				if r.Method != http.MethodGet {
-					t.Errorf("Ping used method %q, want GET", r.Method)
-				}
-				w.WriteHeader(tt.statusCode)
-			})
-			err := cli.Ping(context.Background())
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Ping() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestConfigure(t *testing.T) {
-	tests := []struct {
-		name       string
-		statusCode int
-		wantErr    bool
-	}{
-		{"applied, 200", http.StatusOK, false},
-		{"applied, 204 no content", http.StatusNoContent, false},
-		{"rejected", http.StatusBadRequest, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var gotBody map[string]interface{}
-			cli, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPut {
-					t.Errorf("Configure used method %q, want PUT", r.Method)
-				}
-				if r.URL.Path != "/api/v2.0/configurations" {
-					t.Errorf("Configure hit unexpected path %q", r.URL.Path)
-				}
-				_ = json.NewDecoder(r.Body).Decode(&gotBody)
-				w.WriteHeader(tt.statusCode)
-			})
-			err := cli.Configure(context.Background())
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Configure() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if !tt.wantErr {
-				if gotBody["auth_mode"] != "db_auth" {
-					t.Errorf("Configure sent auth_mode=%v, want db_auth", gotBody["auth_mode"])
-				}
-				if gotBody["self_registration"] != false {
-					t.Errorf("Configure sent self_registration=%v, want false", gotBody["self_registration"])
-				}
-			}
-		})
-	}
+	return NewClient(srv.URL, "test-user", "test-admin-pass"), srv
 }
 
 func TestCreateHarborProject(t *testing.T) {
@@ -428,18 +360,16 @@ func TestDeleteProject(t *testing.T) {
 	})
 }
 
-// Ping deliberately bypasses do() — Harbor's /ping endpoint needs no auth, so
-// it's not the right call to prove auth headers are set. Configure goes
-// through put() -> do(), which is where Basic Auth and Content-Type actually
-// get attached.
+// CreateHarborProject goes through post() -> do(), which is where Basic Auth
+// and Content-Type actually get attached.
 func TestDo_SetsBasicAuthAndHeaders(t *testing.T) {
 	cli, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok {
 			t.Fatal("request had no Basic Auth credentials")
 		}
-		if user != "admin" {
-			t.Errorf("BasicAuth username = %q, want %q", user, "admin")
+		if user != "test-user" {
+			t.Errorf("BasicAuth username = %q, want %q", user, "test-user")
 		}
 		if pass != "test-admin-pass" {
 			t.Errorf("BasicAuth password = %q, want %q", pass, "test-admin-pass")
@@ -447,166 +377,86 @@ func TestDo_SetsBasicAuthAndHeaders(t *testing.T) {
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
 		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusCreated)
 	})
-	if err := cli.Configure(context.Background()); err != nil {
-		t.Fatalf("Configure() error = %v", err)
+	if err := cli.CreateHarborProject(context.Background(), "proj", 1); err != nil {
+		t.Fatalf("CreateHarborProject() error = %v", err)
 	}
 }
 
-func TestProjectStorageTotals(t *testing.T) {
-	t.Run("sums hard and used across projects", func(t *testing.T) {
-		cli, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if got := r.URL.Query().Get("reference"); got != "project" {
-				t.Errorf("reference = %q, want project", got)
+func TestListRepositories(t *testing.T) {
+	t.Run("strips the project prefix", func(t *testing.T) {
+		c, srv := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"name":"proj/app"},{"name":"proj/team/api"}]`))
+		})
+		defer srv.Close()
+
+		got, err := c.ListRepositories(context.Background(), "proj")
+		if err != nil {
+			t.Fatalf("ListRepositories() error = %v", err)
+		}
+		want := []string{"app", "team/api"}
+		if len(got) != len(want) {
+			t.Fatalf("ListRepositories() = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("ListRepositories()[%d] = %q, want %q", i, got[i], want[i])
 			}
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode([]map[string]interface{}{
-				{"hard": map[string]interface{}{"storage": 5}, "used": map[string]interface{}{"storage": 2}},
-				{"hard": map[string]interface{}{"storage": 20}, "used": map[string]interface{}{"storage": 7}},
-			})
-		})
-		got, err := cli.ProjectStorageTotals(context.Background())
-		if err != nil {
-			t.Fatalf("ProjectStorageTotals() error = %v", err)
-		}
-		if got.Committed != 25 {
-			t.Errorf("Committed = %d, want 25", got.Committed)
-		}
-		if got.Used != 9 {
-			t.Errorf("Used = %d, want 9", got.Used)
-		}
-		if got.Unlimited != 0 {
-			t.Errorf("Unlimited = %d, want 0", got.Unlimited)
 		}
 	})
 
-	// An unlimited quota commits an unbounded amount, so it must be counted
-	// separately rather than folded into the sum as -1.
-	t.Run("unlimited quotas are counted, not summed", func(t *testing.T) {
-		cli, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode([]map[string]interface{}{
-				{"hard": map[string]interface{}{"storage": 5}, "used": map[string]interface{}{"storage": 1}},
-				{"hard": map[string]interface{}{"storage": -1}, "used": map[string]interface{}{"storage": 3}},
-			})
+	t.Run("reports a project deleted elsewhere as empty", func(t *testing.T) {
+		c, srv := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"errors":[{"code":"NOT_FOUND"}]}`))
 		})
-		got, err := cli.ProjectStorageTotals(context.Background())
-		if err != nil {
-			t.Fatalf("ProjectStorageTotals() error = %v", err)
-		}
-		if got.Committed != 5 {
-			t.Errorf("Committed = %d, want 5 (the -1 must not be added)", got.Committed)
-		}
-		if got.Unlimited != 1 {
-			t.Errorf("Unlimited = %d, want 1", got.Unlimited)
-		}
-		if got.Used != 4 {
-			t.Errorf("Used = %d, want 4", got.Used)
-		}
-	})
+		defer srv.Close()
 
-	t.Run("no projects yields zero totals", func(t *testing.T) {
-		cli, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode([]map[string]interface{}{})
-		})
-		got, err := cli.ProjectStorageTotals(context.Background())
+		// An error here would hold the finalizer and leave the Registry
+		// stuck in Terminating, because DeleteProject never runs.
+		got, err := c.ListRepositories(context.Background(), "gone")
 		if err != nil {
-			t.Fatalf("ProjectStorageTotals() error = %v", err)
+			t.Fatalf("ListRepositories() error = %v, want nil on 404", err)
 		}
-		if got.Committed != 0 || got.Used != 0 {
-			t.Errorf("got %+v, want zero totals", got)
+		if len(got) != 0 {
+			t.Errorf("ListRepositories() = %v, want no repositories", got)
 		}
 	})
 }
 
-// GC keeps the operator's capacity accounting sound: blobs left by a deleted
-// project belong to no quota, so they are invisible to ProjectStorageTotals
-// while still filling the volume. The schedule must be re-asserted like every
-// other desired state, and must not rewrite an already-correct one.
-func TestEnsureGCSchedule(t *testing.T) {
-	var gets, posts, puts int
-	var sentCron string
-	existing := ""
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "GET":
-			gets++
-			if existing == "" {
-				_, _ = w.Write([]byte(`{"schedule":{"type":"None","cron":""}}`))
+func TestVerifyAccess(t *testing.T) {
+	t.Run("accepts a Harbor that answers the authenticated endpoint", func(t *testing.T) {
+		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v2.0/users/current" {
+				t.Errorf("path = %q, want the current-user endpoint", r.URL.Path)
+			}
+			// Harbor answers this endpoint only for an authenticated caller,
+			// so the request must carry the configured credentials.
+			u, p, ok := r.BasicAuth()
+			if !ok || u != "test-user" || p != "test-admin-pass" {
+				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			_, _ = w.Write([]byte(`{"schedule":{"type":"Schedule","cron":"` + existing + `"}}`))
-		case "POST", "PUT":
-			var body struct {
-				Schedule struct{ Cron string } `json:"schedule"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			sentCron = body.Schedule.Cron
-			if r.Method == "POST" {
-				posts++
-			} else {
-				puts++
-			}
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"username":"test-user"}`))
+		})
+		defer srv.Close()
+
+		if err := c.VerifyAccess(context.Background()); err != nil {
+			t.Errorf("VerifyAccess() error = %v, want nil", err)
 		}
-	}))
-	defer srv.Close()
-	c := NewClient(srv.URL, "pw")
+	})
 
-	// No schedule yet -> create.
-	if err := c.EnsureGCSchedule(context.Background(), "0 0 3 * * *"); err != nil {
-		t.Fatalf("EnsureGCSchedule() error = %v", err)
-	}
-	if posts != 1 || puts != 0 {
-		t.Errorf("absent schedule: posts=%d puts=%d, want 1/0", posts, puts)
-	}
-	if sentCron != "0 0 3 * * *" {
-		t.Errorf("sent cron = %q", sentCron)
-	}
+	t.Run("rejects credentials Harbor refuses", func(t *testing.T) {
+		c, srv := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		})
+		defer srv.Close()
 
-	// Already correct -> no write at all.
-	existing = "0 0 3 * * *"
-	if err := c.EnsureGCSchedule(context.Background(), "0 0 3 * * *"); err != nil {
-		t.Fatalf("EnsureGCSchedule() error = %v", err)
-	}
-	if posts != 1 || puts != 0 {
-		t.Errorf("matching schedule rewrote it: posts=%d puts=%d, want 1/0", posts, puts)
-	}
-
-	// Drifted -> update in place.
-	existing = "0 0 9 * * *"
-	if err := c.EnsureGCSchedule(context.Background(), "0 0 3 * * *"); err != nil {
-		t.Fatalf("EnsureGCSchedule() error = %v", err)
-	}
-	if puts != 1 {
-		t.Errorf("drifted schedule: puts=%d, want 1", puts)
-	}
-}
-
-// Harbor answers 200 with an EMPTY body for "not configured yet" — its GC
-// schedule does exactly that before one is ever set, and an empty body decodes
-// to io.EOF. This was found on a real cluster, not by the fake server above,
-// which always returned JSON: a test that only feeds well-formed responses
-// proves the parser works on the author's assumptions, not on the API.
-func TestEnsureGCSchedule_TreatsEmptyBodyAsNoSchedule(t *testing.T) {
-	posts := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			w.WriteHeader(http.StatusOK) // 200, no body at all
-			return
+		if err := c.VerifyAccess(context.Background()); err == nil {
+			t.Error("VerifyAccess() error = nil, want an error on 401 — an unauthenticated ping would have passed here")
 		}
-		posts++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	if err := NewClient(srv.URL, "pw").EnsureGCSchedule(context.Background(), "0 0 3 * * *"); err != nil {
-		t.Fatalf("EnsureGCSchedule() error = %v, want an empty body treated as no schedule", err)
-	}
-	if posts != 1 {
-		t.Errorf("posts = %d, want 1 — an absent schedule must be created", posts)
-	}
+	})
 }

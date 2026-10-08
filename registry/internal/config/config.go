@@ -2,14 +2,22 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 )
 
-// Config holds the operator's configuration. The operator is a
-// controller-runtime manager whose only external state is what it needs to
-// render and install the Harbor Helm chart.
+// Secret data keys the operator reads Harbor's credentials from.
+const (
+	HarborUsernameKey = "username"
+	HarborPasswordKey = "password"
+)
+
+// Config holds the operator's configuration. The operator does not deploy
+// Harbor — it drives one that already exists — so its only external state is
+// how to reach that Harbor and how to authenticate to it.
 type Config struct {
-	Helm HelmConfig
+	Harbor HarborConfig
 
 	// MetricsCertDir holds a serving certificate (tls.crt/tls.key) for the
 	// metrics endpoint. Empty means the manager self-signs for localhost,
@@ -18,44 +26,65 @@ type Config struct {
 	MetricsCertDir string
 }
 
-// HelmConfig holds the settings used to render and install the Harbor chart.
-type HelmConfig struct {
-	HarborRepoURL  string
-	HarborChartVer string
-	StorageClass   string
-	IngressClass   string
-	CertIssuer     string
-	// BaseDomain is the suffix every registry URL is built on, as
-	// registry.<namespace>.<BaseDomain>. With nip.io it MUST use the
-	// dash-separated form (192-0-2-1.nip.io), because a namespace ending in a
-	// digit merges into the dotted form and resolves to a different address:
-	//
-	//	registry.project-1.192.0.2.1.nip.io  ->  1.192.0.2   (wrong host)
-	//	registry.project1.192.0.2.1.nip.io   ->  192.0.2.1
-	//	registry.project-1.192-0-2-1.nip.io  ->  192.0.2.1
-	//
-	// Reproduce with `getent hosts <name>`.
-	BaseDomain string
+// HarborConfig locates the Harbor every Registry becomes a project inside.
+type HarborConfig struct {
+	// URL is the base URL of the central Harbor, e.g.
+	// https://registry.example.com. It is also what a Registry reports as its
+	// push/pull address, so it must be the name clients actually resolve.
+	URL string
+
+	// CredentialsSecret names a Secret holding Harbor credentials under the
+	// keys "username" and "password". It lives in Namespace, so the operator
+	// never reads a tenant namespace to authenticate.
+	CredentialsSecret string
+
+	// Namespace is the operator's own namespace, where CredentialsSecret
+	// lives. Supplied by the downward API.
+	Namespace string
 }
 
 // Load builds the operator configuration from environment variables.
 func Load() (*Config, error) {
-	baseDomain, err := requireEnv("BASE_DOMAIN")
+	harborURL, err := requireEnv("HARBOR_URL")
+	if err != nil {
+		return nil, err
+	}
+	if err := validateHarborURL(harborURL); err != nil {
+		return nil, err
+	}
+
+	// The operator's own namespace, so it can read its credentials Secret
+	// without holding Secret access across tenant namespaces.
+	podNamespace, err := requireEnv("POD_NAMESPACE")
 	if err != nil {
 		return nil, err
 	}
 
 	return &Config{
-		Helm: HelmConfig{
-			HarborRepoURL:  envStr("HARBOR_HELM_REPO", "https://helm.goharbor.io"),
-			HarborChartVer: envStr("HARBOR_CHART_VERSION", "1.19.2"),
-			StorageClass:   envStr("STORAGE_CLASS", "longhorn"),
-			IngressClass:   envStr("INGRESS_CLASS", "nginx"),
-			CertIssuer:     envStr("CERT_ISSUER", "letsencrypt-prod"),
-			BaseDomain:     baseDomain,
+		Harbor: HarborConfig{
+			URL:               strings.TrimRight(harborURL, "/"),
+			CredentialsSecret: envStr("HARBOR_CREDENTIALS_SECRET", "harbor-credentials"),
+			Namespace:         podNamespace,
 		},
 		MetricsCertDir: envStr("METRICS_CERT_DIR", ""),
 	}, nil
+}
+
+// validateHarborURL rejects a URL that cannot address a Harbor. Catching it at
+// startup turns a silent per-Registry failure into one clear message, since
+// every reconcile would otherwise fail the same way for the same reason.
+func validateHarborURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("HARBOR_URL %q is not a valid URL: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("HARBOR_URL %q must use http or https, got %q", raw, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("HARBOR_URL %q has no host", raw)
+	}
+	return nil
 }
 
 // requireEnv returns the value of key, or an error if it is unset or empty.

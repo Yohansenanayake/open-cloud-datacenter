@@ -56,10 +56,12 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	DBInstanceClass string `json:"dbInstanceClass"`
 
-	// EngineVersion is the PostgreSQL major version, e.g. "16".
-	// NOT YET IMPLEMENTED: cloud-init installs whatever PostgreSQL the OS
-	// image's apt repo provides (Ubuntu 24.04 → PG 16; older → older). The
-	// field is recorded but does not drive package selection.
+	// EngineVersion is the PostgreSQL major version, e.g. "16". Resolved
+	// against the target baked image's supported versions (see
+	// internal/catalog); the requested version is activated at boot by
+	// bootstrap.sh, which drops the OS default cluster and creates one on
+	// the requested version instead. Defaults to the baked image's
+	// DefaultEngineVersion when unset.
 	// Immutable after first reconcile.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engineVersion is immutable after creation"

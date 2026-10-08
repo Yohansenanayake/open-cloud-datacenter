@@ -47,6 +47,10 @@ updates the manager Kustomization used by direct `kubectl apply -k` commands.
 ~3 minutes from `apply` to `phase: available` on a stock Ubuntu cloud image;
 actual time depends on image pull and first-boot package-install speed.
 
+The above is the internal/team install path (kustomize + `make deploy`). For
+installing via Helm and a Harvester `Addon` instead — the path a real
+Rancher/Harvester administrator would use — see [`INSTALL.md`](./INSTALL.md).
+
 ## Operator configuration
 
 The operator loads its typed JSON configuration through
@@ -116,6 +120,7 @@ Each `DBInstance` (`dbaas.opencloud.wso2.com/v1alpha1`, namespaced) creates:
 | Resource | Details |
 | --- | --- |
 | VM (KubeVirt) | One data-net NIC bridged onto the Multus NAD in `spec.networkRef` (must already exist). DHCP by default, or `spec.staticNetwork` for VLANs without one. Address published as `status.endpoint.address`. |
+| PostgreSQL version | `spec.engineVersion` (immutable) is resolved against the target baked image's supported major versions; `bootstrap.sh` drops the OS-default cluster and creates one on the requested version instead. Defaults to that baked image's `DefaultEngineVersion` when unset. |
 | `pg-<name>-credentials` (tenant Secret) | `admin_user` / `admin_password` only. |
 | `pg-<name>-connect` (tenant Secret) | `host`, `port`, `dbname`, `jdbcUrl`, `sslmode`, `ca.crt` — no password material. |
 | TLS | Per-instance CA + server cert. Private key material lives in a controller-private Secret in the operator namespace, never exposed to tenants. `pg_hba.conf` enforces `hostssl … scram-sha-256` only; the master role gets `CREATEDB`/`CREATEROLE` but not `SUPERUSER`. |
@@ -149,7 +154,6 @@ them today**:
 
 | Field | Status |
 | --- | --- |
-| `engineVersion` | Recorded but ignored; cloud-init installs the OS image's apt-default PostgreSQL (Ubuntu 22.04 → PG 14, Ubuntu 24.04 → PG 16). |
 | `manageMasterUserPassword`, `masterUserPasswordRef` | Ignored; the controller always generates a random admin password. |
 | `s3BackupConfig`, `backupRetentionPeriod`, `preferredBackupWindow` | Recorded but no pgBackRest install, schedule, or retention runs. |
 | `multiAZ` | No Patroni / HA standby is created. |

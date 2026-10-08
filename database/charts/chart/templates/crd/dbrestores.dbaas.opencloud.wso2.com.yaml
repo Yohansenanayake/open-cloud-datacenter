@@ -1,0 +1,298 @@
+{{- if .Values.crd.enable }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: dbrestores.dbaas.opencloud.wso2.com
+spec:
+  group: dbaas.opencloud.wso2.com
+  names:
+    kind: DBRestore
+    listKind: DBRestoreList
+    plural: dbrestores
+    shortNames:
+    - dbrestore
+    singular: dbrestore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.snapshotRef.name
+      name: Snapshot
+      type: string
+    - jsonPath: .spec.targetInstanceName
+      name: Target
+      type: string
+    - jsonPath: .status.stage
+      name: Stage
+      type: string
+    - jsonPath: .status.reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          DBRestore represents one restore operation: a snapshot plus target-instance
+          parameters in, a new DBInstance out. Namespaced. A one-time operation
+          request — see the package doc comment on DBRestoreSpec.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              DBRestoreSpec requests restoring a DBSnapshot into a new DBInstance
+              (design §3/§6). A one-time operation request, not a durable resource —
+              closer to a Job than to a DBInstance — so the whole spec is immutable:
+              nothing in it means anything to change mid-flight.
+            properties:
+              allocatedStorage:
+                description: |-
+                  AllocatedStorage must be at least the snapshot's recorded data-volume
+                  size (§2.4) — smaller is rejected, larger is accepted and passed
+                  through to the restore PVC's request.
+                minimum: 1
+                type: integer
+              backup:
+                description: |-
+                  Backup opts the target instance into backup capability, independent
+                  of the source. Omission means no ongoing backup capability.
+                properties:
+                  automated:
+                    default: {}
+                    description: |-
+                      Automated controls scheduled daily snapshots. Defaulted when omitted
+                      from an explicitly-supplied backup object.
+                    properties:
+                      enabled:
+                        default: true
+                        description: |-
+                          Enabled starts/stops new daily snapshots and new automatic pruning.
+                          Existing retained snapshots, manual snapshots, and WAL archiving are
+                          unaffected by disabling this.
+                        type: boolean
+                      preferredWindowUTC:
+                        default: 02:00-03:00
+                        description: |-
+                          PreferredWindowUTC is the UTC window, e.g. "02:00-03:00", the daily
+                          snapshot is scheduled inside. The controller derives one stable
+                          minute inside the window per instance (hashed from the instance
+                          UID) rather than starting every instance at the window's edge.
+                        pattern: ^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$
+                        type: string
+                      retainCount:
+                        default: 7
+                        description: |-
+                          RetainCount is how many of the newest successful automated snapshots
+                          to keep; older ones are pruned. A restore hold can temporarily keep
+                          an otherwise-prunable snapshot past this count.
+                        minimum: 1
+                        type: integer
+                    type: object
+                type: object
+              dbInstanceClass:
+                description: |-
+                  DBInstanceClass is the target instance's compute class —
+                  user-specified, same meaning as DBInstanceSpec.DBInstanceClass.
+                minLength: 1
+                type: string
+              mode:
+                default: Snapshot
+                description: |-
+                  Mode selects the recovery mechanism. Snapshot (default) uses only the
+                  snapshot's own captured local data and works after the source
+                  instance is deleted. AvailableWAL is reserved for a future stage.
+                enum:
+                - Snapshot
+                type: string
+              networkRef:
+                description: |-
+                  NetworkRef is the target instance's network — user-specified, never
+                  inherited from the source (design §2.4).
+                type: string
+              snapshotRef:
+                description: |-
+                  SnapshotRef names the DBSnapshot to restore from, in the same
+                  namespace. Must be a completed (Ready) snapshot; no automatic
+                  latest-snapshot selection.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              staticNetwork:
+                description: |-
+                  StaticNetwork is the target instance's static IP config, if any —
+                  user-specified; never copies the source's static IP.
+                properties:
+                  address:
+                    description: Address is the IPv4 address with CIDR prefix, e.g.
+                      "192.168.40.50/24".
+                    pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}\/(3[0-2]|[12]?\d)$
+                    type: string
+                  gateway:
+                    description: Gateway is the IPv4 default gateway, e.g. "192.168.40.1".
+                    pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$
+                    type: string
+                  nameservers:
+                    description: |-
+                      Nameservers are the DNS server IPs the VM should use. Supply at
+                      least one — cloud-init will fail to resolve apt mirrors without DNS.
+                    items:
+                      pattern: ^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$
+                      type: string
+                    minItems: 1
+                    type: array
+                  searchDomains:
+                    description: SearchDomains are DNS search-domain suffixes. Optional.
+                    items:
+                      pattern: ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$
+                      type: string
+                    type: array
+                required:
+                - address
+                - gateway
+                - nameservers
+                type: object
+              targetInstanceName:
+                description: |-
+                  TargetInstanceName is the name of the DBInstance this restore
+                  creates. Deliberately independent of this object's own name: a retry
+                  after a failed attempt creates a new DBRestore object and can still
+                  target the same instance name. Held to DBInstance's own name rule
+                  (MaxInstanceNameLength, DNS-label alphabet), so a restore can't be
+                  accepted only to fail when it creates its target.
+                maxLength: 52
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              vmPassword:
+                description: |-
+                  VMPassword is passed through to the target's spec.vmPassword: the
+                  console/SSH password for the VM's default user (ubuntu). For
+                  development and debugging only — leave empty in production.
+                type: string
+            required:
+            - allocatedStorage
+            - dbInstanceClass
+            - networkRef
+            - snapshotRef
+            - targetInstanceName
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable after creation
+              rule: self == oldSelf
+          status:
+            description: DBRestoreStatus is the observed state of a DBRestore.
+            properties:
+              dataVolumeSnapshotName:
+                description: |-
+                  DataVolumeSnapshotName mirrors the snapshot's own recorded value —
+                  the restore PVC's spec.dataSource.
+                type: string
+              deadline:
+                description: |-
+                  Deadline is when this restore times out: its creation time plus the
+                  operator's restore.timeout. Shown for visibility only — the
+                  controller recomputes it every pass from metadata.creationTimestamp
+                  and never reads it back.
+                format: date-time
+                type: string
+              message:
+                description: Message is a human-readable detail for Reason.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration tracks which spec version has been
+                  reconciled.
+                format: int64
+                type: integer
+              reason:
+                description: |-
+                  Reason is a stable, machine-readable explanation for the current
+                  stage, particularly Failed.
+                type: string
+              resolved:
+                description: Resolved is captured once, alongside the fields above.
+                properties:
+                  dbName:
+                    type: string
+                  engineVersion:
+                    type: string
+                  masterUsername:
+                    type: string
+                  port:
+                    type: integer
+                  storageType:
+                    type: string
+                type: object
+              snapshotUID:
+                description: |-
+                  SnapshotUID is the UID of the DBSnapshot spec.snapshotRef resolved to,
+                  captured once at admission so a later rename or recreation of the
+                  same-named snapshot can never silently redirect an in-progress
+                  restore.
+                type: string
+              sourceInstanceName:
+                description: |-
+                  SourceInstanceName is the snapshot's spec.sourceInstanceRef.name,
+                  captured alongside SourceInstanceUID — provenance for the target.
+                type: string
+              sourceInstanceUID:
+                description: |-
+                  SourceInstanceUID mirrors the snapshot's own status.source.instanceUID
+                  — never a live lookup of the source DBInstance, which is what lets
+                  this be captured (and the restore-hold Lease labeled with it) even
+                  after the source is deleted.
+                type: string
+              stage:
+                description: |-
+                  Stage is the controller-observed restore progress (§5.1), recomputed
+                  from live cluster state every pass. Non-terminal values are output
+                  only — reconcile logic never branches on them. Succeeded/Failed mark
+                  the end of this one-time operation (like a Job's completion) and stop
+                  further convergence, but never by themselves justify a destructive
+                  action: deletion re-checks the target's live readiness too.
+                type: string
+              targetInstanceUID:
+                description: |-
+                  TargetInstanceUID is the UID of the DBInstance this restore created,
+                  recorded once and never cleared — not even after that instance is
+                  gone. It only ever restricts what the controller does: once set, a
+                  missing target means "lost", never "not created yet", so it is never
+                  recreated. Liveness and readiness are always re-observed from the
+                  cluster, never inferred from this field.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

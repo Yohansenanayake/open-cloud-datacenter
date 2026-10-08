@@ -6,6 +6,10 @@ cliVersion: 4.14.0
 domain: opencloud.wso2.com
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: charts
 projectName: dbaas
 repo: github.com/wso2/open-cloud-datacenter/crds/dbaas
 resources:
