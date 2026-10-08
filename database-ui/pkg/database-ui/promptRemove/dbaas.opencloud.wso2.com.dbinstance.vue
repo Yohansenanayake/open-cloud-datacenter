@@ -28,6 +28,12 @@ export default {
       type:     String,
       required: true
     },
+
+    // Closes Shell's delete dialog (passed in by PromptRemove)
+    close: {
+      type:    Function,
+      default: () => {}
+    },
   },
 
   computed: {
@@ -50,9 +56,23 @@ export default {
     warning() {
       return this.value.find((r) => r.spec?.backup)?.warnDeletionMessage || this.value[0]?.warnDeletionMessage;
     },
+
+    // Suggest keeping a copy: manual snapshots survive the instance
+    snapshotCandidates() {
+      return this.value.filter((r) => r.canTakeSnapshot);
+    },
   },
 
-  methods: { resourceNames },
+  methods: {
+    resourceNames,
+
+    takeSnapshot() {
+      const instance = this.snapshotCandidates[0];
+
+      this.close();
+      instance.takeSnapshot();
+    },
+  },
 };
 </script>
 
@@ -67,11 +87,28 @@ export default {
       class="mb-0"
       :label="protectedMessage"
     />
-    <Banner
-      v-else-if="warning"
-      color="warning"
-      class="mb-0"
-      :label="warning"
-    />
+    <template v-else>
+      <Banner
+        v-if="warning"
+        color="warning"
+        class="mb-0"
+        :label="warning"
+      />
+      <p
+        v-if="snapshotCandidates.length"
+        class="mt-10"
+      >
+        <template v-if="value.length === 1">
+          {{ t('dbaas.instance.delete.snapshotTip') }}
+          <a
+            role="button"
+            @click="takeSnapshot"
+          >{{ t('dbaas.snapshot.actions.take') }}</a>
+        </template>
+        <template v-else>
+          {{ t('dbaas.instance.delete.snapshotTipMany') }}
+        </template>
+      </p>
+    </template>
   </div>
 </template>

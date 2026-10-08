@@ -13,6 +13,8 @@ import DBInstanceConnection from '../components/DBInstanceConnection.vue';
 import DBInstanceEvents from '../components/DBInstanceEvents.vue';
 import DBInstanceBackups from '../components/DBInstanceBackups.vue';
 import DBInstanceRestoredFrom from '../components/DBInstanceRestoredFrom.vue';
+import DBInstanceImageBanner from '../components/DBInstanceImageBanner.vue';
+import DBInstanceImageInfo from '../components/DBInstanceImageInfo.vue';
 import { LabeledInput } from '@components/Form/LabeledInput';
 import { Checkbox } from '@components/Form/Checkbox';
 import { Banner } from '@components/Banner';
@@ -52,6 +54,8 @@ export default {
     DBInstanceBackups,
     DBInstanceConnection,
     DBInstanceRestoredFrom,
+    DBInstanceImageBanner,
+    DBInstanceImageInfo,
     DBInstanceEvents,
     LabeledInput,
     LabeledSelect,
@@ -298,6 +302,11 @@ export default {
       :value="value"
     />
 
+    <DBInstanceImageBanner
+      v-if="isView && !value.isDeleting"
+      :value="value"
+    />
+
     <Banner
       v-if="value.deletionProblem"
       color="error"
@@ -386,6 +395,11 @@ export default {
             />
           </div>
         </div>
+        <DBInstanceImageInfo
+          v-if="isView"
+          class="mt-30"
+          :value="value"
+        />
       </Tab>
 
       <Tab
@@ -494,27 +508,32 @@ export default {
           :value="value"
         />
         <template v-else>
+          <!-- Two settings: whether the instance supports backups at all (fixed
+               at creation), and the daily schedule (can change any time) -->
           <div class="mb-20">
             <Checkbox
               v-model:value="backupEnabled"
               :label="t('dbaas.instance.form.backupEnabled')"
+              :description="t('dbaas.instance.form.backupEnabledDescription')"
               :mode="createOnlyMode"
             />
           </div>
-          <Banner
-            v-if="isCreate"
-            color="info"
-            :label="t('dbaas.instance.form.backupCreateOnly')"
-          />
-          <template v-if="automatedBackup">
+          <div
+            v-if="automatedBackup"
+            class="backup-automated"
+          >
             <div class="mb-20">
               <Checkbox
                 v-model:value="automatedBackup.enabled"
                 :label="t('dbaas.instance.form.automatedBackupEnabled')"
+                :description="t('dbaas.instance.form.automatedBackupDescription')"
                 :mode="mode"
               />
             </div>
-            <div class="row mb-20">
+            <div
+              v-if="automatedBackup.enabled !== false"
+              class="row mb-20"
+            >
               <div class="col span-6">
                 <LabeledInput
                   v-model:value="automatedBackup.preferredWindowUTC"
@@ -536,7 +555,7 @@ export default {
                 />
               </div>
             </div>
-          </template>
+          </div>
         </template>
       </Tab>
 
@@ -582,3 +601,10 @@ export default {
     </Tabbed>
   </CruResource>
 </template>
+
+<style lang="scss" scoped>
+// The automated schedule belongs to (and only exists with) backups
+.backup-automated {
+  margin-left: 30px;
+}
+</style>

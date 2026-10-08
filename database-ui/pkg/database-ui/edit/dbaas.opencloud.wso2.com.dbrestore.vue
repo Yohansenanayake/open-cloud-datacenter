@@ -453,20 +453,28 @@ export default {
         {{ t('dbaas.restore.form.vlanOnly') }}
       </p>
 
-      <div class="mb-10">
+      <div class="mb-20">
         <Checkbox
           v-model:value="backupEnabled"
           :label="t('dbaas.restore.form.backupEnabled')"
+          :description="t('dbaas.instance.form.backupEnabledDescription')"
         />
       </div>
-      <template v-if="automatedBackup">
-        <div class="mb-10">
+      <div
+        v-if="automatedBackup"
+        class="backup-automated"
+      >
+        <div class="mb-20">
           <Checkbox
             v-model:value="automatedBackup.enabled"
             :label="t('dbaas.instance.form.automatedBackupEnabled')"
+            :description="t('dbaas.instance.form.automatedBackupDescription')"
           />
         </div>
-        <div class="row mb-20">
+        <div
+          v-if="automatedBackup.enabled !== false"
+          class="row mb-20"
+        >
           <div class="col span-6">
             <LabeledInput
               v-model:value="automatedBackup.preferredWindowUTC"
@@ -484,7 +492,7 @@ export default {
             />
           </div>
         </div>
-      </template>
+      </div>
 
       <Banner
         color="info"
@@ -596,6 +604,10 @@ export default {
   }
 }
 
+.backup-automated {
+  margin-left: 30px;
+}
+
 .restore-steps {
   display: flex;
   gap: 30px;
@@ -608,6 +620,16 @@ export default {
     align-items: center;
     gap: 8px;
     color: var(--muted);
+
+    // Fixed square box, so the spinner rotates around its own centre
+    .icon {
+      width: 1em;
+      height: 1em;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
 
     &.done {
       color: var(--success);

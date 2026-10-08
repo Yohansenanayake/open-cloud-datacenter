@@ -30,6 +30,13 @@ export const DBINSTANCE_HEADERS = [
     dashIfEmpty: true,
   },
   {
+    name:      'image',
+    labelKey:  'dbaas.instance.tableHeaders.image',
+    value:     'imageStatusLabel',
+    sort:      ['imageStatusLabel', 'nameSort'],
+    formatter: 'DBInstanceImage',
+  },
+  {
     name:      'endpoint',
     labelKey:  'dbaas.instance.tableHeaders.endpoint',
     value:     'endpointDisplay',
