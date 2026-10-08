@@ -1,9 +1,7 @@
 <script>
 import ResourceTable from '@shell/components/ResourceTable';
-import Select from '@shell/components/form/Select';
-import {
-  AGE, NAME, NAMESPACE, STATE
-} from '@shell/config/table-headers';
+import ShellSelect from '@shell/components/form/Select';
+import { AGE, NAME, NAMESPACE, STATE } from '@shell/config/table-headers';
 import { DBAAS, SNAPSHOT_ORIGIN } from '../types';
 
 const ALL = 'all';
@@ -63,7 +61,7 @@ export const DBSNAPSHOT_HEADERS = [
 // filter. Rows come from Shell's ResourceList.
 export default {
   name:       'ListDBSnapshot',
-  components: { ResourceTable, Select },
+  components: { ResourceTable, ShellSelect },
 
   props: {
     schema: {
@@ -130,7 +128,7 @@ export default {
     no-rows-key="dbaas.snapshot.list.noRows"
   >
     <template #more-header-middle>
-      <Select
+      <ShellSelect
         v-model:value="origin"
         class="origin-filter"
         :options="originOptions"

@@ -1,18 +1,21 @@
-import { IPlugin } from '@shell/core/types';
+import { Store } from 'vuex';
+import { DSLReturnType, IPlugin } from '@shell/core/types';
 import { MANAGEMENT } from '@shell/config/types';
 import { IF_HAVE } from '@shell/store/type-map';
 import {
   BLANK_CLUSTER, DBAAS, HARVESTER_IMAGE, IMAGES_PAGE, IMAGES_ROUTE, MANAGER_CLUSTERS_PAGE, MANAGER_CLUSTERS_ROUTE, MANAGER_PRODUCT_NAME, PRODUCT_NAME
 } from './types';
 
-export function init($plugin: IPlugin, store: any) {
+type ProductOptions = Parameters<DSLReturnType['product']>[0];
+
+export function init($plugin: IPlugin, store: Store<unknown>) {
   initManager($plugin, store);
   initCluster($plugin, store);
 }
 
 // DBaaS entry in the left rail (like Virtualization Management). Its page lists the
 // Harvester clusters that serve the DBInstance type for the current user.
-function initManager($plugin: IPlugin, store: any) {
+function initManager($plugin: IPlugin, store: Store<unknown>) {
   const { product, virtualType, basicType } = $plugin.DSL(store, MANAGER_PRODUCT_NAME);
   const to = {
     name:   MANAGER_CLUSTERS_ROUTE,
@@ -42,13 +45,13 @@ function initManager($plugin: IPlugin, store: any) {
 
 // DBaaS resource pages for one cluster. rootProduct gives these pages their own side
 // nav instead of nesting them in Cluster Explorer's. Rancher 2.15's DSL supports it,
-// but Shell's TypeMapProduct type does not declare it, hence the cast.
-function initCluster($plugin: IPlugin, store: any) {
+// but Shell's TypeMapProduct type does not declare it, hence the type assertion.
+function initCluster($plugin: IPlugin, store: Store<unknown>) {
   const {
     product, basicType, virtualType, weightType
   } = $plugin.DSL(store, PRODUCT_NAME);
 
-  product(<any>{
+  product({
     inStore:             'cluster',
     rootProduct:         PRODUCT_NAME,
     ifHaveType:          DBAAS.INSTANCE,
@@ -58,7 +61,7 @@ function initCluster($plugin: IPlugin, store: any) {
       name:   'c-cluster-product-resource',
       params: { product: PRODUCT_NAME, resource: DBAAS.INSTANCE },
     },
-  });
+  } as ProductOptions);
 
   // Baked VM images for the operator: Rancher admins only
   virtualType({

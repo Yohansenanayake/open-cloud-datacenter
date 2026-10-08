@@ -30,13 +30,19 @@ export function imageState(image) {
   const message = initialized?.message || imported?.message || retryExceeded?.message || '';
 
   if (imported?.status === 'True') {
-    return { state: IMAGE_STATE.READY, progress: 100, message: '' };
+    return {
+      state: IMAGE_STATE.READY, progress: 100, message: ''
+    };
   }
   if (retryExceeded?.status === 'True' || initialized?.status === 'False' || imported?.status === 'False') {
-    return { state: IMAGE_STATE.FAILED, progress, message };
+    return {
+      state: IMAGE_STATE.FAILED, progress, message
+    };
   }
 
-  return { state: IMAGE_STATE.IMPORTING, progress, message };
+  return {
+    state: IMAGE_STATE.IMPORTING, progress, message
+  };
 }
 
 // "<namespace>/<display name>" keys used by more than one baked image. In the

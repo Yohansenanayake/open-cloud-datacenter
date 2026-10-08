@@ -1,7 +1,5 @@
 import SteveModel from '@shell/plugins/steve/steve-class';
-import {
-  DBAAS, RESTORE_QUERY, SNAPSHOT_ORIGIN, SNAPSHOT_PHASE
-} from '../types';
+import { DBAAS, RESTORE_QUERY, SNAPSHOT_ORIGIN, SNAPSHOT_PHASE } from '../types';
 import { restoreCreateLocation } from '../utils/dbrestore';
 
 // Set only by the operator's scheduler on automated snapshots

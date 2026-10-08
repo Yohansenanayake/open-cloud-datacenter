@@ -6,9 +6,7 @@ import { RcButton } from '@components/RcButton';
 import { RcDropdownMenu } from '@components/RcDropdown';
 import { MANAGEMENT } from '@shell/config/types';
 import { DBAAS, PRODUCT_NAME } from '../types';
-import {
-  CLUSTER_MENU_ACTIONS, CLUSTER_STATUS, checkClusterForDBaaS, fetchHarvesterVersion
-} from '../utils/dbaas-clusters';
+import { CLUSTER_MENU_ACTIONS, CLUSTER_STATUS, checkClusterForDBaaS, fetchHarvesterVersion } from '../utils/dbaas-clusters';
 
 const STATUS_COLOR = {
   [CLUSTER_STATUS.AVAILABLE]:   'bg-success',

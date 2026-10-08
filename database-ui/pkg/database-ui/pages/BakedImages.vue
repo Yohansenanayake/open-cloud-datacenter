@@ -5,9 +5,7 @@ import PercentageBar from '@shell/components/PercentageBar';
 import { BadgeState } from '@components/BadgeState';
 import { Banner } from '@components/Banner';
 import { RcButton } from '@components/RcButton';
-import {
-  HARVESTER_IMAGE, IMAGE_LABEL, IMAGES_CREATE_ROUTE, IMAGES_DETAIL_ROUTE
-} from '../types';
+import { HARVESTER_IMAGE, IMAGE_LABEL, IMAGES_CREATE_ROUTE, IMAGES_DETAIL_ROUTE } from '../types';
 import {
   IMAGE_STATE, duplicateDisplayNames, formatBytes, imageState, isBakedImage
 } from '../utils/baked-images';
