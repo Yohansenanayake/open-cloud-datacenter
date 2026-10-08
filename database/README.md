@@ -145,24 +145,10 @@ rejected up front instead of failing later inside cloud-init.
   roles, so a Rancher project role (or any binding to those) is all a tenant
   needs.
 
-## Not yet implemented
+## Current limitations
 
-The CRD schema is broader than the implementation. These fields are
-reserved for forward compatibility, but **the reconciler does not act on
-them today**:
-
-| Field | Status |
-| --- | --- |
-| `manageMasterUserPassword`, `masterUserPasswordRef` | Ignored; the controller always generates a random admin password. |
-| `s3BackupConfig`, `backupRetentionPeriod`, `preferredBackupWindow` | Recorded but no pgBackRest install, schedule, or retention runs. |
-| `multiAZ` | No Patroni / HA standby is created. |
-| `dbParameterGroupRef` | No `DBParameterGroup` CRD exists in this module. |
-| `tags` | Not propagated to child resource labels / annotations / dashboards. |
-| `status.readReplicas` | Not populated — read replicas and `multiAZ` aren't implemented. |
-
-Each limitation is also called out in the field's godoc (`kubectl explain
-dbi.spec.<field>`). The schema shape is deliberately stable so manifests
-written today keep working as these land.
+Read replicas and Multi-AZ standby provisioning are not implemented. Restore
+supports `Snapshot` mode only.
 
 ## Build / test / develop
 

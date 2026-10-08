@@ -82,12 +82,6 @@ spec:
                 - implemented immutable post-create (modify is refused): networkRef,
                   dbName, masterUsername, port, storageType, staticNetwork,
                   vmPassword, engineVersion
-                - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
-                  multiAZ, dbParameterGroupRef, tags. These fields exist in the schema
-                  for forward compatibility but the reconciler does not apply them.
-                  See ARCHITECTURE.md for the roadmap. Backup capability is tracked
-                  separately under spec.backup once implemented — see
-                  yohan-docs/backups/harvester-vm-backup/.
 
               Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
               vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
@@ -176,12 +170,6 @@ spec:
                 - message: dbName must not be a built-in PostgreSQL database (postgres,
                     template0, template1)
                   rule: '!(self in [''postgres'', ''template0'', ''template1''])'
-              dbParameterGroupRef:
-                description: |-
-                  DBParameterGroupRef references a DBParameterGroup by name.
-                  NOT YET IMPLEMENTED — the DBParameterGroup CRD does not exist in this
-                  module.
-                type: string
               deletionProtection:
                 description: |-
                   DeletionProtection prevents accidental deletion. While true, the
@@ -212,29 +200,6 @@ spec:
                 x-kubernetes-validations:
                 - message: engineVersion is immutable after creation
                   rule: self == oldSelf
-              manageMasterUserPassword:
-                description: |-
-                  ManageMasterUserPassword: if true, auto-generate the admin password
-                  and store it in the credentials Secret; if false, read it from
-                  MasterUserPasswordRef.
-                  NOT YET IMPLEMENTED: the controller always generates a random password
-                  regardless of this field's value, and never reads
-                  MasterUserPasswordRef. The fields are reserved.
-                type: boolean
-              masterUserPasswordRef:
-                description: |-
-                  MasterUserPasswordRef points to a K8s Secret containing the
-                  user-supplied admin password.
-                  NOT YET IMPLEMENTED — see ManageMasterUserPassword.
-                properties:
-                  key:
-                    type: string
-                  name:
-                    type: string
-                required:
-                - key
-                - name
-                type: object
               masterUsername:
                 description: |-
                   MasterUsername for the admin user. Default "dbadmin" (operator config).
@@ -249,11 +214,6 @@ spec:
                 - message: masterUsername must not be a reserved role (postgres, postgres_exporter,
                     or a pg_ prefix)
                   rule: '!(self in [''postgres'', ''postgres_exporter'']) && !self.startsWith(''pg_'')'
-              multiAZ:
-                description: |-
-                  MultiAZ enables Patroni HA with a standby VM.
-                  NOT YET IMPLEMENTED — no standby is created.
-                type: boolean
               networkRef:
                 description: |-
                   NetworkRef is a Harvester NAD reference (namespace/name) for the VLAN
@@ -377,13 +337,6 @@ spec:
                   Immutable after first reconcile (StorageClass cannot change on a
                   bound PVC).
                 type: string
-              tags:
-                additionalProperties:
-                  type: string
-                description: |-
-                  Tags are user-defined labels.
-                  NOT YET IMPLEMENTED — not propagated to child resources or dashboards.
-                type: object
               vmPassword:
                 description: |-
                   VMPassword sets the default console/SSH password for the VM user
@@ -607,11 +560,6 @@ spec:
                 description: PrometheusTarget is the scrape target for the instance's
                   metrics exporter.
                 type: string
-              readReplicas:
-                description: ReadReplicas tracks child replica identifiers.
-                items:
-                  type: string
-                type: array
               recentUnplannedRestarts:
                 description: |-
                   RecentUnplannedRestarts counts a chain of unplanned restarts where each

@@ -35,12 +35,6 @@ const MaxInstanceNameLength = 52
 //   - implemented immutable post-create (modify is refused): networkRef,
 //     dbName, masterUsername, port, storageType, staticNetwork,
 //     vmPassword, engineVersion
-//   - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
-//     multiAZ, dbParameterGroupRef, tags. These fields exist in the schema
-//     for forward compatibility but the reconciler does not apply them.
-//     See ARCHITECTURE.md for the roadmap. Backup capability is tracked
-//     separately under spec.backup once implemented — see
-//     yohan-docs/backups/harvester-vm-backup/.
 //
 // Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
 // vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
@@ -100,21 +94,6 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!(self in ['postgres', 'postgres_exporter']) && !self.startsWith('pg_')",message="masterUsername must not be a reserved role (postgres, postgres_exporter, or a pg_ prefix)"
 	MasterUsername string `json:"masterUsername,omitempty"`
 
-	// ManageMasterUserPassword: if true, auto-generate the admin password
-	// and store it in the credentials Secret; if false, read it from
-	// MasterUserPasswordRef.
-	// NOT YET IMPLEMENTED: the controller always generates a random password
-	// regardless of this field's value, and never reads
-	// MasterUserPasswordRef. The fields are reserved.
-	// +optional
-	ManageMasterUserPassword bool `json:"manageMasterUserPassword,omitempty"`
-
-	// MasterUserPasswordRef points to a K8s Secret containing the
-	// user-supplied admin password.
-	// NOT YET IMPLEMENTED — see ManageMasterUserPassword.
-	// +optional
-	MasterUserPasswordRef *SecretKeyRef `json:"masterUserPasswordRef,omitempty"`
-
 	// AllocatedStorage in GiB.
 	// Mutable but grow-only: changing this on an Available instance resizes the
 	// pgdata volume. Only larger values are accepted — Harvester/Longhorn ignore
@@ -131,17 +110,6 @@ type DBInstanceSpec struct {
 	// bound PVC).
 	// +optional
 	StorageType string `json:"storageType,omitempty"`
-
-	// MultiAZ enables Patroni HA with a standby VM.
-	// NOT YET IMPLEMENTED — no standby is created.
-	// +optional
-	MultiAZ bool `json:"multiAZ,omitempty"`
-
-	// DBParameterGroupRef references a DBParameterGroup by name.
-	// NOT YET IMPLEMENTED — the DBParameterGroup CRD does not exist in this
-	// module.
-	// +optional
-	DBParameterGroupRef string `json:"dbParameterGroupRef,omitempty"`
 
 	// DeletionProtection prevents accidental deletion. While true, the
 	// finalizer refuses to tear the instance down.
@@ -194,11 +162,6 @@ type DBInstanceSpec struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="vmPassword is immutable after creation"
 	VMPassword string `json:"vmPassword,omitempty"`
-
-	// Tags are user-defined labels.
-	// NOT YET IMPLEMENTED — not propagated to child resources or dashboards.
-	// +optional
-	Tags map[string]string `json:"tags,omitempty"`
 
 	// Backup opts the instance into backup capability: automated daily
 	// snapshots (configurable below) and named manual snapshots via
@@ -295,12 +258,6 @@ type AutomatedBackupSpec struct {
 	PreferredWindowUTC string `json:"preferredWindowUTC,omitempty"`
 }
 
-// SecretKeyRef points to a single key within a K8s Secret.
-type SecretKeyRef struct {
-	Name string `json:"name"`
-	Key  string `json:"key"`
-}
-
 // NetworkConfig is a static IPv4 configuration for the database VM's data
 // NIC. When set on DBInstanceSpec.StaticNetwork, these values are written
 // into cloud-init's netplan in place of `dhcp4: true`.
@@ -359,10 +316,6 @@ type DBInstanceStatus struct {
 	// PrometheusTarget is the scrape target for the instance's metrics exporter.
 	// +optional
 	PrometheusTarget string `json:"prometheusTarget,omitempty"`
-
-	// ReadReplicas tracks child replica identifiers.
-	// +optional
-	ReadReplicas []string `json:"readReplicas,omitempty"`
 
 	// Message is a human-readable description of the current state.
 	// +optional
