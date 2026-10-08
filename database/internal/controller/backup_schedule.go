@@ -146,10 +146,14 @@ func (r *DBInstanceReconciler) attemptScheduledSnapshot(ctx context.Context, ins
 }
 
 // pruneAutomatedSnapshots deletes automated DBSnapshots past retainCount,
-// keeping the newest. Only this instance's own (owned by its UID — a
-// same-named predecessor's are never touched), Ready, not-yet-deleting ones
-// count or are pruned: a failed, in-progress or already-deleting one is
-// neither retained capacity nor a deletion target.
+// keeping the newest, with Ready and failed ones counted separately: up to
+// retainCount of each are kept. A failed one (failed, timed out, or
+// rejected) is never retained capacity, but the newest are kept for
+// diagnosis — and capping them means a source whose backups keep failing
+// doesn't accumulate one failed snapshot a day forever. Only this
+// instance's own (owned by its UID — a same-named predecessor's are never
+// touched), finished, not-yet-deleting snapshots are counted or pruned; an
+// in-progress or queued one is neither.
 //
 // No restore-hold check here: DBSnapshot deletion itself waits for any
 // restore reading the source's snapshots, so a pruned snapshot a restore
@@ -163,32 +167,48 @@ func (r *DBInstanceReconciler) pruneAutomatedSnapshots(ctx context.Context, inst
 		return err
 	}
 
-	ready := make([]*dbaasv1.DBSnapshot, 0, len(list.Items))
+	var ready, failed []*dbaasv1.DBSnapshot
 	for i := range list.Items {
 		snap := &list.Items[i]
-		if metav1.IsControlledBy(snap, inst) && snap.DeletionTimestamp.IsZero() &&
-			snap.Status.IsConditionTrue(dbaasv1.ConditionSnapshotReady) {
+		if !metav1.IsControlledBy(snap, inst) || !snap.DeletionTimestamp.IsZero() {
+			continue
+		}
+		cond := snap.Status.GetCondition(dbaasv1.ConditionSnapshotReady)
+		switch {
+		case cond == nil:
+		case cond.Status == metav1.ConditionTrue:
 			ready = append(ready, snap)
+		case isTerminalSnapshotReason(dbaasv1.ConditionReason(cond.Reason)):
+			failed = append(failed, snap)
 		}
 	}
-	if len(ready) <= retainCount {
+	if err := r.pruneOldest(ctx, inst, ready, retainCount, "automated snapshot"); err != nil {
+		return err
+	}
+	return r.pruneOldest(ctx, inst, failed, retainCount, "failed automated snapshot")
+}
+
+// pruneOldest deletes all but the newest keep of snaps, through the
+// DBSnapshot's own protected deletion (its finalizer), preconditioned on
+// each one's UID.
+func (r *DBInstanceReconciler) pruneOldest(ctx context.Context, inst *dbaasv1.DBInstance, snaps []*dbaasv1.DBSnapshot, keep int, what string) error {
+	if len(snaps) <= keep {
 		return nil
 	}
-	sort.Slice(ready, func(i, j int) bool {
-		return ready[i].CreationTimestamp.After(ready[j].CreationTimestamp.Time)
+	sort.Slice(snaps, func(i, j int) bool {
+		return snaps[i].CreationTimestamp.After(snaps[j].CreationTimestamp.Time)
 	})
-
-	for _, snap := range ready[retainCount:] {
+	for _, snap := range snaps[keep:] {
 		uid := snap.UID
 		if err := r.Delete(ctx, snap, client.Preconditions{UID: &uid}); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			return fmt.Errorf("prune automated DBSnapshot %s: %w", snap.Name, err)
+			return fmt.Errorf("prune %s %s: %w", what, snap.Name, err)
 		}
 		if r.Recorder != nil {
 			r.Recorder.Eventf(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonScheduledSnapshotPruned),
-				"Pruned automated snapshot %s (retaining the newest %d)", snap.Name, retainCount)
+				"Pruned %s %s (retaining the newest %d)", what, snap.Name, keep)
 		}
 	}
 	return nil

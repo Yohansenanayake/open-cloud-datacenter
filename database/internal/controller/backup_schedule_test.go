@@ -369,3 +369,50 @@ func assertEventReason(t *testing.T, r *DBInstanceReconciler, wantReason string)
 		t.Fatalf("no event recorded, want one mentioning %q", wantReason)
 	}
 }
+
+// failedAutomatedSnapshot is an automated snapshot owned by owner that
+// ended with reason (failed, timed out or rejected).
+func failedAutomatedSnapshot(name string, owner *dbaasv1.DBInstance, age time.Duration, reason dbaasv1.ConditionReason) *dbaasv1.DBSnapshot {
+	snap := readyAutomatedSnapshot(name, owner, age)
+	snap.Status.Conditions = nil
+	snap.Status.SetCondition(metav1.Condition{
+		Type: dbaasv1.ConditionSnapshotReady, Status: metav1.ConditionFalse, Reason: string(reason), Message: "failed",
+	})
+	return snap
+}
+
+// A source whose backups keep failing must not accumulate one failed
+// snapshot a day forever: the newest retainCount failed ones are kept for
+// diagnosis, older ones pruned. Failed ones never count against the Ready
+// snapshots' retention, and in-progress ones are never touched.
+func TestBackupSchedulePrunesFailedAutomatedSnapshotsSeparately(t *testing.T) {
+	inst := backupEnabledInstance(true)
+	inst.Spec.Backup.Automated.RetainCount = 2
+	future := metav1.NewTime(time.Now().Add(24 * time.Hour))
+	inst.Status.Backup = &dbaasv1.BackupStatus{NextScheduledSnapshotTime: &future}
+
+	failedOldest := failedAutomatedSnapshot("orders-auto-f1", inst, 9*time.Hour, dbaasv1.ReasonSnapshotBackupFailed)
+	failedOld := failedAutomatedSnapshot("orders-auto-f2", inst, 8*time.Hour, dbaasv1.ReasonSnapshotBackupTimedOut)
+	failedNewer := failedAutomatedSnapshot("orders-auto-f3", inst, 7*time.Hour, dbaasv1.ReasonSnapshotSourceNotReady)
+	failedNewest := failedAutomatedSnapshot("orders-auto-f4", inst, 6*time.Hour, dbaasv1.ReasonSnapshotBackupFailed)
+	ready1 := readyAutomatedSnapshot("orders-auto-r1", inst, 5*time.Hour)
+	ready2 := readyAutomatedSnapshot("orders-auto-r2", inst, 4*time.Hour)
+	inProgress := failedAutomatedSnapshot("orders-auto-running", inst, 10*time.Hour, dbaasv1.ReasonSnapshotBackupInProgress)
+	predecessor := inst.DeepCopy()
+	predecessor.UID = "orders-old-uid"
+	theirsFailed := failedAutomatedSnapshot("orders-auto-old", predecessor, 20*time.Hour, dbaasv1.ReasonSnapshotBackupFailed)
+
+	r := newScheduleReconciler(t, inst, failedOldest, failedOld, failedNewer, failedNewest, ready1, ready2, inProgress, theirsFailed)
+	if _, err := r.evaluateBackupSchedule(context.Background(), inst); err != nil {
+		t.Fatalf("evaluateBackupSchedule: %v", err)
+	}
+
+	assertSnapshotExists(t, r, failedOldest.Name, false)
+	assertSnapshotExists(t, r, failedOld.Name, false)
+	assertSnapshotExists(t, r, failedNewer.Name, true)
+	assertSnapshotExists(t, r, failedNewest.Name, true)
+	assertSnapshotExists(t, r, ready1.Name, true) // 2 Ready within retainCount 2: failures don't count against them
+	assertSnapshotExists(t, r, ready2.Name, true)
+	assertSnapshotExists(t, r, inProgress.Name, true)
+	assertSnapshotExists(t, r, theirsFailed.Name, true)
+}
