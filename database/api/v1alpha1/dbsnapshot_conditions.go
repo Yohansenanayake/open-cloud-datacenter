@@ -32,11 +32,17 @@ const (
 	ReasonSnapshotSourceNotReady       ConditionReason = "SourceNotReady"
 	ReasonSnapshotSourceDeleting       ConditionReason = "SourceDeleting"
 	ReasonSnapshotHoldWaiting          ConditionReason = "SnapshotHoldWaiting"
-	ReasonSnapshotBackupInProgress     ConditionReason = "BackupInProgress"
-	ReasonSnapshotBackupReady          ConditionReason = "BackupReady"
-	ReasonSnapshotBackupFailed         ConditionReason = "BackupFailed"
-	ReasonSnapshotFinalizerAdded       ConditionReason = "FinalizerAdded"
-	ReasonSnapshotDeletionInProgress   ConditionReason = "DeletionInProgress"
+	// ReasonSnapshotBackupQueued: admitted, waiting for a backup slot (the
+	// cluster-wide cap on backups in flight, design Phase 10).
+	ReasonSnapshotBackupQueued ConditionReason = "BackupQueued"
+	// ReasonSnapshotBackupTimedOut: the backup didn't finish within
+	// backup.timeout of its creation; it was deleted and its slot freed.
+	ReasonSnapshotBackupTimedOut     ConditionReason = "BackupTimedOut"
+	ReasonSnapshotBackupInProgress   ConditionReason = "BackupInProgress"
+	ReasonSnapshotBackupReady        ConditionReason = "BackupReady"
+	ReasonSnapshotBackupFailed       ConditionReason = "BackupFailed"
+	ReasonSnapshotFinalizerAdded     ConditionReason = "FinalizerAdded"
+	ReasonSnapshotDeletionInProgress ConditionReason = "DeletionInProgress"
 	// ReasonSnapshotDeletionWaitingForRestore: Ready=False while deletion
 	// waits for a restore reading the source's snapshots to end.
 	ReasonSnapshotDeletionWaitingForRestore ConditionReason = "DeletionWaitingForRestore"

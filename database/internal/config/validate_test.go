@@ -73,6 +73,36 @@ func TestValidateRejectsInvalidImageNamespace(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidBackupSettings(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*Config)
+		field  string
+	}{
+		"maxConcurrent 0":  {func(c *Config) { c.Backup.MaxConcurrent = 0 }, "backup.maxConcurrent"},
+		"maxConcurrent -1": {func(c *Config) { c.Backup.MaxConcurrent = -1 }, "backup.maxConcurrent"},
+		"timeout 0":        {func(c *Config) { c.Backup.Timeout = 0 }, "backup.timeout"},
+		"timeout negative": {func(c *Config) { c.Backup.Timeout = -time.Minute }, "backup.timeout"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("Validate() error = %v, want it to name %s", err, tc.field)
+			}
+		})
+	}
+}
+
+// Half of the global cap, rounded up, and never 0 — a namespace must
+// always be able to run something.
+func TestBackupPerNamespaceShare(t *testing.T) {
+	for k, want := range map[int]int{1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 8: 4} {
+		if got := (BackupConfig{MaxConcurrent: k}).PerNamespace(); got != want {
+			t.Errorf("PerNamespace() with MaxConcurrent %d = %d, want %d", k, got, want)
+		}
+	}
+}
+
 func TestValidateRejectsNonPositiveRestoreRecoveryTimeout(t *testing.T) {
 	for _, value := range []time.Duration{0, -time.Minute} {
 		cfg := Default()

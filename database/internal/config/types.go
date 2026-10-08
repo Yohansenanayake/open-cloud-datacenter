@@ -33,6 +33,7 @@ type Config struct {
 	Infrastructure   InfrastructureConfig                 `konf:"infrastructure"`
 	DatabaseDefaults DatabaseDefaults                     `konf:"databaseDefaults"`
 	Restore          RestoreConfig                        `konf:"restore"`
+	Backup           BackupConfig                         `konf:"backup"`
 	Observability    ObservabilityConfig                  `konf:"observability"`
 	Logging          LoggingConfig                        `konf:"logging"`
 	InstanceClasses  map[string]dbaasv1.InstanceClassSpec `konf:"instanceClasses"`
@@ -114,6 +115,28 @@ type RestoreConfig struct {
 	// as RestoreTimedOut and its unfinished target is deleted. Must exceed
 	// RecoveryTimeout, which is only one part of it.
 	Timeout time.Duration `konf:"timeout"`
+}
+
+// BackupConfig tunes how DBSnapshot backups share the cluster.
+type BackupConfig struct {
+	// MaxConcurrent caps how many backups run at once, cluster-wide;
+	// snapshots over the cap wait their turn, oldest first. Each namespace
+	// gets at most PerNamespace() of them, so one tenant's backlog can't
+	// occupy every slot.
+	MaxConcurrent int `konf:"maxConcurrent"`
+	// Timeout bounds one backup, measured from the Harvester backup's
+	// creation (time spent queued doesn't count). A backup still unfinished
+	// then fails as BackupTimedOut and frees its slot.
+	Timeout time.Duration `konf:"timeout"`
+}
+
+// PerNamespace is each namespace's share of MaxConcurrent: half, rounded
+// up, and at least 1. It is derived, never configured separately, so the
+// two can't disagree. The share is strict — it applies even when no other
+// namespace is waiting — which is what keeps slots free for a tenant that
+// arrives while another is busy.
+func (b BackupConfig) PerNamespace() int {
+	return max(1, (b.MaxConcurrent+1)/2)
 }
 
 type ObservabilityConfig struct {

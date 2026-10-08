@@ -143,6 +143,41 @@ func TestRestoreRecoveryTimeoutIsConfigurable(t *testing.T) {
 	}
 }
 
+func TestBackupSettingsAreConfigurable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file, maxEnv, timeoutEnv string
+		args                     []string
+		wantMax                  int
+		wantTimeout              time.Duration
+	}{
+		"defaults":    {wantMax: 4, wantTimeout: 6 * time.Hour},
+		"config file": {file: `{"backup": {"maxConcurrent": 6, "timeout": "3h"}}`, wantMax: 6, wantTimeout: 3 * time.Hour},
+		"environment": {maxEnv: "2", timeoutEnv: "90m", wantMax: 2, wantTimeout: 90 * time.Minute},
+		"flag":        {args: []string{"--backup.maxConcurrent=8", "--backup.timeout=2h"}, wantMax: 8, wantTimeout: 2 * time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigurationEnvironment(t)
+			if tc.maxEnv != "" {
+				t.Setenv("DBAAS_BACKUP__MAX_CONCURRENT", tc.maxEnv)
+			}
+			if tc.timeoutEnv != "" {
+				t.Setenv("DBAAS_BACKUP__TIMEOUT", tc.timeoutEnv)
+			}
+			file := tc.file
+			if file == "" {
+				file = "{}"
+			}
+			got, err := load(flag.NewFlagSet("test", flag.ContinueOnError), tc.args, writeConfig(t, file))
+			if err != nil {
+				t.Fatalf("load() error = %v", err)
+			}
+			if got.Backup.MaxConcurrent != tc.wantMax || got.Backup.Timeout != tc.wantTimeout {
+				t.Fatalf("Backup = %+v, want maxConcurrent %d, timeout %v", got.Backup, tc.wantMax, tc.wantTimeout)
+			}
+		})
+	}
+}
+
 func TestConfiguredInstanceClassesReplaceBuiltIns(t *testing.T) {
 	clearConfigurationEnvironment(t)
 	path := writeConfig(t, `{

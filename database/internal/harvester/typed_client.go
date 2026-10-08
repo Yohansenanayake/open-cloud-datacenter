@@ -907,6 +907,7 @@ func (c *TypedClient) GetVMBackupStatus(ctx context.Context, ns, name, dataVolum
 	}
 
 	status := VMBackupStatus{
+		CreatedAt:  vmBackup.CreationTimestamp.Time,
 		ReadyToUse: vmBackup.Status.ReadyToUse != nil && *vmBackup.Status.ReadyToUse,
 	}
 	if vmBackup.Status.Error != nil && vmBackup.Status.Error.Message != nil {

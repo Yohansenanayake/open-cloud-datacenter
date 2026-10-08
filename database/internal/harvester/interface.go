@@ -19,6 +19,7 @@ package harvester
 import (
 	"context"
 	"errors"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -155,6 +156,9 @@ type VolumeSnapshotState struct {
 // VMBackupStatus is the provider-neutral status of a VirtualMachineBackup.
 // Harvester API types stay behind ClientInterface.
 type VMBackupStatus struct {
+	// CreatedAt is the VirtualMachineBackup's creationTimestamp — set by the
+	// API server, so a backup's age can always be re-checked.
+	CreatedAt  time.Time
 	ReadyToUse bool
 	// ErrorMessage is empty unless Harvester recorded a backup failure.
 	ErrorMessage string
