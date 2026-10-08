@@ -11,6 +11,8 @@ import Labels from '@shell/components/form/Labels';
 import Loading from '@shell/components/Loading';
 import DBInstanceConnection from '../components/DBInstanceConnection.vue';
 import DBInstanceEvents from '../components/DBInstanceEvents.vue';
+import DBInstanceBackups from '../components/DBInstanceBackups.vue';
+import DBInstanceRestoredFrom from '../components/DBInstanceRestoredFrom.vue';
 import { LabeledInput } from '@components/Form/LabeledInput';
 import { Checkbox } from '@components/Form/Checkbox';
 import { Banner } from '@components/Banner';
@@ -47,7 +49,9 @@ export default {
     Banner,
     Checkbox,
     CruResource,
+    DBInstanceBackups,
     DBInstanceConnection,
+    DBInstanceRestoredFrom,
     DBInstanceEvents,
     LabeledInput,
     LabeledSelect,
@@ -117,7 +121,7 @@ export default {
     classOptions() {
       const options = INSTANCE_CLASSES.map((c) => ({
         label: this.t('dbaas.instance.form.classOption', {
-          name: c.name, cpu: c.cpu, memory: c.memoryGiB
+          name: c.name, cpu: c.cpu, memory: c.memoryGiB, connections: c.maxConnections
         }),
         value: c.name,
       }));
@@ -287,6 +291,11 @@ export default {
       :namespaced="true"
       :rules="{ name: fvGetAndReportPathRules('metadata.name'), namespace: [], description: [] }"
       @update:value="$emit('input', $event)"
+    />
+
+    <DBInstanceRestoredFrom
+      v-if="isView && value.spec.restoredFrom"
+      :value="value"
     />
 
     <Banner
@@ -480,48 +489,54 @@ export default {
         :label="t('dbaas.instance.form.tabs.backup')"
         :weight="2"
       >
-        <div class="mb-20">
-          <Checkbox
-            v-model:value="backupEnabled"
-            :label="t('dbaas.instance.form.backupEnabled')"
-            :mode="createOnlyMode"
-          />
-        </div>
-        <Banner
-          v-if="isCreate"
-          color="info"
-          :label="t('dbaas.instance.form.backupCreateOnly')"
+        <DBInstanceBackups
+          v-if="isView"
+          :value="value"
         />
-        <template v-if="automatedBackup">
+        <template v-else>
           <div class="mb-20">
             <Checkbox
-              v-model:value="automatedBackup.enabled"
-              :label="t('dbaas.instance.form.automatedBackupEnabled')"
-              :mode="mode"
+              v-model:value="backupEnabled"
+              :label="t('dbaas.instance.form.backupEnabled')"
+              :mode="createOnlyMode"
             />
           </div>
-          <div class="row mb-20">
-            <div class="col span-6">
-              <LabeledInput
-                v-model:value="automatedBackup.preferredWindowUTC"
-                :label="t('dbaas.instance.form.backupWindow')"
-                :placeholder="BACKUP_DEFAULTS.preferredWindowUTC"
+          <Banner
+            v-if="isCreate"
+            color="info"
+            :label="t('dbaas.instance.form.backupCreateOnly')"
+          />
+          <template v-if="automatedBackup">
+            <div class="mb-20">
+              <Checkbox
+                v-model:value="automatedBackup.enabled"
+                :label="t('dbaas.instance.form.automatedBackupEnabled')"
                 :mode="mode"
-                :rules="fvGetAndReportPathRules('spec.backup.automated.preferredWindowUTC')"
-                :tooltip="t('dbaas.instance.form.backupWindowTooltip')"
               />
             </div>
-            <div class="col span-6">
-              <LabeledInput
-                v-model:value="automatedBackup.retainCount"
-                type="number"
-                :label="t('dbaas.instance.form.retainCount')"
-                :mode="mode"
-                :rules="fvGetAndReportPathRules('spec.backup.automated.retainCount')"
-                :tooltip="t('dbaas.instance.form.retainCountTooltip')"
-              />
+            <div class="row mb-20">
+              <div class="col span-6">
+                <LabeledInput
+                  v-model:value="automatedBackup.preferredWindowUTC"
+                  :label="t('dbaas.instance.form.backupWindow')"
+                  :placeholder="BACKUP_DEFAULTS.preferredWindowUTC"
+                  :mode="mode"
+                  :rules="fvGetAndReportPathRules('spec.backup.automated.preferredWindowUTC')"
+                  :tooltip="t('dbaas.instance.form.backupWindowTooltip')"
+                />
+              </div>
+              <div class="col span-6">
+                <LabeledInput
+                  v-model:value="automatedBackup.retainCount"
+                  type="number"
+                  :label="t('dbaas.instance.form.retainCount')"
+                  :mode="mode"
+                  :rules="fvGetAndReportPathRules('spec.backup.automated.retainCount')"
+                  :tooltip="t('dbaas.instance.form.retainCountTooltip')"
+                />
+              </div>
             </div>
-          </div>
+          </template>
         </template>
       </Tab>
 

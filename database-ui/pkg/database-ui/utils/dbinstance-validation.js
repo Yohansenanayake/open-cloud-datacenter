@@ -3,9 +3,11 @@
 // of as an API error on save. Each validator returns an i18n key (plus args) for
 // the problem, or undefined when the value is fine.
 
-// The operator names the VM "<name>-<8-char uid>"; KubeVirt VM names are DNS
-// labels (max 63), so the instance name can use at most 54 characters.
-export const MAX_INSTANCE_NAME_LENGTH = 54;
+// The operator names the metrics Service "pg-<name>-metrics", and Service names
+// are DNS labels (max 63), so the instance name can use at most 52 characters.
+// The operator does not check this itself (yohan-docs known-gaps
+// instance-name-length-not-validated.md in the operator repo).
+export const MAX_INSTANCE_NAME_LENGTH = 52;
 
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 const PG_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;

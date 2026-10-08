@@ -11,7 +11,54 @@ export const MANAGER_CLUSTERS_PAGE = 'dbaas-clusters';
 export const MANAGER_CLUSTERS_ROUTE = `${ MANAGER_PRODUCT_NAME }-c-cluster-clusters`;
 
 // Steve type IDs for the DBaaS operator CRDs (dbaas.opencloud.wso2.com/v1alpha1)
-export const DBAAS = { INSTANCE: 'dbaas.opencloud.wso2.com.dbinstance' };
+export const DBAAS = {
+  INSTANCE: 'dbaas.opencloud.wso2.com.dbinstance',
+  SNAPSHOT: 'dbaas.opencloud.wso2.com.dbsnapshot',
+  RESTORE:  'dbaas.opencloud.wso2.com.dbrestore',
+};
+
+// status.stage values of a DBRestore (api/v1alpha1/dbrestore_types.go)
+export const RESTORE_STAGE = {
+  PREPARING:         'Preparing',
+  RESTORING_VOLUME:  'RestoringVolume',
+  STARTING_DATABASE: 'StartingDatabase',
+  SUCCEEDED:         'Succeeded',
+  FAILED:            'Failed',
+};
+
+// Query parameters understood by the DBRestore create page
+export const RESTORE_QUERY = {
+  SNAPSHOT: 'snapshot', // <namespace>/<snapshot name>: preselect this snapshot
+  RETRY:    'retry', //    <namespace>/<restore name>: prefill from this failed restore
+};
+
+// Harvester VM images; DBaaS baked images are the ones carrying IMAGE_LABEL.BAKED
+export const HARVESTER_IMAGE = 'harvesterhci.io.virtualmachineimage';
+
+export const IMAGE_LABEL = {
+  BAKED:      'dbaas.opencloud.wso2.com/baked-image',
+  OS_VERSION: 'dbaas.opencloud.wso2.com/os-version',
+};
+
+// Baked-images pages (admin only) inside the per-cluster DBaaS product
+export const IMAGES_PAGE = 'dbaas-baked-images';
+export const IMAGES_ROUTE = `${ PRODUCT_NAME }-c-cluster-baked-images`;
+export const IMAGES_CREATE_ROUTE = `${ PRODUCT_NAME }-c-cluster-baked-images-create`;
+export const IMAGES_DETAIL_ROUTE = `${ PRODUCT_NAME }-c-cluster-baked-images-namespace-id`;
+
+// status.phase values of a DBSnapshot (derived by the operator from its Ready condition)
+export const SNAPSHOT_PHASE = {
+  QUEUED:      'Queued',
+  IN_PROGRESS: 'InProgress',
+  READY:       'Ready',
+  FAILED:      'Failed',
+  DELETING:    'Deleting',
+};
+
+export const SNAPSHOT_ORIGIN = {
+  MANUAL:    'Manual',
+  AUTOMATED: 'Automated',
+};
 
 // status.phase values derived by the operator (api/v1alpha1/dbinstance_types.go)
 export const DB_PHASE = {
