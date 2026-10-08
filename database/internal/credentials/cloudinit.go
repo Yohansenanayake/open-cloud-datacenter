@@ -463,6 +463,16 @@ ssh_pwauth: true
         echo "${RESTORE_ID}" > "${RESTORE_MARKER}"
       fi
 
+      # The baked image leaves PostgreSQL disabled so first boot and repave
+      # can prepare the data disk before starting the selected cluster.
+      # Once initialization (including any restore) succeeds, enable the
+      # umbrella unit for subsequent boots. Its generator starts the selected
+      # cluster with start.conf=auto. Do not use --now: the cluster is already
+      # running, and its explicit restart/readiness checks above remain the
+      # authority for this bootstrap.
+      systemctl enable postgresql.service \
+        || bootstrap_fail "could not enable PostgreSQL startup on boot"
+
       # Bootstrap-completion marker, checked by the KubeVirt readiness probe
       # (internal/harvester/typed_client.go). pg_isready alone answers "is a
       # postmaster listening", which goes true several steps earlier — while
