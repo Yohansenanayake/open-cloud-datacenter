@@ -194,6 +194,10 @@ kubectl apply -n <your-namespace> -k config/samples/
 kubectl get registries -A -w
 ```
 
+The above is the development path (kustomize + `make deploy`). For installing a
+released version via Helm and a Harvester `Addon` — the path an administrator
+uses — see [`INSTALL.md`](./INSTALL.md).
+
 ## Uninstalling
 
 Removing the operator does not remove anybody's registry:
