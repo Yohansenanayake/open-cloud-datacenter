@@ -33,16 +33,15 @@ kubectl get dbi -A -w
 ```
 
 `make install` only installs or updates CRDs; it does not update the controller.
-To deploy the already-published controller image, run:
+To deploy a published controller image, pass it to `make deploy`:
 
 ```sh
-make deploy IMG=ghcr.io/yohansenanayake/dbaas-controller:dev-202609211159
+make deploy IMG=<registry>/<name>:<tag>
 kubectl rollout status deployment/dbaas-controller-manager -n dbaas-system
 ```
 
-The Makefile and `config/manager/kustomization.yaml` default to this image.
-For future builds, pass the new image tag to `make deploy IMG=...`; this also
-updates the manager Kustomization used by direct `kubectl apply -k` commands.
+`make deploy IMG=...` also writes that image into
+`config/manager/kustomization.yaml`, which direct `kubectl apply -k` commands use.
 
 ~3 minutes from `apply` to `phase: available` on a stock Ubuntu cloud image;
 actual time depends on image pull and first-boot package-install speed.
