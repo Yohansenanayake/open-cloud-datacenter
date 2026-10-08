@@ -1,7 +1,8 @@
 import { IPlugin } from '@shell/core/types';
 import { MANAGEMENT } from '@shell/config/types';
+import { IF_HAVE } from '@shell/store/type-map';
 import {
-  BLANK_CLUSTER, DBAAS, MANAGER_CLUSTERS_PAGE, MANAGER_CLUSTERS_ROUTE, MANAGER_PRODUCT_NAME, PRODUCT_NAME
+  BLANK_CLUSTER, DBAAS, HARVESTER_IMAGE, IMAGES_PAGE, IMAGES_ROUTE, MANAGER_CLUSTERS_PAGE, MANAGER_CLUSTERS_ROUTE, MANAGER_PRODUCT_NAME, PRODUCT_NAME
 } from './types';
 
 export function init($plugin: IPlugin, store: any) {
@@ -43,7 +44,9 @@ function initManager($plugin: IPlugin, store: any) {
 // nav instead of nesting them in Cluster Explorer's. Rancher 2.15's DSL supports it,
 // but Shell's TypeMapProduct type does not declare it, hence the cast.
 function initCluster($plugin: IPlugin, store: any) {
-  const { product, basicType } = $plugin.DSL(store, PRODUCT_NAME);
+  const {
+    product, basicType, virtualType, weightType
+  } = $plugin.DSL(store, PRODUCT_NAME);
 
   product(<any>{
     inStore:             'cluster',
@@ -57,5 +60,19 @@ function initCluster($plugin: IPlugin, store: any) {
     },
   });
 
-  basicType([DBAAS.INSTANCE]);
+  // Baked VM images for the operator: Rancher admins only
+  virtualType({
+    labelKey:   'dbaas.images.title',
+    name:       IMAGES_PAGE,
+    namespaced: false,
+    ifHave:     IF_HAVE.ADMIN,
+    ifHaveType: HARVESTER_IMAGE,
+    route:      { name: IMAGES_ROUTE, params: { product: PRODUCT_NAME } },
+  });
+
+  basicType([DBAAS.INSTANCE, DBAAS.SNAPSHOT, DBAAS.RESTORE, IMAGES_PAGE]);
+  weightType(DBAAS.INSTANCE, 100, true);
+  weightType(DBAAS.SNAPSHOT, 90, true);
+  weightType(DBAAS.RESTORE, 80, true);
+  weightType(IMAGES_PAGE, 70, true);
 }

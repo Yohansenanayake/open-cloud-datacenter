@@ -2,7 +2,7 @@ import SteveModel from '@shell/plugins/steve/steve-class';
 import { colorForState } from '@shell/plugins/dashboard-store/resource-class';
 import { ucFirst } from '@shell/utils/string';
 import { insertAt } from '@shell/utils/array';
-import { DB_PHASE } from '../types';
+import { DB_PHASE, DBAAS } from '../types';
 import { DEFAULT_ALLOCATED_STORAGE_GIB, DEFAULT_INSTANCE_CLASS } from '../config/catalog';
 
 // Shown before the operator has reported a phase (e.g. a newly created instance)
@@ -196,14 +196,41 @@ export default class DBInstance extends SteveModel {
     const canUpdate = this.canUpdate;
     const protectedNow = !!this.spec?.deletionProtection;
 
+    // Power state (spec.running), like a Harvester VM's Start / Stop. Bulkable,
+    // so they also show as buttons above the list for a selection.
     insertAt(out, 0, {
+      action:     'startInstance',
+      label:      this.t('dbaas.instance.actions.start'),
+      icon:       'icon icon-play',
+      enabled:    canUpdate && !this.isDeleting && !this.wantsRunning,
+      bulkable:   true,
+      bulkAction: 'startInstances',
+    });
+    insertAt(out, 1, {
+      action:     'stopInstance',
+      altAction:  'stopInstanceNow',
+      label:      this.t('dbaas.instance.actions.stop'),
+      icon:       'icon icon-close',
+      enabled:    canUpdate && !this.isDeleting && this.wantsRunning,
+      bulkable:   true,
+      bulkAction: 'stopInstances',
+    });
+
+    insertAt(out, 2, {
       action:  'goToConnection',
       label:   this.t('dbaas.instance.actions.connection'),
       icon:    'icon icon-network',
       enabled: !!this.status?.endpoint?.address,
     });
 
-    insertAt(out, 1, {
+    insertAt(out, 3, {
+      action:  'takeSnapshot',
+      label:   this.t('dbaas.snapshot.actions.take'),
+      icon:    'icon icon-backup',
+      enabled: this.canTakeSnapshot,
+    });
+
+    insertAt(out, 4, {
       action:  protectedNow ? 'disableDeletionProtection' : 'enableDeletionProtection',
       label:   this.t(protectedNow ? 'dbaas.instance.actions.disableDeletionProtection' : 'dbaas.instance.actions.enableDeletionProtection'),
       icon:    protectedNow ? 'icon icon-unlock' : 'icon icon-lock',
@@ -213,9 +240,98 @@ export default class DBInstance extends SteveModel {
     return out;
   }
 
+  // --- Snapshots -----------------------------------------------------------
+
+  // Backups can only be turned on when the instance is created (spec.backup)
+  get hasBackup() {
+    return !!this.spec?.backup;
+  }
+
+  // Why "Take Snapshot" is unavailable; the operator would reject the snapshot
+  // permanently (SourceBackupDisabled / SourceNotReady / SourceDeleting)
+  get takeSnapshotBlockedReason() {
+    const schema = this.$rootGetters['cluster/schemaFor'](DBAAS.SNAPSHOT);
+
+    if (!schema?.collectionMethods?.find((m) => m.toLowerCase() === 'post')) {
+      return this.t('dbaas.snapshot.blocked.noPermission');
+    }
+    if (!this.hasBackup) {
+      return this.t('dbaas.snapshot.blocked.backupDisabled');
+    }
+    if (this.isDeleting) {
+      return this.t('dbaas.snapshot.blocked.deleting');
+    }
+    if (this.phase !== DB_PHASE.AVAILABLE) {
+      return this.t('dbaas.snapshot.blocked.notAvailable');
+    }
+
+    return '';
+  }
+
+  get canTakeSnapshot() {
+    return !this.takeSnapshotBlockedReason;
+  }
+
+  takeSnapshot() {
+    this.$dispatch('promptModal', {
+      component:  'DBaaSTakeSnapshotDialog',
+      resources:  [this],
+      modalWidth: '520px',
+    });
+  }
+
+  // Snapshots taken from this instance (by UID, so an older instance of the
+  // same name doesn't contribute its snapshots)
+  get snapshots() {
+    const uid = this.metadata?.uid;
+
+    return this.$getters['all'](DBAAS.SNAPSHOT).filter((s) => s.namespace === this.namespace &&
+      s.sourceName === this.name &&
+      (!s.source.instanceUID || s.source.instanceUID === uid));
+  }
+
   // Detail page, opened on its Connection tab
   goToConnection() {
     return this.currentRouter().push({ ...this.detailLocation, hash: '#connection' });
+  }
+
+  // --- Power (spec.running) ---------------------------------------------------
+
+  // Desired power state; the operator defaults an omitted spec.running to true
+  get wantsRunning() {
+    return this.spec?.running !== false;
+  }
+
+  setRunning(running) {
+    return this.patch([{
+      op: 'add', path: '/spec/running', value: running
+    }], {}, false, true);
+  }
+
+  startInstance() {
+    return this.setRunning(true);
+  }
+
+  startInstances(instances) {
+    return Promise.all(instances.map((i) => i.startInstance()));
+  }
+
+  // Stopping makes the database unavailable, so it is confirmed first
+  stopInstance() {
+    return this.stopInstances([this]);
+  }
+
+  stopInstances(instances) {
+    this.$dispatch('promptModal', {
+      component:  'DBaaSConfirmStopDialog',
+      resources:  instances,
+      modalWidth: '480px',
+    });
+  }
+
+  // Shift-click on Stop: skip the confirmation (as Harvester does for VMs)
+  stopInstanceNow() {
+    return this.setRunning(false);
   }
 
   enableDeletionProtection() {
