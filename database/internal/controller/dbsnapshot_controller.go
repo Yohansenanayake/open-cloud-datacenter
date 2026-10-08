@@ -204,6 +204,12 @@ func (r *DBSnapshotReconciler) reconcileCreate(ctx context.Context, snap *dbaasv
 		// record what it captured.
 		snap.Status.Source = sourceMetadataFrom(&source, r.DatabaseDefaults)
 	}
+	// Display only: when the backup started (queue time excluded) and how
+	// far along it is, both read off the backup itself.
+	if snap.Status.StartTime == nil && !status.CreatedAt.IsZero() {
+		snap.Status.StartTime = &metav1.Time{Time: status.CreatedAt}
+	}
+	snap.Status.Progress = int32(min(max(status.Progress, 0), 100))
 	return r.trackBackup(ctx, snap, &source, holder, status)
 }
 
@@ -296,6 +302,9 @@ func sourceMetadataFrom(source *dbaasv1.DBInstance, defaults operatorconfig.Data
 		StorageType:      eff.StorageType,
 		AllocatedStorage: source.Spec.AllocatedStorage,
 		ImageRevision:    source.Status.CurrentImageRevision,
+		DBInstanceClass:  source.Spec.DBInstanceClass,
+		NetworkRef:       source.Spec.NetworkRef,
+		Backup:           source.Spec.Backup.DeepCopy(),
 	}
 }
 
@@ -486,6 +495,13 @@ func (r *DBSnapshotReconciler) setReady(ctx context.Context, snap *dbaasv1.DBSna
 	snap.Status.SetCondition(metav1.Condition{
 		Type: dbaasv1.ConditionSnapshotReady, Status: status, Reason: string(reason), Message: msg,
 	})
+	snap.Status.Phase = snapshotPhase(snap, status, reason)
+	if snap.Status.CompletionTime == nil && (snap.Status.Phase == dbaasv1.SnapshotPhaseReady || snap.Status.Phase == dbaasv1.SnapshotPhaseFailed) {
+		snap.Status.CompletionTime = &metav1.Time{Time: r.now()}
+	}
+	if status == metav1.ConditionTrue {
+		snap.Status.Progress = 100
+	}
 	snap.Status.ObservedGeneration = snap.Generation
 	if err := r.Status().Update(ctx, snap); err != nil {
 		if apierrors.IsConflict(err) {
@@ -501,6 +517,23 @@ func (r *DBSnapshotReconciler) setReady(ctx context.Context, snap *dbaasv1.DBSna
 		r.Recorder.Event(snap, eventType, string(reason), msg)
 	}
 	return result, nil
+}
+
+// snapshotPhase derives the display phase from the Ready condition being
+// written, so the two never disagree.
+func snapshotPhase(snap *dbaasv1.DBSnapshot, status metav1.ConditionStatus, reason dbaasv1.ConditionReason) string {
+	switch {
+	case !snap.DeletionTimestamp.IsZero():
+		return dbaasv1.SnapshotPhaseDeleting
+	case status == metav1.ConditionTrue:
+		return dbaasv1.SnapshotPhaseReady
+	case isTerminalSnapshotReason(reason):
+		return dbaasv1.SnapshotPhaseFailed
+	case reason == dbaasv1.ReasonSnapshotBackupInProgress:
+		return dbaasv1.SnapshotPhaseInProgress
+	default: // BackupQueued, SnapshotHoldWaiting
+		return dbaasv1.SnapshotPhaseQueued
+	}
 }
 
 func isTerminalSnapshotReason(reason dbaasv1.ConditionReason) bool {

@@ -46,8 +46,12 @@ type DBRestoreSpec struct {
 	// TargetInstanceName is the name of the DBInstance this restore
 	// creates. Deliberately independent of this object's own name: a retry
 	// after a failed attempt creates a new DBRestore object and can still
-	// target the same instance name.
+	// target the same instance name. Held to DBInstance's own name rule
+	// (MaxInstanceNameLength, DNS-label alphabet), so a restore can't be
+	// accepted only to fail when it creates its target.
 	// +required
+	// +kubebuilder:validation:MaxLength=52
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetInstanceName string `json:"targetInstanceName"`
 
 	// DBInstanceClass is the target instance's compute class —

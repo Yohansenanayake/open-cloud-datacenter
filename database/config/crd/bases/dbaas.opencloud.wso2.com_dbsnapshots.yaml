@@ -23,12 +23,16 @@ spec:
     - jsonPath: .status.origin
       name: Origin
       type: string
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
-      name: Ready
+    - jsonPath: .status.phase
+      name: Phase
       type: string
     - jsonPath: .status.conditions[?(@.type=='Ready')].reason
       name: Reason
       type: string
+    - jsonPath: .status.progress
+      name: Progress
+      priority: 1
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -88,6 +92,12 @@ spec:
           status:
             description: DBSnapshotStatus is the observed state of a DBSnapshot.
             properties:
+              completionTime:
+                description: |-
+                  CompletionTime is when the snapshot was first observed finished:
+                  Ready, failed, timed out or rejected. Set once.
+                format: date-time
+                type: string
               conditions:
                 description: Conditions for this snapshot's backend backup.
                 items:
@@ -169,6 +179,21 @@ spec:
                   controller created on the automated schedule. Recorded once at
                   creation; never changes afterward.
                 type: string
+              phase:
+                description: |-
+                  Phase summarizes the Ready condition for display: Queued, InProgress,
+                  Ready, Failed or Deleting. Output only — written together with the
+                  condition, so it can't disagree with it; reconcile logic reads
+                  conditions, never this.
+                type: string
+              progress:
+                description: |-
+                  Progress is the backend backup's progress, 0-100, as Harvester reports
+                  it for the whole VM backup (OS and data disks together).
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               source:
                 description: |-
                   Source records the restore-relevant subset of the source DBInstance's
@@ -186,6 +211,53 @@ spec:
                       not necessarily its current size — allocatedStorage is mutable, and a
                       restore must match what was actually backed up.
                     type: integer
+                  backup:
+                    description: |-
+                      BackupSpec configures backup capability for a DBInstance. Continuous WAL
+                      archiving is always enabled whenever Backup is non-nil, independent of
+                      Automated.Enabled — there is no separate WAL on/off field.
+                    properties:
+                      automated:
+                        default: {}
+                        description: |-
+                          Automated controls scheduled daily snapshots. Defaulted when omitted
+                          from an explicitly-supplied backup object.
+                        properties:
+                          enabled:
+                            default: true
+                            description: |-
+                              Enabled starts/stops new daily snapshots and new automatic pruning.
+                              Existing retained snapshots, manual snapshots, and WAL archiving are
+                              unaffected by disabling this.
+                            type: boolean
+                          preferredWindowUTC:
+                            default: 02:00-03:00
+                            description: |-
+                              PreferredWindowUTC is the UTC window, e.g. "02:00-03:00", the daily
+                              snapshot is scheduled inside. The controller derives one stable
+                              minute inside the window per instance (hashed from the instance
+                              UID) rather than starting every instance at the window's edge.
+                            pattern: ^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$
+                            type: string
+                          retainCount:
+                            default: 7
+                            description: |-
+                              RetainCount is how many of the newest successful automated snapshots
+                              to keep; older ones are pruned. A restore hold can temporarily keep
+                              an otherwise-prunable snapshot past this count.
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                  dbInstanceClass:
+                    description: |-
+                      DBInstanceClass, NetworkRef and Backup are the source's settings at
+                      snapshot time, recorded as hints only: a UI can suggest them for a
+                      restore even after the source is gone. A restore never inherits them —
+                      DBRestore.spec still requires its own class and network, and backup
+                      is opt-in for the target. (The source's static IP is deliberately not
+                      recorded: suggesting it invites an address conflict.)
+                    type: string
                   dbName:
                     type: string
                   engineVersion:
@@ -204,11 +276,19 @@ spec:
                     type: string
                   masterUsername:
                     type: string
+                  networkRef:
+                    type: string
                   port:
                     type: integer
                   storageType:
                     type: string
                 type: object
+              startTime:
+                description: |-
+                  StartTime is when the backend backup was created — time spent queued
+                  for a backup slot doesn't count. Set once.
+                format: date-time
+                type: string
             type: object
         type: object
     served: true

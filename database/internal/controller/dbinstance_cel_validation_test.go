@@ -19,10 +19,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -226,6 +228,64 @@ var _ = Describe("DBInstance dbName and masterUsername identifier rules", func()
 			"x123456789-123456789-123456789-123456789-123456789-123456789-123456789",
 		} {
 			Expect(create(dbaasv1alpha1.DefaultDBName(instanceName), "")).To(Succeed(), "instance name %q", instanceName)
+		}
+	})
+})
+
+var _ = Describe("DBInstance and restore-target name rule", func() {
+	ctx := context.Background()
+
+	instance := func(name string) *dbaasv1alpha1.DBInstance {
+		return &dbaasv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: dbaasv1alpha1.DBInstanceSpec{
+				DBInstanceClass: "db.t3.small", AllocatedStorage: 20, NetworkRef: "default/vm-network",
+			},
+		}
+	}
+	restore := func(name, target string) *dbaasv1alpha1.DBRestore {
+		return &dbaasv1alpha1.DBRestore{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: dbaasv1alpha1.DBRestoreSpec{
+				SnapshotRef:        corev1.LocalObjectReference{Name: "some-snapshot"},
+				TargetInstanceName: target,
+				DBInstanceClass:    "db.t3.small",
+				NetworkRef:         "default/vm-network",
+				AllocatedStorage:   20,
+			},
+		}
+	}
+	longest := "n" + strings.Repeat("x", dbaasv1alpha1.MaxInstanceNameLength-1)
+
+	It("accepts a name of exactly the maximum length, and later updates to it", func() {
+		inst := instance(longest)
+		Expect(k8sClient.Create(ctx, inst)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, inst) })
+
+		// The rule is create-only: an update re-checks nothing about the name.
+		inst.Spec.AllocatedStorage = 30
+		Expect(k8sClient.Update(ctx, inst)).To(Succeed())
+	})
+
+	DescribeTable("rejects names its child objects can't use",
+		func(name string) {
+			err := k8sClient.Create(ctx, instance(name))
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+			Expect(err.Error()).To(ContainSubstring("pg-<name>-metrics"))
+		},
+		Entry("one character too long", longest+"x"),
+		Entry("a dot (a valid object name, but not a Service name or hostname)", "orders.prod"),
+	)
+
+	It("holds a restore's target name to the same rule", func() {
+		ok := restore("cel-name-target-ok", longest)
+		Expect(k8sClient.Create(ctx, ok)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ok) })
+
+		for i, target := range []string{longest + "x", "orders.prod", "Orders"} {
+			err := k8sClient.Create(ctx, restore(fmt.Sprintf("cel-name-target-bad-%d", i), target))
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "target %q: error %v", target, err)
+			Expect(err.Error()).To(ContainSubstring("spec.targetInstanceName"))
 		}
 	})
 })

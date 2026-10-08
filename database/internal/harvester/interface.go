@@ -160,6 +160,9 @@ type VMBackupStatus struct {
 	// API server, so a backup's age can always be re-checked.
 	CreatedAt  time.Time
 	ReadyToUse bool
+	// Progress is the whole backup's progress, 0-100, as Harvester reports
+	// it (all of the VM's volumes together).
+	Progress int
 	// ErrorMessage is empty unless Harvester recorded a backup failure.
 	ErrorMessage string
 	// DataVolumeSnapshotName is the VolumeSnapshot object name backing the

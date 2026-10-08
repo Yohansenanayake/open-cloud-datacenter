@@ -21,6 +21,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// MaxInstanceNameLength is the longest DBInstance name the operator
+// accepts: "pg-" + name + "-metrics" must fit a 63-character Service name.
+// The CRD's CEL rules hard-code it (markers take literals); a test keeps
+// them in step.
+const MaxInstanceNameLength = 52
+
 // DBInstanceSpec defines the desired state of a managed PostgreSQL database.
 //
 // Field support status (v1alpha1):
@@ -526,8 +532,16 @@ type ResourceRefs struct {
 // +kubebuilder:printcolumn:name="ImageDrift",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].status`
 // +kubebuilder:printcolumn:name="ImageDriftReason",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].reason`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || (size(self.metadata.name) <= 52 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))",message="metadata.name must be at most 52 characters of lowercase letters, digits and '-' (no '.'): it names the instance's VM and its pg-<name>-metrics Service",optionalOldSelf=true
 
 // DBInstance represents a managed PostgreSQL database on Harvester HCI.
+//
+// Its name is limited to MaxInstanceNameLength characters and the DNS-label
+// alphabet (no dots), checked at creation only: child objects are named
+// from it, and the strictest is the pg-<name>-metrics Service, a 63-character
+// DNS-1035 label. Create-only on purpose — the name never changes, so a
+// re-check on update could only ever block an object created before the
+// rule, including its finalizer removal.
 // Namespaced — each DBInstance lives in a tenant namespace. All Harvester
 // child resources (VM, DataVolume, Secret, Service, ServiceMonitor) are
 // created in the same namespace as the DBInstance.

@@ -262,3 +262,93 @@ func TestDBSnapshotBackupReadyAtTheDeadlineSucceeds(t *testing.T) {
 
 	wantReady(t, c, snap, metav1.ConditionTrue, dbaasv1.ReasonSnapshotBackupReady)
 }
+
+// ---- display status: phase, start/completion time, progress ----
+
+func TestDBSnapshotDisplayStatusThroughItsLifecycle(t *testing.T) {
+	source := availableSourceInstance()
+	snap := queuedSnapshot()
+	started := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
+	stub := &testutil.StubHarvester{}
+	stub.VMBackupStatus.CreatedAt = started
+	stub.VMBackupStatus.Progress = 40
+	r, c := newQueuedSnapshotReconciler(t, stub, source, snap)
+	now := started.Add(30 * time.Second)
+	r.Now = func() time.Time { return now }
+
+	// Queued: no start time — time spent queued doesn't count.
+	reconcileSnapshot(t, r, snap)
+	got := getSnapshot(t, c, snap).Status
+	if got.Phase != dbaasv1.SnapshotPhaseQueued || got.StartTime != nil || got.CompletionTime != nil {
+		t.Fatalf("queued: phase %q start %v completion %v, want Queued and no times", got.Phase, got.StartTime, got.CompletionTime)
+	}
+
+	// Running: start time is the backup's own creation; progress mirrored.
+	grantSlot(t, c, snap)
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap))
+	got = getSnapshot(t, c, snap).Status
+	if got.Phase != dbaasv1.SnapshotPhaseInProgress || got.Progress != 40 || got.CompletionTime != nil ||
+		got.StartTime == nil || !got.StartTime.Time.Equal(started) {
+		t.Fatalf("running: %+v, want InProgress, progress 40, start %v, no completion", got, started)
+	}
+
+	// Ready: progress 100, completion recorded, start unchanged.
+	stub.VMBackupStatus = backupReadyStatus()
+	stub.VMBackupStatus.CreatedAt = started.Add(time.Hour) // a later read must not move the start
+	now = started.Add(2 * time.Minute)
+	reconcileSnapshot(t, r, getSnapshot(t, c, snap))
+	got = getSnapshot(t, c, snap).Status
+	if got.Phase != dbaasv1.SnapshotPhaseReady || got.Progress != 100 ||
+		got.CompletionTime == nil || !got.CompletionTime.Time.Equal(now) || !got.StartTime.Time.Equal(started) {
+		t.Fatalf("ready: %+v, want Ready, progress 100, completion %v, start %v", got, now, started)
+	}
+}
+
+func TestDBSnapshotFailureAndRejectionRecordCompletion(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stub   *testutil.StubHarvester
+		source func() *dbaasv1.DBInstance
+	}{
+		"backup failed": {&testutil.StubHarvester{VMBackupStatus: backupFailedStatus("target unreachable")}, availableSourceInstance},
+		"rejected":      {&testutil.StubHarvester{}, deletingSource},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snap := queuedSnapshot()
+			r, c := newQueuedSnapshotReconciler(t, tc.stub, tc.source(), snap)
+			grantSlot(t, c, snap)
+
+			reconcileSnapshot(t, r, snap)
+
+			got := getSnapshot(t, c, snap).Status
+			if got.Phase != dbaasv1.SnapshotPhaseFailed || got.CompletionTime == nil {
+				t.Fatalf("phase %q completion %v, want Failed with a completion time", got.Phase, got.CompletionTime)
+			}
+		})
+	}
+}
+
+func TestDBSnapshotPhaseFollowsTheReadyCondition(t *testing.T) {
+	deleting := queuedSnapshot()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	for name, tc := range map[string]struct {
+		snap   *dbaasv1.DBSnapshot
+		status metav1.ConditionStatus
+		reason dbaasv1.ConditionReason
+		want   string
+	}{
+		"queued":         {queuedSnapshot(), metav1.ConditionFalse, dbaasv1.ReasonSnapshotBackupQueued, dbaasv1.SnapshotPhaseQueued},
+		"hold waiting":   {queuedSnapshot(), metav1.ConditionFalse, dbaasv1.ReasonSnapshotHoldWaiting, dbaasv1.SnapshotPhaseQueued},
+		"in progress":    {queuedSnapshot(), metav1.ConditionFalse, dbaasv1.ReasonSnapshotBackupInProgress, dbaasv1.SnapshotPhaseInProgress},
+		"ready":          {queuedSnapshot(), metav1.ConditionTrue, dbaasv1.ReasonSnapshotBackupReady, dbaasv1.SnapshotPhaseReady},
+		"failed":         {queuedSnapshot(), metav1.ConditionFalse, dbaasv1.ReasonSnapshotBackupFailed, dbaasv1.SnapshotPhaseFailed},
+		"timed out":      {queuedSnapshot(), metav1.ConditionFalse, dbaasv1.ReasonSnapshotBackupTimedOut, dbaasv1.SnapshotPhaseFailed},
+		"rejected":       {queuedSnapshot(), metav1.ConditionFalse, dbaasv1.ReasonSnapshotSourceNotReady, dbaasv1.SnapshotPhaseFailed},
+		"deleting":       {deleting, metav1.ConditionFalse, dbaasv1.ReasonSnapshotDeletionWaitingForRestore, dbaasv1.SnapshotPhaseDeleting},
+		"deleting ready": {deleting, metav1.ConditionTrue, dbaasv1.ReasonSnapshotBackupReady, dbaasv1.SnapshotPhaseDeleting},
+	} {
+		if got := snapshotPhase(tc.snap, tc.status, tc.reason); got != tc.want {
+			t.Errorf("%s: phase = %q, want %q", name, got, tc.want)
+		}
+	}
+}

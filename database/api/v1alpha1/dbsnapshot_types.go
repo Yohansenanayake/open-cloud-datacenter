@@ -73,7 +73,40 @@ type DBSnapshotStatus struct {
 	// only available while the source instance still exists.
 	// +optional
 	DataVolumeSnapshotName string `json:"dataVolumeSnapshotName,omitempty"`
+
+	// Phase summarizes the Ready condition for display: Queued, InProgress,
+	// Ready, Failed or Deleting. Output only — written together with the
+	// condition, so it can't disagree with it; reconcile logic reads
+	// conditions, never this.
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// StartTime is when the backend backup was created — time spent queued
+	// for a backup slot doesn't count. Set once.
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// CompletionTime is when the snapshot was first observed finished:
+	// Ready, failed, timed out or rejected. Set once.
+	// +optional
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Progress is the backend backup's progress, 0-100, as Harvester reports
+	// it for the whole VM backup (OS and data disks together).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	Progress int32 `json:"progress,omitempty"`
 }
+
+const (
+	// DBSnapshotStatus.Phase values.
+	SnapshotPhaseQueued     = "Queued"
+	SnapshotPhaseInProgress = "InProgress"
+	SnapshotPhaseReady      = "Ready"
+	SnapshotPhaseFailed     = "Failed"
+	SnapshotPhaseDeleting   = "Deleting"
+)
 
 // SourceMetadata is the source DBInstance's restore-inheritance data,
 // recorded on the DBSnapshot that resulted from it.
@@ -104,6 +137,19 @@ type SourceMetadata struct {
 	// snapshot time.
 	// +optional
 	ImageRevision string `json:"imageRevision,omitempty"`
+
+	// DBInstanceClass, NetworkRef and Backup are the source's settings at
+	// snapshot time, recorded as hints only: a UI can suggest them for a
+	// restore even after the source is gone. A restore never inherits them —
+	// DBRestore.spec still requires its own class and network, and backup
+	// is opt-in for the target. (The source's static IP is deliberately not
+	// recorded: suggesting it invites an address conflict.)
+	// +optional
+	DBInstanceClass string `json:"dbInstanceClass,omitempty"`
+	// +optional
+	NetworkRef string `json:"networkRef,omitempty"`
+	// +optional
+	Backup *BackupSpec `json:"backup,omitempty"`
 }
 
 const (
@@ -151,8 +197,9 @@ func (in *DBSnapshot) SetConditions(conditions []metav1.Condition) {
 // +kubebuilder:resource:shortName=dbsnap
 // +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.sourceInstanceRef.name`
 // +kubebuilder:printcolumn:name="Origin",type=string,JSONPath=`.status.origin`
-// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=='Ready')].status`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=='Ready')].reason`
+// +kubebuilder:printcolumn:name="Progress",type=integer,JSONPath=`.status.progress`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DBSnapshot represents one durable backup of a DBInstance. Namespaced —

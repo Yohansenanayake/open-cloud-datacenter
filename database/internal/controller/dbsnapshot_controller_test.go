@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -185,8 +186,12 @@ func TestDBSnapshotAdmissionCapturesSourceMetadataOnce(t *testing.T) {
 		StorageType:      "longhorn",
 		AllocatedStorage: 20,
 		ImageRevision:    "test-ubuntu-24-04-postgres-r3",
+		// Hints for a later restore's UI, never inherited by it.
+		DBInstanceClass: "db.t3.small",
+		NetworkRef:      "default/vm-network",
+		Backup:          &dbaasv1.BackupSpec{},
 	}
-	if got.Status.Source == nil || *got.Status.Source != *want {
+	if got.Status.Source == nil || !reflect.DeepEqual(*got.Status.Source, *want) {
 		t.Fatalf("Status.Source = %+v, want %+v", got.Status.Source, want)
 	}
 

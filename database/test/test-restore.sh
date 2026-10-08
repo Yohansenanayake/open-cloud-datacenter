@@ -456,6 +456,16 @@ EOF
   [[ "$(jp dbsnapshot "$SNAPSHOT" '{.status.conditions[?(@.type=="Ready")].reason}')" == "BackupReady" ]] \
     || die "snapshot failed: $(jp dbsnapshot "$SNAPSHOT" '{.status.conditions[?(@.type=="Ready")].message}')"
   pass "DBSnapshot/$SNAPSHOT is Ready"
+  check "snapshot display status: phase and progress" "Ready/100" \
+    "$(jp dbsnapshot "$SNAPSHOT" '{.status.phase}/{.status.progress}')"
+  local started completed
+  started=$(date -u -d "$(jp dbsnapshot "$SNAPSHOT" '{.status.startTime}')" +%s 2>/dev/null)
+  completed=$(date -u -d "$(jp dbsnapshot "$SNAPSHOT" '{.status.completionTime}')" +%s 2>/dev/null)
+  [[ -n "$started" && -n "$completed" ]] && (( started <= completed )) \
+    && pass "snapshot records its start and completion times ($(( completed - started ))s)" \
+    || fail "snapshot start/completion times missing or out of order (start '$started', completion '$completed')"
+  check "snapshot records the source's class and network as restore hints" "$DB_CLASS/$NETWORK_REF" \
+    "$(jp dbsnapshot "$SNAPSHOT" '{.status.source.dbInstanceClass}/{.status.source.networkRef}')"
 
   # Written strictly after the snapshot: a restore must NOT contain these.
   out=$(master_script "$SOURCE" "$DB_NAME" <<EOF
