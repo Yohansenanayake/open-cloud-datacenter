@@ -49,6 +49,7 @@ const MaxInstanceNameLength = 52
 // check — see immutableDrift's doc comment.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.backup) == has(oldSelf.backup)",message="backup cannot be added or removed after creation"
+// +kubebuilder:validation:XValidation:rule="has(self.restoredFrom) == has(oldSelf.restoredFrom)",message="restoredFrom cannot be added or removed after creation"
 type DBInstanceSpec struct {
 	// DBInstanceClass maps to VM CPU/RAM. e.g. "db.t3.medium", "db.m5.large".
 	// Mutable: changing the class on an Available instance resizes the VM.
@@ -211,7 +212,10 @@ type DBInstanceSpec struct {
 
 	// RestoredFrom identifies the DBRestore that created this instance, if
 	// any. Set only by DBRestoreReconciler. Immutable afterward: a terminally failed
-	// restore is retried by creating a new DBRestore (and a new DBInstance)
+	// restore is retried by creating a new DBRestore (and a new DBInstance).
+	// Its presence is immutable too (the rule on DBInstanceSpec): the field
+	// rule below only runs when both old and new objects have it, and adding
+	// or removing it would change the instance's disk names.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="restoredFrom is immutable after creation"
 	RestoredFrom *RestoredFromRef `json:"restoredFrom,omitempty"`

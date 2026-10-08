@@ -289,3 +289,48 @@ var _ = Describe("DBInstance and restore-target name rule", func() {
 		}
 	})
 })
+
+// restoredFrom's field rule (self == oldSelf) only runs when both objects
+// have the field, so its presence needs its own rule: adding or removing it
+// would change the instance's disk names.
+var _ = Describe("DBInstance restoredFrom presence rule", func() {
+	ctx := context.Background()
+
+	create := func(name string, from *dbaasv1alpha1.RestoredFromRef) *dbaasv1alpha1.DBInstance {
+		inst := &dbaasv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: dbaasv1alpha1.DBInstanceSpec{
+				DBInstanceClass: "db.t3.small", AllocatedStorage: 20, NetworkRef: "default/vm-network",
+				RestoredFrom: from,
+			},
+		}
+		Expect(k8sClient.Create(ctx, inst)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, inst) })
+		return inst
+	}
+	from := func() *dbaasv1alpha1.RestoredFromRef {
+		return &dbaasv1alpha1.RestoredFromRef{DBRestoreName: "orders-restore", DBRestoreUID: "restore-uid"}
+	}
+
+	It("rejects adding restoredFrom to an instance created without it", func() {
+		inst := create("cel-restoredfrom-add", nil)
+		inst.Spec.RestoredFrom = from()
+		err := k8sClient.Update(ctx, inst)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("restoredFrom cannot be added or removed"))
+	})
+
+	It("rejects removing restoredFrom from a restored instance", func() {
+		inst := create("cel-restoredfrom-remove", from())
+		inst.Spec.RestoredFrom = nil
+		err := k8sClient.Update(ctx, inst)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("restoredFrom cannot be added or removed"))
+	})
+
+	It("still allows other updates to a restored instance", func() {
+		inst := create("cel-restoredfrom-keep", from())
+		inst.Spec.AllocatedStorage = 30
+		Expect(k8sClient.Update(ctx, inst)).To(Succeed())
+	})
+})

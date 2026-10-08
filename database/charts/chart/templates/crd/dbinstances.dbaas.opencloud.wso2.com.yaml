@@ -276,7 +276,10 @@ spec:
                 description: |-
                   RestoredFrom identifies the DBRestore that created this instance, if
                   any. Set only by DBRestoreReconciler. Immutable afterward: a terminally failed
-                  restore is retried by creating a new DBRestore (and a new DBInstance)
+                  restore is retried by creating a new DBRestore (and a new DBInstance).
+                  Its presence is immutable too (the rule on DBInstanceSpec): the field
+                  rule below only runs when both old and new objects have it, and adding
+                  or removing it would change the instance's disk names.
                 properties:
                   dbRestoreName:
                     description: |-
@@ -395,6 +398,8 @@ spec:
             x-kubernetes-validations:
             - message: backup cannot be added or removed after creation
               rule: has(self.backup) == has(oldSelf.backup)
+            - message: restoredFrom cannot be added or removed after creation
+              rule: has(self.restoredFrom) == has(oldSelf.restoredFrom)
           status:
             description: DBInstanceStatus defines the observed state of a DBInstance.
             properties:
