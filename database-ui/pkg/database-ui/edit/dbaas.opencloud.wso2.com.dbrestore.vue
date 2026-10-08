@@ -18,10 +18,7 @@ import { timeUntil } from '../utils/time';
 import {
   validateBackupWindow, validateInstanceName, validateRequired, validateRetainCount, validateStorage
 } from '../utils/dbinstance-validation';
-
-const NETWORK_TYPE_LABEL = 'network.harvesterhci.io/type';
-const OVERLAY_NETWORK = 'OverlayNetwork';
-const STORAGE_NETWORK_ANNOTATION = 'storage-network.settings.harvesterhci.io';
+import { databaseNetworkOptions } from '../utils/networks';
 
 // Restore a snapshot into a new DBInstance (create), or follow a restore's
 // progress (view). The DBRestore spec is immutable, so there is no edit mode.
@@ -60,7 +57,7 @@ export default {
     this.snapshots = snapshots;
     this.instances = instances;
     this.canListNetworks = canList(NETWORK_ATTACHMENT);
-    this.networks = networks.filter((n) => !n.metadata?.annotations?.[STORAGE_NETWORK_ANNOTATION]);
+    this.networks = networks;
 
     if (this.isCreate) {
       this.prefillFromQuery();
@@ -148,13 +145,8 @@ export default {
       return options;
     },
 
-    // VLAN networks only: DBRestore cannot set dnsServerIP yet, which overlay
-    // networks need (yohan-docs known-gaps dns-server-ip-restore-and-edits.md)
     networkOptions() {
-      return this.networks
-        .filter((n) => n.metadata?.labels?.[NETWORK_TYPE_LABEL] !== OVERLAY_NETWORK)
-        .map((n) => ({ label: n.id, value: n.id }))
-        .sort((a, b) => a.label.localeCompare(b.label));
+      return databaseNetworkOptions(this.networks);
     },
 
     backupEnabled: {
@@ -450,7 +442,7 @@ export default {
         </div>
       </div>
       <p class="text-muted mb-20">
-        {{ t('dbaas.restore.form.vlanOnly') }}
+        {{ t('dbaas.instance.form.vlanOnly') }}
       </p>
 
       <div class="mb-20">
