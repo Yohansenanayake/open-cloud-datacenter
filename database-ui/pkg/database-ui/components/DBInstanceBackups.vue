@@ -5,9 +5,7 @@ import { timeUntil } from '../utils/time';
 import Loading from '@shell/components/Loading';
 import { Banner } from '@components/Banner';
 import { RcButton } from '@components/RcButton';
-import {
-  AGE, NAME, STATE
-} from '@shell/config/table-headers';
+import { AGE, NAME, STATE } from '@shell/config/table-headers';
 import { DBAAS } from '../types';
 
 // Backups of one DBInstance (view mode of its Backup tab): the schedule

@@ -8,9 +8,7 @@ import { RadioGroup } from '@components/Form/Radio';
 import { Banner } from '@components/Banner';
 import { NAMESPACE, STORAGE_CLASS } from '@shell/config/types';
 import { exceptionToErrorsArray } from '@shell/utils/error';
-import {
-  HARVESTER_IMAGE, IMAGE_LABEL, IMAGES_ROUTE
-} from '../types';
+import { HARVESTER_IMAGE, IMAGE_LABEL, IMAGES_ROUTE } from '../types';
 import { BAKED_IMAGE_OS_VERSIONS, BAKED_IMAGE_REVISIONS } from '../config/catalog';
 import { isBakedImage, mostUsedNamespace } from '../utils/baked-images';
 import { imageUploads, uploadImageFile } from '../utils/image-uploads';

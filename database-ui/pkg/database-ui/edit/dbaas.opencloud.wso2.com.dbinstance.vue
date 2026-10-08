@@ -21,9 +21,7 @@ import { Banner } from '@components/Banner';
 import { _CREATE, _VIEW } from '@shell/config/query-params';
 import { NETWORK_ATTACHMENT, STORAGE_CLASS } from '@shell/config/types';
 import { DBAAS } from '../types';
-import {
-  BACKUP_DEFAULTS, ENGINE_VERSIONS, INSTANCE_CLASSES, OPERATOR_DEFAULTS
-} from '../config/catalog';
+import { BACKUP_DEFAULTS, ENGINE_VERSIONS, INSTANCE_CLASSES, OPERATOR_DEFAULTS } from '../config/catalog';
 import {
   defaultDBName, validateBackupWindow, validateDBName, validateInstanceName, validateIPv4,
   validateMasterUsername, validatePort, validateRequired, validateRetainCount, validateStorage
@@ -90,14 +88,14 @@ export default {
     return {
       OPERATOR_DEFAULTS,
       BACKUP_DEFAULTS,
-      networks:          [],
-      storageClasses:    [],
-      canListNetworks:   true,
-      hasBackupField:    !!this.value.spec.backup,
-      activeTab:         null,
+      networks:        [],
+      storageClasses:  [],
+      canListNetworks: true,
+      hasBackupField:  !!this.value.spec.backup,
+      activeTab:       null,
       // Size when the form opened; storage can only grow from here
-      originalStorage:   this.mode === _CREATE ? 1 : (this.value.spec.allocatedStorage || 1),
-      fvFormRuleSets:    [
+      originalStorage: this.mode === _CREATE ? 1 : (this.value.spec.allocatedStorage || 1),
+      fvFormRuleSets:  [
         { path: 'metadata.name', rules: ['instanceName'] },
         { path: 'spec.dbInstanceClass', rules: ['required'] },
         { path: 'spec.allocatedStorage', rules: ['storage'] },

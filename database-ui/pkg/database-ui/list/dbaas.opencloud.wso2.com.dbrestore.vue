@@ -1,8 +1,6 @@
 <script>
 import ResourceTable from '@shell/components/ResourceTable';
-import {
-  AGE, NAME, NAMESPACE, STATE
-} from '@shell/config/table-headers';
+import { AGE, NAME, NAMESPACE, STATE } from '@shell/config/table-headers';
 import { DBAAS } from '../types';
 
 export const DBRESTORE_HEADERS = [
