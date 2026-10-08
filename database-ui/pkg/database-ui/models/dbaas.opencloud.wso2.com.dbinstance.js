@@ -2,8 +2,9 @@ import SteveModel from '@shell/plugins/steve/steve-class';
 import { colorForState } from '@shell/plugins/dashboard-store/resource-class';
 import { ucFirst } from '@shell/utils/string';
 import { insertAt } from '@shell/utils/array';
-import { DB_PHASE, DBAAS } from '../types';
+import { DB_PHASE, DBAAS, IMAGE_STATUS } from '../types';
 import { DEFAULT_ALLOCATED_STORAGE_GIB, DEFAULT_INSTANCE_CLASS } from '../config/catalog';
+import { parseEngineEOL, parseOSUpdate, shortDriftMessage } from '../utils/image-drift';
 
 // Shown before the operator has reported a phase (e.g. a newly created instance)
 const PENDING = 'pending';
@@ -39,6 +40,13 @@ const DELETION_PROTECTED = 'DeletionProtected';
 const DELETION_PROBLEM_REASONS = [DELETION_PROTECTED, 'TeardownFailed', 'OperatorSecretCleanupFailed'];
 
 const DEFAULT_ENGINE = 'PostgreSQL';
+
+// Repave (OS image update). The operator compares the VM's image revision with
+// its catalog in the ImageDrift condition, and repaves when this annotation is
+// set to a value it has not handled yet (internal/ensure/repave.go).
+const REPAVE_TRIGGER = 'dbaas.opencloud.wso2.com/repave-trigger';
+const REPAVE_REFUSED_REASONS = ['RepaveNotAvailable', 'RepaveBlockedEOL', 'RepaveInvalidStream'];
+
 
 export default class DBInstance extends SteveModel {
   // Create-form defaults. Optional fields stay unset so the operator's own
@@ -231,6 +239,13 @@ export default class DBInstance extends SteveModel {
     });
 
     insertAt(out, 4, {
+      action:  'applyOSUpdate',
+      label:   this.t('dbaas.instance.image.apply'),
+      icon:    'icon icon-upgrade-alt',
+      enabled: this.canApplyOSUpdate,
+    });
+
+    insertAt(out, 5, {
       action:  protectedNow ? 'disableDeletionProtection' : 'enableDeletionProtection',
       label:   this.t(protectedNow ? 'dbaas.instance.actions.disableDeletionProtection' : 'dbaas.instance.actions.enableDeletionProtection'),
       icon:    protectedNow ? 'icon icon-unlock' : 'icon icon-lock',
@@ -332,6 +347,132 @@ export default class DBInstance extends SteveModel {
   // Shift-click on Stop: skip the confirmation (as Harvester does for VMs)
   stopInstanceNow() {
     return this.setRunning(false);
+  }
+
+  // --- OS image (repave) ------------------------------------------------------
+
+  get imageDriftCondition() {
+    return this.conditionFor('ImageDrift');
+  }
+
+  get repaveCondition() {
+    return this.conditionFor('RepaveInProgress');
+  }
+
+  get currentImageRevision() {
+    return this.status?.currentImageRevision || '';
+  }
+
+  // The trigger was set to a value the operator has not processed yet
+  get repaveRequested() {
+    const trigger = this.metadata?.annotations?.[REPAVE_TRIGGER];
+
+    return !!trigger && trigger !== this.status?.lastAppliedRepaveTrigger;
+  }
+
+  get isRepaving() {
+    return this.repaveCondition?.status === 'True';
+  }
+
+  // The last request was refused (e.g. instance not Available); only worth
+  // showing while there is still something to apply
+  get repaveRefusal() {
+    const c = this.repaveCondition;
+
+    return c?.status === 'False' && REPAVE_REFUSED_REASONS.includes(c.reason) && !this.repaveRequested ? c : null;
+  }
+
+  get imageStatus() {
+    if (this.isRepaving) {
+      return IMAGE_STATUS.UPDATING;
+    }
+    if (this.repaveRequested) {
+      return IMAGE_STATUS.REQUESTED;
+    }
+
+    const drift = this.imageDriftCondition;
+
+    if (drift?.status === 'True' && drift.reason === 'EngineVersionEOL') {
+      return IMAGE_STATUS.EOL;
+    }
+    if (drift?.status === 'True') {
+      return IMAGE_STATUS.OS_UPDATE;
+    }
+    if (drift?.status === 'False') {
+      return IMAGE_STATUS.UP_TO_DATE;
+    }
+
+    return IMAGE_STATUS.UNKNOWN;
+  }
+
+  // One short sentence about the drift for the UI, e.g. "Update from X to Y".
+  // Falls back to the operator's own message (minus its kubectl hint) when the
+  // message doesn't have the expected shape.
+  get imageDriftSummary() {
+    const drift = this.imageDriftCondition;
+
+    if (!drift?.message) {
+      return '';
+    }
+
+    if (drift.reason === 'OSUpdateAvailable') {
+      const parsed = parseOSUpdate(drift.message);
+
+      if (parsed) {
+        return this.t('dbaas.instance.image.summary.osUpdate', { current: this.currentImageRevision || parsed.current, target: parsed.target });
+      }
+    } else if (drift.reason === 'EngineVersionEOL') {
+      const parsed = parseEngineEOL(drift.message);
+
+      if (parsed) {
+        return this.t('dbaas.instance.image.summary.eol', {
+          version: parsed.engineVersion, target: parsed.target, supported: parsed.supported.join(', ')
+        });
+      }
+    } else if (drift.reason === 'ImageUpToDate') {
+      return this.t('dbaas.instance.image.summary.upToDate', { current: this.currentImageRevision || '' });
+    }
+
+    return shortDriftMessage(drift.message);
+  }
+
+  // Sort/search value for the list column
+  get imageStatusLabel() {
+    return this.t(`dbaas.instance.image.status.${ this.imageStatus }`);
+  }
+
+  // Why "Apply OS Update" is unavailable, or '' when it can be applied
+  get applyOSUpdateBlockedReason() {
+    if (!this.canUpdate) {
+      return this.t('dbaas.instance.image.blocked.noPermission');
+    }
+    if (this.imageStatus !== IMAGE_STATUS.OS_UPDATE) {
+      return this.t('dbaas.instance.image.blocked.noUpdate');
+    }
+    if (this.isDeleting || this.phase !== DB_PHASE.AVAILABLE) {
+      return this.t('dbaas.instance.image.blocked.notAvailable');
+    }
+
+    return '';
+  }
+
+  get canApplyOSUpdate() {
+    return !this.applyOSUpdateBlockedReason;
+  }
+
+  applyOSUpdate() {
+    this.$dispatch('promptModal', {
+      component:  'DBaaSConfirmRepaveDialog',
+      resources:  [this],
+      modalWidth: '520px',
+    });
+  }
+
+  // A fresh trigger value starts a repave (and is how a refused one is retried).
+  // Merge patch, so it works whether or not the instance has annotations yet.
+  requestRepave() {
+    return this.patch({ metadata: { annotations: { [REPAVE_TRIGGER]: new Date().toISOString() } } },
+      { headers: { 'content-type': 'application/merge-patch+json' } }, false, true);
   }
 
   enableDeletionProtection() {

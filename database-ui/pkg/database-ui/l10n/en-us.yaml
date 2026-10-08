@@ -98,7 +98,7 @@ dbaas:
       namespaceTooltip: A restore creates the new instance in the namespace of the snapshot.
       storageTooltip: At least the size of the snapshot. It can be increased later but never reduced.
       vlanOnly: Only VLAN networks are offered. Restoring onto overlay networks is not supported yet.
-      backupEnabled: Enable backups for the new instance
+      backupEnabled: Allow backups for the new instance
       credentialsInfo: The new instance gets its own admin password (see its Connection tab). Database roles you created are restored as they were. The source instance and the snapshot are not changed.
     validation:
       targetExists: 'An instance named {name} already exists in this namespace.'
@@ -200,11 +200,13 @@ dbaas:
       protip: Tip - hold Shift while clicking Stop to skip this confirmation.
       stopping: Stopping...
     delete:
-      protected: 'Deletion protection is enabled for {name}, so it cannot be deleted. Turn it off first with Turn Off Deletion Protection in the action menu of the instance.'
-      protectedMany: 'Deletion protection is enabled for {names}, so they cannot be deleted. Turn it off first with Turn Off Deletion Protection in the action menu of each instance, or deselect them.'
+      protected: '{name} has deletion protection on. To delete it, first choose Turn Off Deletion Protection in its action menu.'
+      protectedMany: '{names} have deletion protection on. Turn it off in their action menus first, or deselect them.'
       protectedHint: Turn off deletion protection to let the deletion finish. A deletion that has started cannot be cancelled.
-      warning: This permanently deletes the database VM, its data volume and its credentials Secrets. It cannot be undone.
-      warningWithBackups: This permanently deletes the database VM, its data volume, its credentials Secrets and its automated snapshots. Manual snapshots are kept. It cannot be undone.
+      warning: This permanently deletes the database, its data and its credentials. This cannot be undone.
+      warningWithBackups: This permanently deletes the database, its data, its credentials and its automated snapshots. Manual snapshots are kept. This cannot be undone.
+      snapshotTip: To keep a copy, take a snapshot first.
+      snapshotTipMany: To keep copies, take a snapshot of each instance first.
       deletingBanner: This database instance is being deleted.
       blockedBanner: 'Deletion cannot finish: {message}'
     events:
@@ -279,9 +281,10 @@ dbaas:
       dnsServerIP: DNS Server IP
       dnsServerIPPlaceholder: e.g. 10.0.0.10
       dnsServerIPTooltip: Required on overlay (Kube-OVN VPC) networks, where the VM cannot reach the cluster DNS. Leave empty on VLAN networks.
-      backupEnabled: Enable backups
-      backupCreateOnly: Backups can only be turned on or off when the instance is created. Their settings can be changed later.
-      automatedBackupEnabled: Take automated daily snapshots
+      backupEnabled: Allow backups for this instance
+      backupEnabledDescription: Needed for any snapshot, manual or automated. You can only choose this when the instance is created.
+      automatedBackupEnabled: Automated daily snapshots
+      automatedBackupDescription: You can turn this on or off at any time. Manual snapshots work either way.
       backupWindow: Backup Window (UTC)
       backupWindowTooltip: 'Time range for the daily snapshot, e.g. 02:00-03:00.'
       retainCount: Snapshots to Keep
@@ -306,7 +309,43 @@ dbaas:
     state:
       detail: Show state details
       pendingChanges: Spec changes have not been applied by the operator yet.
+    image:
+      title: OS Image
+      revision: Image Revision
+      statusLabel: Status
+      details: Details
+      since: Since
+      apply: Apply OS Update
+      retry: Retry
+      summary:
+        osUpdate: 'Update from {current} to {target}.'
+        eol: 'The new image {target} supports PostgreSQL {supported}, but not {version}.'
+        upToDate: 'Running the current image {current}.'
+      status:
+        upToDate: Up to date
+        osUpdate: OS update available
+        eol: PostgreSQL version not supported
+        unknown: Unknown
+        requested: Update requested
+        updating: Updating
+      blocked:
+        noPermission: You do not have permission to update this instance.
+        noUpdate: There is no OS update to apply.
+        notAvailable: The instance must be Available (running and healthy) to apply an OS update.
+      banner:
+        osUpdate: An OS update is available for this database. Applying it restarts the database for a few minutes. Your data is kept.
+        eol: 'The newer OS image no longer supports PostgreSQL {version}, so this instance cannot be updated. Create a new instance with a supported PostgreSQL version and move your data to it, for example with pg_dump and pg_restore. Restoring a snapshot does not help, because a restore keeps the same PostgreSQL version.'
+        requested: OS update requested. Waiting for the operator to start it.
+        updating: 'Applying the OS update. {message}'
+        refused: 'The OS update was not applied: {message}'
+        unknown: 'The image status of this instance could not be checked: {message}'
+      dialog:
+        title: 'Apply OS update to {name}?'
+        downtime: The database restarts on the new image and will be unavailable for a few minutes. Your data is kept.
+        snapshotTip: We recommend taking a snapshot first.
+        applying: Applying...
     tableHeaders:
+      image: Image
       engine: Engine
       class: Class
       storage: Storage

@@ -32,6 +32,16 @@ export const RESTORE_QUERY = {
   RETRY:    'retry', //    <namespace>/<restore name>: prefill from this failed restore
 };
 
+// OS image state of a DBInstance (from its ImageDrift / RepaveInProgress conditions)
+export const IMAGE_STATUS = {
+  UP_TO_DATE: 'upToDate',
+  OS_UPDATE:  'osUpdate',
+  EOL:        'eol',
+  UNKNOWN:    'unknown',
+  REQUESTED:  'requested', // repave trigger set, the operator has not picked it up yet
+  UPDATING:   'updating',
+};
+
 // Harvester VM images; DBaaS baked images are the ones carrying IMAGE_LABEL.BAKED
 export const HARVESTER_IMAGE = 'harvesterhci.io.virtualmachineimage';
 
