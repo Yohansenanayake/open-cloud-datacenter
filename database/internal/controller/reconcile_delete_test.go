@@ -25,6 +25,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/backup"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 	statuspatch "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/patch"
 )
@@ -358,5 +360,307 @@ func TestRemoveDBInstanceFinalizerRetriesConflictAndPreservesConcurrentMetadata(
 	}
 	if got.Annotations["concurrent"] != "preserved" {
 		t.Fatalf("concurrent annotation = %q, want preserved", got.Annotations["concurrent"])
+	}
+}
+
+// ---- the snapshot hold ----
+
+func seedSnapshotHold(t *testing.T, r *DBInstanceReconciler, inst *dbaasv1.DBInstance, holder string) {
+	t.Helper()
+	if _, err := (backup.Holds{Live: r.Client, Writer: r.Client}).Acquire(context.Background(), inst.Namespace,
+		backup.SnapshotHoldName(inst.UID), holder, instanceOwnerRef(inst), nil); err != nil {
+		t.Fatalf("seed snapshot hold: %v", err)
+	}
+}
+
+func snapshotHoldOf(t *testing.T, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) (string, bool) {
+	t.Helper()
+	holder, held, err := (backup.Holds{Live: r.Client, Writer: r.Client}).Held(context.Background(), inst.Namespace, backup.SnapshotHoldName(inst.UID))
+	if err != nil {
+		t.Fatalf("Held: %v", err)
+	}
+	return holder, held
+}
+
+func instanceGone(t *testing.T, r *DBInstanceReconciler, inst *dbaasv1.DBInstance) bool {
+	t.Helper()
+	err := r.Get(context.Background(), client.ObjectKeyFromObject(inst), &dbaasv1.DBInstance{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("get instance: %v", err)
+	}
+	return apierrors.IsNotFound(err)
+}
+
+func snapshotOf(inst *dbaasv1.DBInstance, name string, reason dbaasv1.ConditionReason, status metav1.ConditionStatus) *dbaasv1.DBSnapshot {
+	snap := &dbaasv1.DBSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: inst.Namespace},
+		Spec:       dbaasv1.DBSnapshotSpec{SourceInstanceRef: corev1.LocalObjectReference{Name: inst.Name}},
+	}
+	snap.Status.SetCondition(metav1.Condition{Type: dbaasv1.ConditionSnapshotReady, Status: status, Reason: string(reason), Message: "-"})
+	return snap
+}
+
+// A backup still reading the VM holds teardown back until it finishes.
+func TestReconcileDeleteWaitsForARunningSnapshot(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	running := snapshotOf(inst, "orders-nightly", dbaasv1.ReasonSnapshotBackupInProgress, metav1.ConditionFalse)
+	stub := &stubHarvester{}
+	r := newProvisionReconciler(t, stub, inst, running)
+	seedSnapshotHold(t, r, inst, snapshotHolderIdentity(running))
+
+	res, err := runReconcileDelete(ctx, r, inst)
+	if err != nil {
+		t.Fatalf("reconcileDelete: %v", err)
+	}
+
+	if stub.TeardownCalls != 0 || stub.MarkVMPVCsCalls != 0 {
+		t.Fatal("nothing may be torn down while a backup is still reading the VM")
+	}
+	if res.RequeueAfter != deletionPollRequeue {
+		t.Fatalf("RequeueAfter = %v, want %v", res.RequeueAfter, deletionPollRequeue)
+	}
+	got := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(inst), got); err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if blocked := got.Status.GetCondition(dbaasv1.ConditionDeletionBlocked); blocked == nil || blocked.Reason != string(dbaasv1.ReasonDeletionWaitingForSnapshot) {
+		t.Fatalf("DeletionBlocked = %+v, want reason DeletionWaitingForSnapshot", blocked)
+	}
+	if _, held := snapshotHoldOf(t, r, inst); !held {
+		t.Fatal("the running snapshot's hold must be left to it")
+	}
+}
+
+// A hold nobody else will ever release — this instance's own repave hold,
+// or one whose snapshot is gone, finished, or not this instance's — is
+// released, and teardown carries on.
+func TestReconcileDeleteReleasesHoldsNobodyElseWillRelease(t *testing.T) {
+	inst := newDeletingInst()
+	other := inst.DeepCopy()
+	other.Name = "billing"
+	cases := map[string]struct {
+		holder string
+		snap   *dbaasv1.DBSnapshot
+	}{
+		"repave":           {holder: "repave"},
+		"snapshot gone":    {holder: snapshotHolderPrefix + "orders-nightly"},
+		"snapshot ready":   {holder: snapshotHolderPrefix + "orders-nightly", snap: snapshotOf(inst, "orders-nightly", dbaasv1.ReasonSnapshotBackupReady, metav1.ConditionTrue)},
+		"snapshot failed":  {holder: snapshotHolderPrefix + "orders-nightly", snap: snapshotOf(inst, "orders-nightly", dbaasv1.ReasonSnapshotBackupFailed, metav1.ConditionFalse)},
+		"another's source": {holder: snapshotHolderPrefix + "orders-nightly", snap: snapshotOf(other, "orders-nightly", dbaasv1.ReasonSnapshotBackupInProgress, metav1.ConditionFalse)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			inst := newDeletingInst()
+			objs := []client.Object{inst}
+			if tc.snap != nil {
+				objs = append(objs, tc.snap)
+			}
+			stub := &stubHarvester{}
+			r := newProvisionReconciler(t, stub, objs...)
+			seedSnapshotHold(t, r, inst, tc.holder)
+
+			if _, err := runReconcileDelete(context.Background(), r, inst); err != nil {
+				t.Fatalf("reconcileDelete: %v", err)
+			}
+
+			if _, held := snapshotHoldOf(t, r, inst); held {
+				t.Fatal("the stale hold must be released")
+			}
+			if stub.TeardownCalls != 1 || !instanceGone(t, r, inst) {
+				t.Fatal("teardown must carry on after releasing a stale hold")
+			}
+		})
+	}
+}
+
+// ---- disks ----
+
+// The VM's own disks are deleted through the VM: marked for Harvester's VM
+// finalizer, never deleted directly while the VM exists (Harvester would
+// recreate a blank one). Once the VM is gone, the known names are deleted
+// directly as a backstop — never anything another instance could own.
+func TestReconcileDeleteDeletesDisksThroughTheVMThenDirectly(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst() // disk identifier "orders-ordersui"
+	inst.Status.Resources.OSDiskPVCName = "pg-orders-ordersui-os-ubuntu-noble-r2"
+	inst.Status.Resources.PendingDeleteOSDiskPVCName = "pg-orders-ordersui-os"
+	stub := &stubHarvester{
+		VMPresent:  true,
+		VMPVCNames: []string{"pg-orders-ordersui-data", "pg-orders-ordersui-os-ubuntu-noble-r2", "shared-tools-disk"},
+	}
+	r := newProvisionReconciler(t, stub, inst)
+
+	res, err := runReconcileDelete(ctx, r, inst)
+	if err != nil {
+		t.Fatalf("reconcileDelete: %v", err)
+	}
+
+	wantMarked := []string{"pg-orders-ordersui-data", "pg-orders-ordersui-os-ubuntu-noble-r2"}
+	if !slices.Equal(stub.MarkedPVCNames, wantMarked) {
+		t.Fatalf("marked for removal = %v, want %v (only this instance's own disks)", stub.MarkedPVCNames, wantMarked)
+	}
+	if stub.TeardownCalls != 1 {
+		t.Fatalf("TeardownAll calls = %d, want 1", stub.TeardownCalls)
+	}
+	if len(stub.DeletedPVCNames) != 0 {
+		t.Fatalf("deleted %v while the VM still exists", stub.DeletedPVCNames)
+	}
+	if res.RequeueAfter != deletionPollRequeue || instanceGone(t, r, inst) {
+		t.Fatal("must wait, finalizer in place, for the VM to be gone")
+	}
+
+	stub.VMPresent = false // Harvester finished deleting the VM
+	latest := &dbaasv1.DBInstance{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(inst), latest); err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if _, err := runReconcileDelete(ctx, r, latest); err != nil {
+		t.Fatalf("second reconcileDelete: %v", err)
+	}
+
+	wantDeleted := []string{"pg-orders-ordersui-data", "pg-orders-ordersui-os", "pg-orders-ordersui-os-ubuntu-noble-r2"}
+	if !slices.Equal(stub.DeletedPVCNames, wantDeleted) {
+		t.Fatalf("deleted PVCs = %v, want %v", stub.DeletedPVCNames, wantDeleted)
+	}
+	if !instanceGone(t, r, inst) {
+		t.Fatal("finalizer must come off once the disks are deleted")
+	}
+}
+
+// A recorded name that isn't this instance's own (another UID salt) is never
+// deleted, however it got into status.
+func TestReconcileDeleteNeverDeletesARecordedPVCThatIsNotOurs(t *testing.T) {
+	inst := newDeletingInst()
+	inst.Status.Resources.OSDiskPVCName = "pg-orders-0ldsalt0-os"
+	inst.Status.Resources.PendingDeleteOSDiskPVCName = "pg-billing-b1111111-os-ubuntu"
+	stub := &stubHarvester{}
+	r := newProvisionReconciler(t, stub, inst)
+
+	if _, err := runReconcileDelete(context.Background(), r, inst); err != nil {
+		t.Fatalf("reconcileDelete: %v", err)
+	}
+
+	for _, name := range stub.DeletedPVCNames {
+		if strings.Contains(name, "0ldsalt0") || strings.Contains(name, "billing") {
+			t.Fatalf("deleted %q, which is not this instance's", name)
+		}
+	}
+}
+
+// A restore target's data disk is its restore PVC, named for the DBRestore.
+func TestReconcileDeleteDeletesARestoreTargetsRestorePVC(t *testing.T) {
+	inst := newDeletingInst()
+	inst.Spec.RestoredFrom = &dbaasv1.RestoredFromRef{DBRestoreName: "orders-restore", DBRestoreUID: "restore-uid-1234"}
+	stub := &stubHarvester{}
+	r := newProvisionReconciler(t, stub, inst)
+
+	if _, err := runReconcileDelete(context.Background(), r, inst); err != nil {
+		t.Fatalf("reconcileDelete: %v", err)
+	}
+
+	if want := "pg-orders-restore-restoreu-data"; !slices.Contains(stub.DeletedPVCNames, want) {
+		t.Fatalf("deleted PVCs = %v, want to include %q", stub.DeletedPVCNames, want)
+	}
+}
+
+func TestReconcileDeleteDiskDeleteFailureKeepsTheFinalizer(t *testing.T) {
+	inst := newDeletingInst()
+	boom := errors.New("pvc delete refused")
+	stub := &stubHarvester{DeletePVCErr: boom}
+	r := newProvisionReconciler(t, stub, inst)
+
+	if _, err := runReconcileDelete(context.Background(), r, inst); !errors.Is(err, boom) {
+		t.Fatalf("reconcileDelete error = %v, want %v", err, boom)
+	}
+	if instanceGone(t, r, inst) {
+		t.Fatal("finalizer must stay until the disks are deleted")
+	}
+}
+
+// Teardown spans several passes; only its start is announced.
+func TestReconcileDeleteAnnouncesTeardownOnce(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	stub := &stubHarvester{VMPresent: true}
+	r := newProvisionReconciler(t, stub, inst)
+	recorder := r.Recorder.(*record.FakeRecorder)
+
+	for range 2 {
+		latest := &dbaasv1.DBInstance{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(inst), latest); err != nil {
+			t.Fatalf("get instance: %v", err)
+		}
+		if _, err := runReconcileDelete(ctx, r, latest); err != nil {
+			t.Fatalf("reconcileDelete: %v", err)
+		}
+	}
+
+	announced := 0
+	for len(recorder.Events) > 0 {
+		if strings.Contains(<-recorder.Events, string(dbaasv1.ReasonDeletionProgressing)) {
+			announced++
+		}
+	}
+	if announced != 1 {
+		t.Fatalf("%s events = %d, want 1 across two passes", dbaasv1.ReasonDeletionProgressing, announced)
+	}
+}
+
+// ---- events ----
+
+func TestReconcileDeleteAnnouncesEachWaitOnce(t *testing.T) {
+	ctx := context.Background()
+	inst := newDeletingInst()
+	running := snapshotOf(inst, "orders-nightly", dbaasv1.ReasonSnapshotBackupInProgress, metav1.ConditionFalse)
+	stub := &stubHarvester{VMPresent: true}
+	r := newProvisionReconciler(t, stub, inst, running)
+	recorder := r.Recorder.(*record.FakeRecorder)
+	seedSnapshotHold(t, r, inst, snapshotHolderIdentity(running))
+
+	pass := func() {
+		t.Helper()
+		latest := &dbaasv1.DBInstance{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(inst), latest); err != nil {
+			t.Fatalf("get instance: %v", err)
+		}
+		if _, err := runReconcileDelete(ctx, r, latest); err != nil {
+			t.Fatalf("reconcileDelete: %v", err)
+		}
+	}
+	pass()
+	pass() // backup still running
+	if err := (backup.Holds{Live: r.Client, Writer: r.Client}).Release(ctx, inst.Namespace, backup.SnapshotHoldName(inst.UID), snapshotHolderIdentity(running)); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	pass()
+	pass() // VM still going
+
+	events := drainEvents(recorder)
+	for _, reason := range []dbaasv1.ConditionReason{dbaasv1.ReasonDeletionWaitingForSnapshot, dbaasv1.ReasonDeletionWaitingForVM} {
+		if n := eventsWithReason(events, string(reason)); n != 1 {
+			t.Fatalf("%s events = %d, want 1 (events %q)", reason, n, events)
+		}
+	}
+}
+
+// A snapshot hold its DBSnapshot should have released is surfaced; this
+// instance's own repave hold is released quietly.
+func TestReconcileDeleteWarnsOnlyAboutStaleSnapshotHolds(t *testing.T) {
+	for holder, wantWarnings := range map[string]int{snapshotHolderPrefix + "orders-gone": 1, "repave": 0} {
+		t.Run(holder, func(t *testing.T) {
+			inst := newDeletingInst()
+			r := newProvisionReconciler(t, &stubHarvester{}, inst)
+			seedSnapshotHold(t, r, inst, holder)
+
+			if _, err := runReconcileDelete(context.Background(), r, inst); err != nil {
+				t.Fatalf("reconcileDelete: %v", err)
+			}
+
+			events := drainEvents(r.Recorder.(*record.FakeRecorder))
+			if n := eventsWithReason(events, string(dbaasv1.ReasonStaleSnapshotHoldReleased)); n != wantWarnings {
+				t.Fatalf("StaleSnapshotHoldReleased events = %d, want %d (events %q)", n, wantWarnings, events)
+			}
+		})
 	}
 }

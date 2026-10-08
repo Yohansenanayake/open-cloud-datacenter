@@ -18,7 +18,14 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+// MaxInstanceNameLength is the longest DBInstance name the operator
+// accepts: "pg-" + name + "-metrics" must fit a 63-character Service name.
+// The CRD's CEL rules hard-code it (markers take literals); a test keeps
+// them in step.
+const MaxInstanceNameLength = 52
 
 // DBInstanceSpec defines the desired state of a managed PostgreSQL database.
 //
@@ -29,16 +36,20 @@ import (
 //     dbName, masterUsername, port, storageType, staticNetwork,
 //     vmPassword, engineVersion
 //   - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
-//     multiAZ, dbParameterGroupRef, tags, s3BackupConfig,
-//     backupRetentionPeriod, preferredBackupWindow. These fields exist in
-//     the schema for forward compatibility but the reconciler does not
-//     apply them. See ARCHITECTURE.md for the roadmap.
+//     multiAZ, dbParameterGroupRef, tags. These fields exist in the schema
+//     for forward compatibility but the reconciler does not apply them.
+//     See ARCHITECTURE.md for the roadmap. Backup capability is tracked
+//     separately under spec.backup once implemented — see
+//     yohan-docs/backups/harvester-vm-backup/.
 //
 // Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
 // vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
 // masterUsername, port, storageType) are compared post-defaulting in
 // immutableDrift(), so a raw CEL rule on them would be stricter than that
 // check — see immutableDrift's doc comment.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.backup) == has(oldSelf.backup)",message="backup cannot be added or removed after creation"
+// +kubebuilder:validation:XValidation:rule="has(self.restoredFrom) == has(oldSelf.restoredFrom)",message="restoredFrom cannot be added or removed after creation"
 type DBInstanceSpec struct {
 	// DBInstanceClass maps to VM CPU/RAM. e.g. "db.t3.medium", "db.m5.large".
 	// Mutable: changing the class on an Available instance resizes the VM.
@@ -57,16 +68,18 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engineVersion is immutable after creation"
 	EngineVersion string `json:"engineVersion,omitempty"`
 
-	// DBName is the initial database to create. Default: the instance name.
-	// Must follow PostgreSQL identifier rules: start with a letter or
-	// underscore, contain only letters, digits, underscores, or "$",
-	// max 63 characters. The reconciler also double-quotes this identifier
-	// when emitting CREATE DATABASE; the regex catches invalid values at
-	// apply time so failures don't appear later inside cloud-init.
-	// Immutable after first reconcile; modify is refused.
+	// DBName is the initial database to create. Default: DefaultDBName of
+	// the instance name (e.g. "orders-db" becomes "orders_db").
+	// A lowercase PostgreSQL identifier that never needs quoting — lowercase
+	// letters, digits, and underscores, starting with a letter or underscore,
+	// at most 63 characters (RDS's rule): uppercase, hyphens, or "$" would
+	// force every tenant SQL statement naming it to quote it forever. The
+	// built-in databases are reserved. Immutable after first reconcile;
+	// modify is refused.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`
+	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
+	// +kubebuilder:validation:XValidation:rule="!(self in ['postgres', 'template0', 'template1'])",message="dbName must not be a built-in PostgreSQL database (postgres, template0, template1)"
 	DBName string `json:"dbName,omitempty"`
 
 	// Port for PostgreSQL. Default 5432.
@@ -76,16 +89,15 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int `json:"port,omitempty"`
 
-	// MasterUsername for the admin user. Default "dbadmin".
-	// Must follow PostgreSQL identifier rules: start with a letter or
-	// underscore, contain only letters, digits, underscores, or "$",
-	// max 63 characters. The reconciler also double-quotes this identifier
-	// when emitting CREATE ROLE; the regex catches invalid values at
-	// apply time so failures don't appear later inside cloud-init.
-	// Immutable after first reconcile.
+	// MasterUsername for the admin user. Default "dbadmin" (operator config).
+	// Same identifier rule as DBName. Roles PostgreSQL or DBaaS manage are
+	// reserved: "postgres", "postgres_exporter", and anything starting with
+	// "pg_" (which PostgreSQL itself refuses — rejected here rather than
+	// failing later inside cloud-init). Immutable after first reconcile.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`
+	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
+	// +kubebuilder:validation:XValidation:rule="!(self in ['postgres', 'postgres_exporter']) && !self.startsWith('pg_')",message="masterUsername must not be a reserved role (postgres, postgres_exporter, or a pg_ prefix)"
 	MasterUsername string `json:"masterUsername,omitempty"`
 
 	// ManageMasterUserPassword: if true, auto-generate the admin password
@@ -120,19 +132,6 @@ type DBInstanceSpec struct {
 	// +optional
 	StorageType string `json:"storageType,omitempty"`
 
-	// BackupRetentionPeriod in days. 0 (default) = disabled.
-	// NOT YET IMPLEMENTED: no pgBackRest install, schedule, or retention
-	// enforcement runs today. The field is recorded but inert.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	BackupRetentionPeriod int `json:"backupRetentionPeriod,omitempty"`
-
-	// PreferredBackupWindow in UTC, e.g. "02:00-03:00".
-	// NOT YET IMPLEMENTED — see BackupRetentionPeriod.
-	// +optional
-	// +kubebuilder:validation:Pattern=`^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`
-	PreferredBackupWindow string `json:"preferredBackupWindow,omitempty"`
-
 	// MultiAZ enables Patroni HA with a standby VM.
 	// NOT YET IMPLEMENTED — no standby is created.
 	// +optional
@@ -165,7 +164,6 @@ type DBInstanceSpec struct {
 	// Immutable after first reconcile.
 	// Example: "iaas-net/vm-subnet-001".
 	// +required
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?\/[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="networkRef is immutable after creation"
 	NetworkRef string `json:"networkRef"`
 
@@ -197,16 +195,104 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="vmPassword is immutable after creation"
 	VMPassword string `json:"vmPassword,omitempty"`
 
-	// S3BackupConfig for pgBackRest S3 target.
-	// NOT YET IMPLEMENTED — values are written to /etc/dbaas/bootstrap.env
-	// on the VM but no backup process consumes them.
-	// +optional
-	S3BackupConfig *S3BackupConfig `json:"s3BackupConfig,omitempty"`
-
 	// Tags are user-defined labels.
 	// NOT YET IMPLEMENTED — not propagated to child resources or dashboards.
 	// +optional
 	Tags map[string]string `json:"tags,omitempty"`
+
+	// Backup opts the instance into backup capability: automated daily
+	// snapshots (configurable below) and named manual snapshots via
+	// DBSnapshot. Its presence is immutable after creation — see the
+	// XValidation rule on DBInstanceSpec above — but its contents remain
+	// editable. Omit this field entirely for no backup capability at all;
+	// manual snapshot requests against such an instance are rejected.
+	// See yohan-docs/backups/harvester-vm-backup/.
+	// +optional
+	Backup *BackupSpec `json:"backup,omitempty"`
+
+	// RestoredFrom identifies the DBRestore that created this instance, if
+	// any. Set only by DBRestoreReconciler. Immutable afterward: a terminally failed
+	// restore is retried by creating a new DBRestore (and a new DBInstance).
+	// Its presence is immutable too (the rule on DBInstanceSpec): the field
+	// rule below only runs when both old and new objects have it, and adding
+	// or removing it would change the instance's disk names.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="restoredFrom is immutable after creation"
+	RestoredFrom *RestoredFromRef `json:"restoredFrom,omitempty"`
+}
+
+// RestoredFromRef identifies the DBRestore that created a DBInstance — see
+// DBInstanceSpec.RestoredFrom — and what it restored from. The snapshot and
+// source fields are durable provenance: set in the same Create() and
+// immutable, they keep answering "where did this database come from?" after
+// the DBRestore (a one-time request), the DBSnapshot and the source are all
+// gone.
+type RestoredFromRef struct {
+	// DBRestoreName is the name of the owning DBRestore, in the same
+	// namespace — for display and lookup only.
+	// +required
+	DBRestoreName string `json:"dbRestoreName"`
+
+	// DBRestoreUID is the DBRestore's UID, captured at Create() time — the
+	// naming salt diskIdentifierFor uses for this instance's restore PVC
+	// (prefixed "restore-"), matching the name DBRestoreReconciler already
+	// created it under.
+	// +required
+	DBRestoreUID types.UID `json:"dbRestoreUID"`
+
+	// DBSnapshotName and DBSnapshotUID identify the DBSnapshot restored from.
+	// +optional
+	DBSnapshotName string `json:"dbSnapshotName,omitempty"`
+	// +optional
+	DBSnapshotUID types.UID `json:"dbSnapshotUID,omitempty"`
+
+	// SourceInstanceName and SourceInstanceUID identify the DBInstance that
+	// snapshot was taken of, as the snapshot recorded it.
+	// +optional
+	SourceInstanceName string `json:"sourceInstanceName,omitempty"`
+	// +optional
+	SourceInstanceUID types.UID `json:"sourceInstanceUID,omitempty"`
+}
+
+// BackupSpec configures backup capability for a DBInstance. Continuous WAL
+// archiving is always enabled whenever Backup is non-nil, independent of
+// Automated.Enabled — there is no separate WAL on/off field.
+type BackupSpec struct {
+	// Automated controls scheduled daily snapshots. Defaulted when omitted
+	// from an explicitly-supplied backup object.
+	// +optional
+	// +kubebuilder:default={}
+	Automated AutomatedBackupSpec `json:"automated,omitempty"`
+}
+
+// AutomatedBackupSpec controls the daily snapshot schedule and retention.
+type AutomatedBackupSpec struct {
+	// Enabled starts/stops new daily snapshots and new automatic pruning.
+	// Existing retained snapshots, manual snapshots, and WAL archiving are
+	// unaffected by disabling this.
+	// +optional
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// RetainCount is how many of the newest successful automated snapshots
+	// to keep; older ones are pruned. A restore hold can temporarily keep
+	// an otherwise-prunable snapshot past this count.
+	// +optional
+	// +kubebuilder:default=7
+	// +kubebuilder:validation:Minimum=1
+	RetainCount int `json:"retainCount,omitempty"`
+
+	// PreferredWindowUTC is the UTC window, e.g. "02:00-03:00", the daily
+	// snapshot is scheduled inside. An end earlier than the start crosses
+	// midnight ("23:00-01:00" is two hours ending the next UTC day); equal
+	// start and end is not a window, and the default is used instead. The
+	// controller derives one stable minute inside the window per instance
+	// (hashed from the instance UID) rather than starting every instance at
+	// the window's edge.
+	// +optional
+	// +kubebuilder:default="02:00-03:00"
+	// +kubebuilder:validation:Pattern=`^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`
+	PreferredWindowUTC string `json:"preferredWindowUTC,omitempty"`
 }
 
 // SecretKeyRef points to a single key within a K8s Secret.
@@ -240,16 +326,6 @@ type NetworkConfig struct {
 	// +optional
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 	SearchDomains []string `json:"searchDomains,omitempty"`
-}
-
-// S3BackupConfig describes the pgBackRest S3 target.
-type S3BackupConfig struct {
-	Endpoint string `json:"endpoint"`
-	Bucket   string `json:"bucket"`
-	// +optional
-	Region string `json:"region,omitempty"`
-	// SecretRef is a K8s Secret name with accessKey + secretKey.
-	SecretRef string `json:"secretRef"`
 }
 
 // DBInstanceStatus defines the observed state of a DBInstance.
@@ -341,6 +417,26 @@ type DBInstanceStatus struct {
 	// RunStrategyAlways KubeVirt would otherwise restart the VM forever).
 	// +optional
 	RecentUnplannedRestarts int `json:"recentUnplannedRestarts,omitempty"`
+
+	// Backup tracks automated snapshot scheduling (spec.backup.automated).
+	// Populated only once spec.backup is set — never carries over from a
+	// prior instance, since backup presence is immutable after creation.
+	// +optional
+	Backup *BackupStatus `json:"backup,omitempty"`
+}
+
+// BackupStatus is the observed state of automated snapshot scheduling
+// (yohan-docs/backups/harvester-vm-backup/ §3.2).
+type BackupStatus struct {
+	// NextScheduledSnapshotTime is the next future UTC instant an automated
+	// snapshot is due. Always strictly in the future when set: recomputed
+	// from scratch (never carried forward as a stale past value) whenever
+	// automated snapshots are (re-)enabled or preferredWindowUTC changes,
+	// and after every fired attempt — satisfying the future-only, no-catch-up
+	// rule regardless of how long reconciliation was unavailable. Nil while
+	// automated.enabled is false.
+	// +optional
+	NextScheduledSnapshotTime *metav1.Time `json:"nextScheduledSnapshotTime,omitempty"`
 }
 
 // AppliedSpec records the subset of DBInstanceSpec fields that are
@@ -445,8 +541,16 @@ type ResourceRefs struct {
 // +kubebuilder:printcolumn:name="ImageDrift",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].status`
 // +kubebuilder:printcolumn:name="ImageDriftReason",type=string,JSONPath=`.status.conditions[?(@.type=='ImageDrift')].reason`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || (size(self.metadata.name) <= 52 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))",message="metadata.name must be at most 52 characters of lowercase letters, digits and '-' (no '.'): it names the instance's VM and its pg-<name>-metrics Service",optionalOldSelf=true
 
 // DBInstance represents a managed PostgreSQL database on Harvester HCI.
+//
+// Its name is limited to MaxInstanceNameLength characters and the DNS-label
+// alphabet (no dots), checked at creation only: child objects are named
+// from it, and the strictest is the pg-<name>-metrics Service, a 63-character
+// DNS-1035 label. Create-only on purpose — the name never changes, so a
+// re-check on update could only ever block an object created before the
+// rule, including its finalizer removal.
 // Namespaced — each DBInstance lives in a tenant namespace. All Harvester
 // child resources (VM, DataVolume, Secret, Service, ServiceMonitor) are
 // created in the same namespace as the DBInstance.

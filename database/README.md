@@ -32,6 +32,17 @@ kubectl apply -f config/samples/dbaas_v1alpha1_dbinstance.yaml
 kubectl get dbi -A -w
 ```
 
+`make install` only installs or updates CRDs; it does not update the controller.
+To deploy a published controller image, pass it to `make deploy`:
+
+```sh
+make deploy IMG=<registry>/<name>:<tag>
+kubectl rollout status deployment/dbaas-controller-manager -n dbaas-system
+```
+
+`make deploy IMG=...` also writes that image into
+`config/manager/kustomization.yaml`, which direct `kubectl apply -k` commands use.
+
 ~3 minutes from `apply` to `phase: available` on a stock Ubuntu cloud image;
 actual time depends on image pull and first-boot package-install speed.
 
@@ -69,6 +80,10 @@ when the file exists:
 kubectl create namespace dbaas-system
 kubectl apply -k config/overlays/operator-config
 ```
+
+This overlay inherits the image from `config/manager/kustomization.yaml`.
+To update an installation using this overlay, change the image there and
+reapply the overlay.
 
 Edit
 [`config/overlays/operator-config/operator_config.yaml`](config/overlays/operator-config/operator_config.yaml)

@@ -59,6 +59,16 @@ func bindFlags(set *flag.FlagSet, defaults Config) {
 	set.String("databaseDefaults.osVersion", defaults.DatabaseDefaults.OSVersion,
 		"Default baked-image OS stream (internal/catalog key) for DBInstance provisioning and repave.")
 
+	set.Duration("restore.timeout", defaults.Restore.Timeout,
+		"How long a whole restore may take, from the DBRestore's creation, before it fails as RestoreTimedOut and its unfinished target is deleted. Must exceed restore.recoveryTimeout.")
+	set.Duration("restore.recoveryTimeout", defaults.Restore.RecoveryTimeout,
+		"How long a restored instance's first boot waits for PostgreSQL to finish recovering the restored data before failing the restore.")
+
+	set.Int("backup.maxConcurrent", defaults.Backup.MaxConcurrent,
+		"How many DBSnapshot backups may run at once, cluster-wide; more wait their turn, oldest first. Each namespace gets at most half of these (rounded up).")
+	set.Duration("backup.timeout", defaults.Backup.Timeout,
+		"How long one backup may run, from the Harvester backup's creation, before it fails as BackupTimedOut and frees its slot.")
+
 	set.String("observability.grafana.baseURL", defaults.Observability.Grafana.BaseURL,
 		"Base URL used for per-instance Grafana links.")
 	set.String("observability.metrics.bindAddress", defaults.Observability.Metrics.BindAddress,

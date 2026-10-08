@@ -50,6 +50,69 @@ func effectiveEngineVersion(specEngineVersion string, entry catalog.BakedImageEn
 	return entry.DefaultEngineVersion, true
 }
 
+// EffectiveSettings is what an instance actually runs with, for the settings
+// a restore inherits — as opposed to its spec as written, which leaves every
+// defaulted field empty.
+type EffectiveSettings struct {
+	DBName         string
+	MasterUsername string
+	EngineVersion  string
+	Port           int
+	StorageType    string
+}
+
+// EffectiveSettingsFor resolves inst's effective settings. status.appliedSpec
+// wins where it has a value: it records what the instance was provisioned
+// with, already defaulted, so a later change to the operator's defaults
+// can't rewrite history. Only if it was never recorded does this fall back
+// to spec plus the current defaults — the same defaulting createVM applies.
+//
+// appliedSpec keeps engineVersion as written, so an unset one resolves to the
+// default of the catalog entry for the image revision the instance runs
+// (status.currentImageRevision); "" when that can't be determined.
+//
+// TODO(defaulting-webhook): once a mutating webhook persists these defaults
+// into spec at creation, spec *is* the effective value and this reduces to
+// copying it (same for immutableDrift's post-defaulting comparison). A plain
+// CRD +kubebuilder:default can't do it — the defaults come from operator
+// config, dbName from metadata.name, engineVersion from the catalog.
+func EffectiveSettingsFor(inst *dbaasv1.DBInstance, defaults operatorconfig.DatabaseDefaults) EffectiveSettings {
+	defaults = withBuiltInDatabaseDefaults(defaults)
+	s := EffectiveSettings{
+		DBName:         inst.EffectiveDBName(),
+		MasterUsername: inst.Spec.MasterUsername,
+		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
+		StorageType:    inst.Spec.StorageType,
+		EngineVersion:  inst.Spec.EngineVersion,
+	}
+	if s.MasterUsername == "" {
+		s.MasterUsername = defaults.MasterUsername
+	}
+	if s.StorageType == "" {
+		s.StorageType = defaults.StorageClass
+	}
+	if a := inst.Status.AppliedSpec; a != nil {
+		if a.DBName != "" {
+			s.DBName = a.DBName
+		}
+		if a.MasterUsername != "" {
+			s.MasterUsername = a.MasterUsername
+		}
+		if a.Port != 0 {
+			s.Port = a.Port
+		}
+		if a.StorageType != "" {
+			s.StorageType = a.StorageType
+		}
+	}
+	if s.EngineVersion == "" {
+		if entry, ok := catalog.BakedImages[inst.Status.CurrentImageRevision]; ok {
+			s.EngineVersion = entry.DefaultEngineVersion
+		}
+	}
+	return s
+}
+
 // resolveBakedImage looks up the current validated revision for
 // defaults.OSVersion and its catalog entry. ok is false when the stream is
 // unknown, not yet Validated, or points at a revision missing from
@@ -77,10 +140,7 @@ func immutableDriftWithDefaults(inst *dbaasv1.DBInstance, defaults operatorconfi
 		return ""
 	}
 
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
+	dbName := inst.EffectiveDBName()
 	masterUser := inst.Spec.MasterUsername
 	if masterUser == "" {
 		masterUser = defaults.MasterUsername
@@ -91,7 +151,7 @@ func immutableDriftWithDefaults(inst *dbaasv1.DBInstance, defaults operatorconfi
 	}
 	appliedDBName := applied.DBName
 	if appliedDBName == "" {
-		appliedDBName = inst.Name
+		appliedDBName = dbaasv1.DefaultDBName(inst.Name)
 	}
 	appliedMasterUser := applied.MasterUsername
 	if appliedMasterUser == "" {

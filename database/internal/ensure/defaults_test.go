@@ -194,3 +194,42 @@ func TestImmutableDriftStaticNetworkSameValueDifferentPointerIsNotDrift(t *testi
 		t.Fatalf("immutableDrift() = %q, want no drift", drift)
 	}
 }
+
+func TestEffectiveSettingsFor(t *testing.T) {
+	defaults := operatorconfig.DatabaseDefaults{MasterUsername: "platform_admin", Port: 5432, StorageClass: "longhorn"}
+	for name, tc := range map[string]struct {
+		inst *dbaasv1.DBInstance
+		want EffectiveSettings
+	}{
+		"spec unset, never provisioned: current defaults, dbName = instance name": {
+			inst: &dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "orders"}},
+			want: EffectiveSettings{DBName: "orders", MasterUsername: "platform_admin", Port: 5432, StorageType: "longhorn"},
+		},
+		"explicit spec values": {
+			inst: &dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "orders"}, Spec: dbaasv1.DBInstanceSpec{
+				DBName: "appdb", MasterUsername: "owner", EngineVersion: "16", Port: 6543, StorageType: "fast"}},
+			want: EffectiveSettings{DBName: "appdb", MasterUsername: "owner", EngineVersion: "16", Port: 6543, StorageType: "fast"},
+		},
+		"appliedSpec beats current defaults": {
+			inst: &dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "orders"}, Status: dbaasv1.DBInstanceStatus{
+				AppliedSpec: &dbaasv1.AppliedSpec{DBName: "orders", MasterUsername: "dbadmin", Port: 5433, StorageType: "longhorn-old"}}},
+			want: EffectiveSettings{DBName: "orders", MasterUsername: "dbadmin", Port: 5433, StorageType: "longhorn-old"},
+		},
+		"unset engineVersion resolves through the running image revision": {
+			inst: &dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "orders"}, Status: dbaasv1.DBInstanceStatus{
+				CurrentImageRevision: "ubuntu-2404-postgres-v20260815"}},
+			want: EffectiveSettings{DBName: "orders", MasterUsername: "platform_admin", EngineVersion: "18", Port: 5432, StorageType: "longhorn"},
+		},
+		"unknown image revision leaves engineVersion undetermined": {
+			inst: &dbaasv1.DBInstance{ObjectMeta: metav1.ObjectMeta{Name: "orders"}, Status: dbaasv1.DBInstanceStatus{
+				CurrentImageRevision: "not-in-the-catalog"}},
+			want: EffectiveSettings{DBName: "orders", MasterUsername: "platform_admin", Port: 5432, StorageType: "longhorn"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := EffectiveSettingsFor(tc.inst, defaults); got != tc.want {
+				t.Fatalf("EffectiveSettingsFor = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

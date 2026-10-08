@@ -188,4 +188,3 @@ certManager:
 ##
 prometheus:
   enable: false
-

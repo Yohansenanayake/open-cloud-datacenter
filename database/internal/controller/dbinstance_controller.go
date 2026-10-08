@@ -21,11 +21,13 @@ import (
 	goerrors "errors"
 	"fmt"
 	"strings"
+	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/backup"
 	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/ensure"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
@@ -50,6 +53,10 @@ import (
 // updates the status, and requeues for the next phase.
 type DBInstanceReconciler struct {
 	client.Client
+	// APIReader is an uncached reader handed to the ensure steps for
+	// coordination reads (repave's snapshot hold). Defaults to the manager's
+	// APIReader in SetupWithManager.
+	APIReader client.Reader
 	Harvester harvester.ClientInterface
 	Recorder  record.EventRecorder
 	// GrafanaBaseURL is the cluster Grafana base used to render per-instance
@@ -69,6 +76,7 @@ type DBInstanceReconciler struct {
 	DatabaseDefaults operatorconfig.DatabaseDefaults
 	InstanceClasses  map[string]dbaasv1.InstanceClassSpec
 	Monitoring       operatorconfig.MonitoringConfig
+	Restore          operatorconfig.RestoreConfig
 }
 
 // DBInstance CRD permissions.
@@ -96,6 +104,9 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// Snapshot-hold/restore-hold coordination (internal/backup) — plain Lease
+// objects, no custom coordination CRD (yohan-docs/backups/harvester-vm-backup/).
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main entry point called by controller-runtime.
 func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
@@ -169,24 +180,66 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 		return ctrl.Result{}, nil
 	}
 
+	// Teardown spans several passes (waiting on a snapshot, then the VM), so
+	// announce its start and each wait once, on the transition.
+	prevReason := dbaasv1.ConditionReason("")
+	if prev := inst.Status.GetCondition(dbaasv1.ConditionDeletionBlocked); prev != nil {
+		prevReason = dbaasv1.ConditionReason(prev.Reason)
+	}
+	started := false
+	switch prevReason {
+	case dbaasv1.ReasonDeletionProgressing, dbaasv1.ReasonDeletionWaitingForSnapshot, dbaasv1.ReasonDeletionWaitingForVM:
+		started = true
+	}
 	inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionFalse,
 		dbaasv1.ReasonDeletionProgressing, "Tearing down resources")
 	r.finalizeStatus(inst)
-	if r.Recorder != nil {
+	if r.Recorder != nil && !started {
 		r.Recorder.Event(inst, corev1.EventTypeNormal, string(dbaasv1.ReasonDeletionProgressing), "Tearing down database resources")
 	}
 	if err := patcher.Patch(ctx, inst, dbInstancePatchOptions()...); err != nil {
 		logger.Error(err, "Failed to publish deletion progress; continuing teardown")
 	}
 
+	// A backup still reading the VM must finish before the VM goes away.
+	if res, waiting, err := r.settleSnapshotHold(ctx, inst, prevReason); err != nil || waiting {
+		return res, err
+	}
+
+	// The VM's own disks are deleted through the VM (Harvester's VM
+	// finalizer), since Harvester recreates a missing PVC for a VM that
+	// isn't being deleted yet. Marked on every pass, so a VM someone else
+	// already started deleting is covered too; the direct deletes below
+	// cover one whose finalizer ran before the mark landed.
+	refs := inst.Status.Resources
+	refs.VMName = ensure.VMNameFor(inst)
+	vmPresent, err := r.Harvester.MarkVMPVCsForRemoval(ctx, ns, refs.VMName, func(pvc string) bool { return ensure.OwnsPVCName(inst, pvc) })
+	if err != nil {
+		return ctrl.Result{}, r.teardownFailed(inst, fmt.Errorf("mark VM disks for removal: %w", err))
+	}
+
 	logger.Info("Tearing down child resources", "namespace", ns)
-	if err := r.Harvester.TeardownAll(ctx, inst.Name, ns, inst.Status.Resources); err != nil {
-		msg := fmt.Sprintf("Teardown failed, will retry: %v", err)
-		inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue, dbaasv1.ReasonTeardownFailed, msg)
-		if r.Recorder != nil {
-			r.Recorder.Event(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonTeardownFailed), msg)
+	if err := r.Harvester.TeardownAll(ctx, inst.Name, ns, refs); err != nil {
+		return ctrl.Result{}, r.teardownFailed(inst, err)
+	}
+	if vmPresent {
+		r.deletionWaiting(inst, prevReason, metav1.ConditionFalse, dbaasv1.ReasonDeletionWaitingForVM,
+			fmt.Sprintf("waiting for virtualmachine %q to be deleted", refs.VMName))
+		return ctrl.Result{RequeueAfter: deletionPollRequeue}, nil // the VM watch usually re-triggers sooner
+	}
+
+	// The VM is gone, so nothing recreates its PVCs any more. Delete the
+	// known ones directly, as the backstop for a VM that was already gone
+	// (or whose removal annotation never landed). Each delete is durable
+	// once issued: PVC protection holds it until no pod uses it.
+	var pvcErrs []error
+	for _, pvc := range ensure.TeardownPVCNames(inst) {
+		if err := r.Harvester.DeletePVC(ctx, ns, pvc); err != nil {
+			pvcErrs = append(pvcErrs, fmt.Errorf("persistentvolumeclaims/%s: %w", pvc, err))
 		}
-		return ctrl.Result{}, err
+	}
+	if err := goerrors.Join(pvcErrs...); err != nil {
+		return ctrl.Result{}, r.teardownFailed(inst, err)
 	}
 
 	if err := r.deleteOperatorSecrets(ctx, inst); err != nil {
@@ -199,6 +252,92 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 	}
 
 	return ctrl.Result{}, r.removeDBInstanceFinalizer(ctx, client.ObjectKeyFromObject(inst))
+}
+
+const deletionPollRequeue = 5 * time.Second
+
+func (r *DBInstanceReconciler) teardownFailed(inst *dbaasv1.DBInstance, err error) error {
+	msg := fmt.Sprintf("Teardown failed, will retry: %v", err)
+	inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, metav1.ConditionTrue, dbaasv1.ReasonTeardownFailed, msg)
+	if r.Recorder != nil {
+		r.Recorder.Event(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonTeardownFailed), msg)
+	}
+	return err
+}
+
+// settleSnapshotHold makes sure no backup is reading the VM before teardown
+// deletes it. The snapshot hold is read live and judged by who holds it:
+//
+//   - a DBSnapshot whose backup is still running: wait for it to finish and
+//     release the hold itself (waiting=true). DBSnapshot admission re-checks
+//     this instance's deletionTimestamp live after taking the hold, so no new
+//     backup can start once this pass has seen the hold free.
+//   - a DBSnapshot that no longer exists, belongs to another source, or has
+//     already finished: the hold is stale, and nobody else will release it.
+//   - repave (this instance's own hold): repave never runs during deletion,
+//     so nothing else will release it either.
+//
+// Restore holds are not waited on: a restore reads the snapshot's
+// VolumeSnapshot, which outlives this instance.
+func (r *DBInstanceReconciler) settleSnapshotHold(ctx context.Context, inst *dbaasv1.DBInstance, prevReason dbaasv1.ConditionReason) (ctrl.Result, bool, error) {
+	holds := backup.Holds{Live: r.APIReader, Writer: r.Client}
+	leaseName := backup.SnapshotHoldName(inst.UID)
+	holder, held, err := holds.Held(ctx, inst.Namespace, leaseName)
+	if err != nil || !held {
+		return ctrl.Result{}, false, err
+	}
+	if snapName, ok := strings.CutPrefix(holder, snapshotHolderPrefix); ok {
+		running, err := r.snapshotStillRunning(ctx, inst, snapName)
+		if err != nil {
+			return ctrl.Result{}, false, err
+		}
+		if running {
+			r.deletionWaiting(inst, prevReason, metav1.ConditionTrue, dbaasv1.ReasonDeletionWaitingForSnapshot,
+				fmt.Sprintf("waiting for DBSnapshot %q to finish before tearing down", snapName))
+			return ctrl.Result{RequeueAfter: deletionPollRequeue}, true, nil
+		}
+		if err := holds.Release(ctx, inst.Namespace, leaseName, holder); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		// Its DBSnapshot should have released it: worth surfacing.
+		if r.Recorder != nil {
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, string(dbaasv1.ReasonStaleSnapshotHoldReleased),
+				"released snapshot hold left by DBSnapshot %q, which no longer needs it", snapName)
+		}
+		return ctrl.Result{}, false, nil
+	}
+	return ctrl.Result{}, false, holds.Release(ctx, inst.Namespace, leaseName, holder)
+}
+
+// deletionWaiting records what teardown is waiting on, announcing it once:
+// only when the previous pass wasn't already waiting on the same thing.
+func (r *DBInstanceReconciler) deletionWaiting(inst *dbaasv1.DBInstance, prevReason dbaasv1.ConditionReason,
+	status metav1.ConditionStatus, reason dbaasv1.ConditionReason, msg string) {
+	inst.SetCurrentCondition(dbaasv1.ConditionDeletionBlocked, status, reason, msg)
+	if r.Recorder != nil && prevReason != reason {
+		r.Recorder.Event(inst, corev1.EventTypeNormal, string(reason), msg)
+	}
+}
+
+// snapshotStillRunning reports whether DBSnapshot name still has a backup of
+// inst to finish. Read live: answering "no" leads to releasing its hold.
+func (r *DBInstanceReconciler) snapshotStillRunning(ctx context.Context, inst *dbaasv1.DBInstance, name string) (bool, error) {
+	var snap dbaasv1.DBSnapshot
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: inst.Namespace, Name: name}, &snap); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if snap.Spec.SourceInstanceRef.Name != inst.Name {
+		return false, nil
+	}
+	if cond := snap.Status.GetCondition(dbaasv1.ConditionSnapshotReady); cond != nil {
+		if cond.Status == metav1.ConditionTrue || isTerminalSnapshotReason(dbaasv1.ConditionReason(cond.Reason)) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // removeDBInstanceFinalizer re-fetches on every retry so the full-object update
@@ -270,9 +409,13 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("operator namespace must not be empty")
 	}
 	r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if r.EnsureRunner == nil {
 		r.EnsureRunner = ensure.NewDefaultRunner(ensure.Dependencies{
 			Client:            r.Client,
+			APIReader:         r.APIReader,
 			Harvester:         r.Harvester,
 			Recorder:          r.Recorder,
 			GrafanaBaseURL:    r.GrafanaBaseURL,
@@ -280,6 +423,7 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DatabaseDefaults:  r.DatabaseDefaults,
 			InstanceClasses:   r.InstanceClasses,
 			Monitoring:        r.Monitoring,
+			Restore:           r.Restore,
 		})
 	}
 

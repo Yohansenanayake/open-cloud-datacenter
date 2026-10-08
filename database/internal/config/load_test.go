@@ -42,6 +42,12 @@ func TestLoadDefaults(t *testing.T) {
 	if got.DatabaseDefaults != want.DatabaseDefaults {
 		t.Fatalf("DatabaseDefaults = %+v, want %+v", got.DatabaseDefaults, want.DatabaseDefaults)
 	}
+	if got.Restore.RecoveryTimeout != time.Hour {
+		t.Fatalf("Restore.RecoveryTimeout = %v, want 1h", got.Restore.RecoveryTimeout)
+	}
+	if got.Restore.Timeout != 6*time.Hour {
+		t.Fatalf("Restore.Timeout = %v, want 6h", got.Restore.Timeout)
+	}
 	if len(got.InstanceClasses) != len(want.InstanceClasses) {
 		t.Fatalf("InstanceClasses has %d entries, want %d", len(got.InstanceClasses), len(want.InstanceClasses))
 	}
@@ -103,6 +109,72 @@ func TestEnvironmentNameNormalization(t *testing.T) {
 	}
 	if got.DatabaseDefaults.OSVersion != "22.04" {
 		t.Fatalf("OSVersion = %q, want 22.04", got.DatabaseDefaults.OSVersion)
+	}
+}
+
+func TestRestoreRecoveryTimeoutIsConfigurable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file string
+		env  string
+		args []string
+		want time.Duration
+	}{
+		"config file": {file: `{"restore": {"recoveryTimeout": "90m"}}`, want: 90 * time.Minute},
+		"environment": {env: "2h", want: 2 * time.Hour},
+		"flag":        {args: []string{"--restore.recoveryTimeout=45m"}, want: 45 * time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigurationEnvironment(t)
+			if tc.env != "" {
+				t.Setenv("DBAAS_RESTORE__RECOVERY_TIMEOUT", tc.env)
+			}
+			file := tc.file
+			if file == "" {
+				file = "{}"
+			}
+			got, err := load(flag.NewFlagSet("test", flag.ContinueOnError), tc.args, writeConfig(t, file))
+			if err != nil {
+				t.Fatalf("load() error = %v", err)
+			}
+			if got.Restore.RecoveryTimeout != tc.want {
+				t.Fatalf("Restore.RecoveryTimeout = %v, want %v", got.Restore.RecoveryTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func TestBackupSettingsAreConfigurable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file, maxEnv, timeoutEnv string
+		args                     []string
+		wantMax                  int
+		wantTimeout              time.Duration
+	}{
+		"defaults":    {wantMax: 4, wantTimeout: 6 * time.Hour},
+		"config file": {file: `{"backup": {"maxConcurrent": 6, "timeout": "3h"}}`, wantMax: 6, wantTimeout: 3 * time.Hour},
+		"environment": {maxEnv: "2", timeoutEnv: "90m", wantMax: 2, wantTimeout: 90 * time.Minute},
+		"flag":        {args: []string{"--backup.maxConcurrent=8", "--backup.timeout=2h"}, wantMax: 8, wantTimeout: 2 * time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigurationEnvironment(t)
+			if tc.maxEnv != "" {
+				t.Setenv("DBAAS_BACKUP__MAX_CONCURRENT", tc.maxEnv)
+			}
+			if tc.timeoutEnv != "" {
+				t.Setenv("DBAAS_BACKUP__TIMEOUT", tc.timeoutEnv)
+			}
+			file := tc.file
+			if file == "" {
+				file = "{}"
+			}
+			got, err := load(flag.NewFlagSet("test", flag.ContinueOnError), tc.args, writeConfig(t, file))
+			if err != nil {
+				t.Fatalf("load() error = %v", err)
+			}
+			if got.Backup.MaxConcurrent != tc.wantMax || got.Backup.Timeout != tc.wantTimeout {
+				t.Fatalf("Backup = %+v, want maxConcurrent %d, timeout %v", got.Backup, tc.wantMax, tc.wantTimeout)
+			}
+		})
 	}
 }
 

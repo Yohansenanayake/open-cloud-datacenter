@@ -20,9 +20,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 )
 
 // BootstrapParams is the subset of DBInstance spec/class the guest bootstrap
@@ -35,9 +38,6 @@ type BootstrapParams struct {
 	Port           int
 	MasterUser     string
 	MaxConnections int
-	BackupEnabled  bool
-	BackupWindow   string
-	S3Config       *dbaasv1.S3BackupConfig
 	VMPassword     string
 	// StaticNetwork, when non-nil, makes the cloud-init netplan use a
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
@@ -49,6 +49,19 @@ type BootstrapParams struct {
 	// binaries pre-installed side by side, and bootstrap.sh drops every
 	// pre-baked cluster and creates exactly one, for this version, at boot.
 	EngineVersion string
+	// RestoreID is the UID of the DBRestore that created this instance
+	// (spec.restoredFrom.dbRestoreUID), empty for an ordinary instance. When
+	// set, the data disk must already hold the restored cluster: bootstrap
+	// fails closed rather than formatting or initializing it. The one-time
+	// restore work — verify the restored data, hand the DBaaS-managed roles
+	// this instance's credentials, and only then open remote access — runs
+	// while the disk's own restore marker doesn't yet name this RestoreID,
+	// so it happens once per restore, not again on a repave or VM recreation.
+	RestoreID string
+	// RestoreRecoveryTimeout bounds how long a pending restore waits for
+	// PostgreSQL to finish crash-recovering the restored data (operator
+	// config restore.recoveryTimeout). Zero means the operator default.
+	RestoreRecoveryTimeout time.Duration
 }
 
 // BuildCloudInit renders the cloud-init userdata and networkdata that
@@ -138,18 +151,16 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func buildUserData(p BootstrapParams, m *Material) string {
-	backupConfig := "# backups disabled"
-	if p.BackupEnabled && p.S3Config != nil {
-		backupConfig = fmt.Sprintf(
-			"S3_ENDPOINT=%s\n      S3_BUCKET=%s\n      S3_REGION=%s\n      S3_SECRET_REF=%s",
-			shellSingleQuote(p.S3Config.Endpoint),
-			shellSingleQuote(p.S3Config.Bucket),
-			shellSingleQuote(p.S3Config.Region),
-			shellSingleQuote(p.S3Config.SecretRef),
-		)
+// restoreRecoveryTimeoutSeconds renders the timeout in whole seconds, rounded
+// up so a sub-second remainder is never truncated to an immediate failure.
+func restoreRecoveryTimeoutSeconds(d time.Duration) int {
+	if d <= 0 {
+		d = operatorconfig.Default().Restore.RecoveryTimeout
 	}
+	return int(math.Ceil(d.Seconds()))
+}
 
+func buildUserData(p BootstrapParams, m *Material) string {
 	vmUserBlock := ""
 	if p.VMPassword != "" {
 		vmUserBlock = fmt.Sprintf(`password: %s
@@ -183,7 +194,8 @@ ssh_pwauth: true
       EXPORTER_PASSWORD=%s
       MAX_CONNECTIONS=%d
       ENGINE_VERSION=%s
-      %s
+      RESTORE_ID=%s
+      RESTORE_RECOVERY_TIMEOUT_SECONDS=%d
   - path: /etc/ssl/certs/pg-ca.crt
     encoding: b64
     permissions: "0644"
@@ -202,6 +214,37 @@ ssh_pwauth: true
       #!/bin/bash
       set -euo pipefail
       source /etc/dbaas/bootstrap.env
+
+      # A restored instance (RESTORE_ID set) fails closed on anything that
+      # doesn't look like the restored cluster: never format, never
+      # initialize, never accept remote logins. The reason is left in
+      # /var/lib/dbaas/restore-failed for an operator, and the readiness
+      # marker is never written, so the instance never reports ready.
+      restore_fail() {
+        echo "RESTORE FAILED: $1" >&2
+        echo "$1" > /var/lib/dbaas/restore-failed
+        stop_postgres_fully || true
+        shred -uz /etc/dbaas/bootstrap.env 2>/dev/null || rm -f /etc/dbaas/bootstrap.env
+        exit 1
+      }
+
+      # Stop every PostgreSQL server and wait until none is left. Stopping
+      # postgresql.service alone isn't enough: it's an umbrella unit, and
+      # systemctl returns while the real cluster unit is still shutting
+      # down. A server still shutting down when the data disk is mounted
+      # over /var/lib/postgresql writes its shutdown checkpoint's pg_control
+      # onto that disk (PostgreSQL writes pg_control through the absolute
+      # data-directory path) — which replaced a restored cluster's
+      # pg_control in testing. Stopping the instance units by name makes
+      # systemctl wait for them; pgrep confirms nothing is left.
+      stop_postgres_fully() {
+        systemctl stop 'postgresql@*' postgresql || true
+        for _ in $(seq 1 "${PG_STOP_TIMEOUT_SECONDS:-60}"); do
+          pgrep -x postgres >/dev/null || return 0
+          sleep 1
+        done
+        ! pgrep -x postgres >/dev/null
+      }
 
       # 1. Activate the requested PostgreSQL version. Every catalog-supported
       #    version's binaries are pre-installed in the baked image
@@ -234,8 +277,21 @@ ssh_pwauth: true
       PGDATA_DEVICE="/dev/vdb"
       PGDATA_MOUNT="/var/lib/postgresql"
       if [ -b "${PGDATA_DEVICE}" ]; then
-        systemctl stop postgresql || true
+        if ! stop_postgres_fully; then
+          msg="a PostgreSQL server was still running ${PG_STOP_TIMEOUT_SECONDS:-60}s after being stopped; refusing to touch the data disk under it"
+          if [ -n "${RESTORE_ID}" ]; then
+            restore_fail "${msg}"
+          fi
+          echo "ERROR: ${msg}" >&2
+          exit 1
+        fi
         if ! blkid "${PGDATA_DEVICE}" >/dev/null 2>&1; then
+          # A restored disk arrives populated from the snapshot; no
+          # filesystem means it isn't the disk it should be. Formatting it
+          # would turn a failed restore into an empty database.
+          if [ -n "${RESTORE_ID}" ]; then
+            restore_fail "data disk ${PGDATA_DEVICE} has no filesystem; refusing to format a restored instance's disk"
+          fi
           mkfs.ext4 -F -L pgdata "${PGDATA_DEVICE}"
         fi
         PGDATA_UUID=$(blkid -s UUID -o value "${PGDATA_DEVICE}")
@@ -247,9 +303,20 @@ ssh_pwauth: true
           # PostgreSQL's own marker file (PG_VERSION), not "is the dir empty?":
           # mkfs.ext4 always creates lost+found, so a freshly-formatted disk
           # is never literally empty. On reboot the marker exists and we keep
-          # the existing data.
-          if [ ! -f "/mnt/dbaas-pgdata/${PG_VER}/main/PG_VERSION" ] && [ -d "${PGDATA_MOUNT}/${PG_VER}/main" ]; then
-            cp -a "${PGDATA_MOUNT}/." /mnt/dbaas-pgdata/
+          # the existing data. A restored disk must already hold a cluster of
+          # exactly this version — copying a fresh one over it would hide
+          # the failure behind an empty database.
+          if [ ! -f "/mnt/dbaas-pgdata/${PG_VER}/main/PG_VERSION" ]; then
+            if [ -n "${RESTORE_ID}" ]; then
+              umount /mnt/dbaas-pgdata
+              restore_fail "restored data disk holds no PostgreSQL ${PG_VER} cluster"
+            fi
+            if [ -d "${PGDATA_MOUNT}/${PG_VER}/main" ]; then
+              cp -a "${PGDATA_MOUNT}/." /mnt/dbaas-pgdata/
+            fi
+          elif [ -n "${RESTORE_ID}" ] && [ "$(cat "/mnt/dbaas-pgdata/${PG_VER}/main/PG_VERSION")" != "${PG_VER}" ]; then
+            umount /mnt/dbaas-pgdata
+            restore_fail "restored cluster's PG_VERSION does not match engine version ${PG_VER}"
           fi
           umount /mnt/dbaas-pgdata
           if ! grep -q "UUID=${PGDATA_UUID}[[:space:]]${PGDATA_MOUNT}[[:space:]]" /etc/fstab; then
@@ -259,14 +326,43 @@ ssh_pwauth: true
         fi
         chown -R postgres:postgres "${PGDATA_MOUNT}"
       else
+        if [ -n "${RESTORE_ID}" ]; then
+          restore_fail "restored data disk ${PGDATA_DEVICE} is not attached"
+        fi
         echo "WARN: ${PGDATA_DEVICE} not found; PostgreSQL data remains on the OS disk" >&2
+      fi
+
+      # The one-time restore work is pending until the data disk itself
+      # records that it was completed for this restore. The marker lives on
+      # the data disk, so a repave or VM recreation (fresh OS disk, same
+      # data) sees it and doesn't redo the work — and a snapshot taken of a
+      # restored instance carries the *old* ID, so restoring it again does.
+      RESTORE_MARKER="/var/lib/postgresql/.dbaas-restored-from"
+      RESTORE_PENDING=0
+      if [ -n "${RESTORE_ID}" ] && [ "$(cat "${RESTORE_MARKER}" 2>/dev/null || true)" != "${RESTORE_ID}" ]; then
+        RESTORE_PENDING=1
+        # The snapshot was taken from a running server, so the restored data
+        # carries the source's postmaster.pid. PostgreSQL refuses to start if
+        # any live process on this VM happens to have that PID — a matter of
+        # chance on a fresh boot. Nothing can be running on a just-restored
+        # disk, so the file is stale by construction (pg_basebackup and
+        # pgBackRest exclude it from backups for the same reason).
+        rm -f "/var/lib/postgresql/${PG_VER}/main/postmaster.pid"
       fi
 
       # Fix server key ownership now that postgres user exists
       chown postgres:postgres /etc/ssl/private/pg-server.key
 
-      # Listen on all interfaces and set the port
-      sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "${PG_CONF}/postgresql.conf"
+      # Listen on all interfaces and set the port. A pending restore listens
+      # on localhost only: the restored catalog still holds the *source's*
+      # passwords for the DBaaS-managed roles, so remote logins stay closed
+      # until the data is verified and those roles carry this instance's
+      # credentials instead.
+      LISTEN_ADDRESSES="*"
+      if [ "${RESTORE_PENDING}" = "1" ]; then
+        LISTEN_ADDRESSES="localhost"
+      fi
+      sed -i "s/^#\?listen_addresses.*/listen_addresses = '${LISTEN_ADDRESSES}'/" "${PG_CONF}/postgresql.conf"
       sed -i "s/^#\?port.*/port = ${DB_PORT}/" "${PG_CONF}/postgresql.conf"
       sed -i "s/^#\?max_connections.*/max_connections = ${MAX_CONNECTIONS}/" "${PG_CONF}/postgresql.conf"
 
@@ -277,10 +373,59 @@ ssh_pwauth: true
       sed -i "s|^#\?ssl_ca_file.*|ssl_ca_file = '/etc/ssl/certs/pg-ca.crt'|" "${PG_CONF}/postgresql.conf"
 
       # SSL-only remote connections (hostssl rejects plain-text clients)
-      echo "hostssl all all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
-      echo "hostssl replication all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
+      allow_remote_ssl() {
+        echo "hostssl all all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
+        echo "hostssl replication all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
+      }
+      if [ "${RESTORE_PENDING}" != "1" ]; then
+        allow_remote_ssl
+      fi
 
-      systemctl restart postgresql
+      bootstrap_fail() {
+        if [ "${RESTORE_PENDING}" = "1" ]; then
+          restore_fail "$1"
+        fi
+        echo "ERROR: $1" >&2
+        exit 1
+      }
+
+      # Restart the cluster unit by name and wait until it accepts
+      # connections before anything talks to it. Restarting the postgresql
+      # umbrella unit instead returns before the real server is up, so the
+      # SQL below would race it. The cluster unit ignores a *slow* start
+      # (crash recovery can take arbitrarily long) but reports one that
+      # failed outright, so a failed systemctl fails at once; a slow start
+      # is waited out for up to $1 seconds.
+      restart_postgres() { # restart_postgres <timeout-seconds> <context>
+        if ! systemctl restart "postgresql@${PG_VER}-main"; then
+          bootstrap_fail "PostgreSQL failed to start $2; see /var/log/postgresql/postgresql-${PG_VER}-main.log"
+        fi
+        SECONDS=0
+        until pg_isready -h 127.0.0.1 -p "${DB_PORT}" >/dev/null 2>&1; do
+          if [ "${SECONDS}" -ge "$1" ]; then
+            bootstrap_fail "PostgreSQL did not accept connections within $1s $2"
+          fi
+          sleep 2
+        done
+      }
+
+      # A pending restore's first start crash-recovers the snapshot's own
+      # WAL (Snapshot mode: local recovery only, no recovery.signal), so it
+      # gets restore.recoveryTimeout rather than an ordinary start's bound.
+      if [ "${RESTORE_PENDING}" = "1" ]; then
+        restart_postgres "${RESTORE_RECOVERY_TIMEOUT_SECONDS}" "on the restored data (crash recovery)"
+      else
+        restart_postgres "${PG_START_TIMEOUT_SECONDS:-300}" "after configuring it"
+      fi
+
+      # Verify the restored data is what this restore expected before
+      # anything is granted on it.
+      if [ "${RESTORE_PENDING}" = "1" ]; then
+        [ "$(sudo -u postgres psql -p "${DB_PORT}" -tAc "SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'")" = "1" ] \
+          || restore_fail "restored cluster has no database ${DB_NAME}"
+        [ "$(sudo -u postgres psql -p "${DB_PORT}" -tAc "SELECT 1 FROM pg_roles WHERE rolname = '${MASTER_USER}'")" = "1" ] \
+          || restore_fail "restored cluster has no role ${MASTER_USER}"
+      fi
 
       # Create admin user and database. The master user gets CREATEDB and
       # CREATEROLE so it can manage its own databases / roles, but NOT
@@ -301,6 +446,22 @@ ssh_pwauth: true
       SELECT 'CREATE DATABASE "${DB_NAME}" OWNER "${MASTER_USER}"'
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
       EOSQL
+
+      # Finish a pending restore: hand the DBaaS-managed roles this
+      # instance's credentials (its Secret is now the only authority — the
+      # source's may no longer exist), then open remote access, then record
+      # on the data disk that this restore is done. Roles the tenant created
+      # are restored data and are left exactly as they were.
+      if [ "${RESTORE_PENDING}" = "1" ]; then
+        sudo -u postgres psql -v ON_ERROR_STOP=1 -p "${DB_PORT}" <<EOSQL || restore_fail "could not reset the DBaaS-managed roles' credentials"
+      ALTER ROLE "${MASTER_USER}" WITH LOGIN PASSWORD '${MASTER_PASSWORD}';
+      ALTER ROLE postgres_exporter WITH LOGIN PASSWORD '${EXPORTER_PASSWORD}';
+      EOSQL
+        sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "${PG_CONF}/postgresql.conf"
+        allow_remote_ssl
+        restart_postgres "${PG_START_TIMEOUT_SECONDS:-300}" "after opening remote access"
+        echo "${RESTORE_ID}" > "${RESTORE_MARKER}"
+      fi
 
       # Bootstrap-completion marker, checked by the KubeVirt readiness probe
       # (internal/harvester/typed_client.go). pg_isready alone answers "is a
@@ -354,7 +515,8 @@ final_message: "DBaaS bootstrap complete for %s"
 		m.ExporterPassword,
 		p.MaxConnections,
 		shellSingleQuote(p.EngineVersion),
-		backupConfig,
+		shellSingleQuote(p.RestoreID),
+		restoreRecoveryTimeoutSeconds(p.RestoreRecoveryTimeout),
 		caCertB64,
 		serverCertB64,
 		serverKeyB64,

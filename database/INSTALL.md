@@ -37,11 +37,12 @@ kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts
 - Lands at `database/charts/chart/` (the plugin appends its own `chart/` under `--output-dir`).
 - This resets `config/manager/kustomization.yaml`'s image to the generic `controller:latest` (its internal `make build-installer` call) — harmless: that file is deliberately never a source of truth for a real image, matching README's own Quickstart, which always passes `IMG=` explicitly on every command. Don't commit a real registry value into it; there's nothing to protect from a regen.
 - Only `Chart.yaml`, `values.yaml`, `NOTES.txt`, `_helpers.tpl`, `.helmignore`, and the test-chart workflow survive a re-run without `--force` — every other template regenerates from current `config/`, wiping any hand-fix (like step 2's RBAC fix) that isn't in this preserved list.
+- The chart must include all three APIs (`DBInstance`, `DBSnapshot`, and `DBRestore`), their current schemas, and the generated manager permissions. After regeneration, run `helm lint charts/chart` and `go test ./test/chart/...` from `database/` to check that the rendered CRDs and RBAC match `config/`.
 
 ## 2. Fix the generated defaults (one-time per real change, not every regen)
 
 - **`Chart.yaml`** is never auto-regenerated — set `name`/`description`/`version`/`appVersion` by hand. Keep the chart name consistent with `HELM_RELEASE` in `make helm-deploy`, or you get a double-barrelled `<release>-<chart>` resource prefix instead of a clean one.
-- **`rbac.namespaced` toggle**: the plugin generates this on `manager-role.yaml`/`manager-rolebinding.yaml`/the three `dbinstance-*-role.yaml` files. **Remove it** — DBaaS reconciles `DBInstance`s across every tenant namespace, so a namespaced `Role` would silently blind the manager outside its own install namespace. Hardcode `ClusterRole`/`ClusterRoleBinding` in all five, drop `namespaced:` from `values.yaml`. Doesn't survive a bare regen — reapply after any template-affecting change.
+- **`rbac.namespaced` toggle**: remove this generated toggle from `manager-role.yaml`, `manager-rolebinding.yaml`, and every `dbinstance-*-role.yaml`, `dbsnapshot-*-role.yaml`, and `dbrestore-*-role.yaml` helper. DBaaS reconciles these resources across every tenant namespace, so a namespaced `Role` would silently blind the manager outside its own install namespace. Hardcode `ClusterRole`/`ClusterRoleBinding` and drop `namespaced:` from `values.yaml`. Doesn't survive a bare regen — reapply after any template-affecting change. The helper roles remain opt-in through `rbac.helpers.enable`.
 - **Image default**: point `values.yaml`'s `manager.image.repository`/`tag` at your real publish target — never the generic `controller`/`latest` placeholder, never a personal registry (see above).
 
 ## 3. Package the chart
@@ -170,7 +171,7 @@ kubectl patch addon dbaas-operator -n dbaas-system --type merge -p '{"spec":{"en
 # 2. Only if you want the Addon object gone too (allowed — experimental label)
 kubectl delete addon dbaas-operator -n dbaas-system
 ```
-`values.yaml`'s `crd.keep: true` (`helm.sh/resource-policy: keep`) stops the `DBInstance` CRD being deleted by either step — it has no effect on normal `helm upgrade` schema changes, which still apply in place. Existing `DBInstance`s (and their VMs/data) are untouched regardless — operator uninstall is not database deletion.
+`values.yaml`'s default `crd.keep: true` (`helm.sh/resource-policy: keep`) retains the `DBInstance`, `DBSnapshot`, and `DBRestore` CRDs and their resources when uninstalling. It has no effect on normal `helm upgrade` schema changes, which still apply in place. Keep this setting enabled to preserve existing instances, snapshots, and restores.
 
 ## Publishing a real release
 

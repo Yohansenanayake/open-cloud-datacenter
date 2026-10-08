@@ -5,10 +5,8 @@ kind: Kustomization
 # this overlay. The namespace must exist before applying the overlay.
 namespace: dbaas-system
 
-# This overlay uses whatever image config/manager/kustomization.yaml already points at. For local
-# testing against your own GHCR .
-# make deploy IMG=ghcr.io/<you>/dbaas-controller:<tag>
-
+# Override the image before applying this overlay, for example:
+# cd config/manager && kustomize edit set image controller=ghcr.io/<you>/dbaas-controller:<tag>
 
 resources:
 - ../../base

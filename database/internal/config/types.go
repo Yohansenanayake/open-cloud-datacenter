@@ -32,6 +32,8 @@ type Config struct {
 	Server           ServerConfig                         `konf:"server"`
 	Infrastructure   InfrastructureConfig                 `konf:"infrastructure"`
 	DatabaseDefaults DatabaseDefaults                     `konf:"databaseDefaults"`
+	Restore          RestoreConfig                        `konf:"restore"`
+	Backup           BackupConfig                         `konf:"backup"`
 	Observability    ObservabilityConfig                  `konf:"observability"`
 	Logging          LoggingConfig                        `konf:"logging"`
 	InstanceClasses  map[string]dbaasv1.InstanceClassSpec `konf:"instanceClasses"`
@@ -98,6 +100,43 @@ type DatabaseDefaults struct {
 	Port           int    `konf:"port"`
 	// OSVersion is the internal/catalog stream key (e.g. "24.04"); platform-wide, with no per-instance override.
 	OSVersion string `konf:"osVersion"`
+}
+
+// RestoreConfig tunes restoring a DBSnapshot into a new DBInstance.
+type RestoreConfig struct {
+	// RecoveryTimeout bounds how long a restored instance's first boot waits
+	// for PostgreSQL to finish crash-recovering the snapshot's data before
+	// failing the restore. Recovery time grows with the WAL the snapshot
+	// captured, so size this for the largest databases being restored.
+	RecoveryTimeout time.Duration `konf:"recoveryTimeout"`
+	// Timeout bounds a whole restore, measured from the DBRestore's
+	// creation: waiting for the snapshot, the volume restore, and the
+	// target becoming ready. A restore still unfinished at that point fails
+	// as RestoreTimedOut and its unfinished target is deleted. Must exceed
+	// RecoveryTimeout, which is only one part of it.
+	Timeout time.Duration `konf:"timeout"`
+}
+
+// BackupConfig tunes how DBSnapshot backups share the cluster.
+type BackupConfig struct {
+	// MaxConcurrent caps how many backups run at once, cluster-wide;
+	// snapshots over the cap wait their turn, oldest first. Each namespace
+	// gets at most PerNamespace() of them, so one tenant's backlog can't
+	// occupy every slot.
+	MaxConcurrent int `konf:"maxConcurrent"`
+	// Timeout bounds one backup, measured from the Harvester backup's
+	// creation (time spent queued doesn't count). A backup still unfinished
+	// then fails as BackupTimedOut and frees its slot.
+	Timeout time.Duration `konf:"timeout"`
+}
+
+// PerNamespace is each namespace's share of MaxConcurrent: half, rounded
+// up, and at least 1. It is derived, never configured separately, so the
+// two can't disagree. The share is strict — it applies even when no other
+// namespace is waiting — which is what keeps slots free for a tenant that
+// arrives while another is busy.
+func (b BackupConfig) PerNamespace() int {
+	return max(1, (b.MaxConcurrent+1)/2)
 }
 
 type ObservabilityConfig struct {

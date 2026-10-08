@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
+	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/backup"
 	operatorconfig "github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/config"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/credentials"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
@@ -31,6 +32,9 @@ import (
 // and Scheme directly without retaining a dependency on the controller type.
 type Dependencies struct {
 	client.Client
+	// APIReader is an uncached reader for coordination reads (hold Leases),
+	// where a stale informer cache would break mutual exclusion.
+	APIReader         client.Reader
 	Harvester         harvester.ClientInterface
 	Recorder          record.EventRecorder
 	GrafanaBaseURL    string
@@ -38,6 +42,7 @@ type Dependencies struct {
 	DatabaseDefaults  operatorconfig.DatabaseDefaults
 	InstanceClasses   map[string]dbaasv1.InstanceClassSpec
 	Monitoring        operatorconfig.MonitoringConfig
+	Restore           operatorconfig.RestoreConfig
 }
 
 func (d Dependencies) credentialsResolver() *credentials.Resolver {
@@ -51,8 +56,18 @@ func (d Dependencies) credentialsResolver() *credentials.Resolver {
 
 func (d Dependencies) operatorNamespace() string { return d.OperatorNamespace }
 
+func (d Dependencies) holds() backup.Holds {
+	return backup.Holds{Live: d.APIReader, Writer: d.Client}
+}
+
 func (d Dependencies) databaseDefaults() operatorconfig.DatabaseDefaults {
-	defaults := d.DatabaseDefaults
+	return withBuiltInDatabaseDefaults(d.DatabaseDefaults)
+}
+
+// withBuiltInDatabaseDefaults fills any field left unset in defaults (e.g. a
+// caller constructed without operator config, as tests do) from the
+// built-in defaults.
+func withBuiltInDatabaseDefaults(defaults operatorconfig.DatabaseDefaults) operatorconfig.DatabaseDefaults {
 	builtIn := operatorconfig.Default().DatabaseDefaults
 	if defaults.StorageClass == "" {
 		defaults.StorageClass = builtIn.StorageClass
@@ -74,6 +89,14 @@ func (d Dependencies) instanceClasses() map[string]dbaasv1.InstanceClassSpec {
 		return dbaasv1.InstanceClasses
 	}
 	return d.InstanceClasses
+}
+
+func (d Dependencies) restoreConfig() operatorconfig.RestoreConfig {
+	restore := d.Restore
+	if restore.RecoveryTimeout <= 0 {
+		restore.RecoveryTimeout = operatorconfig.Default().Restore.RecoveryTimeout
+	}
+	return restore
 }
 
 func (d Dependencies) monitoringConfig() operatorconfig.MonitoringConfig {

@@ -123,6 +123,8 @@ const (
 	ReasonTeardownFailed              ConditionReason = "TeardownFailed"
 	ReasonOperatorSecretCleanupFailed ConditionReason = "OperatorSecretCleanupFailed"
 	ReasonDeletionProgressing         ConditionReason = "DeletionProgressing"
+	ReasonDeletionWaitingForSnapshot  ConditionReason = "DeletionWaitingForSnapshot"
+	ReasonDeletionWaitingForVM        ConditionReason = "DeletionWaitingForVM"
 
 	// ConditionImageDrift reasons.
 	ReasonOSUpdateAvailable           ConditionReason = "OSUpdateAvailable"
@@ -132,77 +134,95 @@ const (
 	ReasonCurrentImageRevisionUnknown ConditionReason = "CurrentImageRevisionUnknown"
 
 	// Repave dispatch reasons.
-	ReasonRepaveNotAvailable       ConditionReason = "RepaveNotAvailable"
-	ReasonRepaveBlockedEOL         ConditionReason = "RepaveBlockedEOL"
-	ReasonRepaveInvalidStream      ConditionReason = "RepaveInvalidStream"
-	ReasonRepaveStopping           ConditionReason = "RepaveStopping"
-	ReasonRepaveWaitingForTeardown ConditionReason = "RepaveWaitingForTeardown"
-	ReasonRepaveApplied            ConditionReason = "RepaveApplied"
+	ReasonRepaveNotAvailable           ConditionReason = "RepaveNotAvailable"
+	ReasonRepaveBlockedEOL             ConditionReason = "RepaveBlockedEOL"
+	ReasonRepaveInvalidStream          ConditionReason = "RepaveInvalidStream"
+	ReasonRepaveStopping               ConditionReason = "RepaveStopping"
+	ReasonRepaveWaitingForTeardown     ConditionReason = "RepaveWaitingForTeardown"
+	ReasonRepaveWaitingForSnapshotHold ConditionReason = "RepaveWaitingForSnapshotHold"
+	ReasonRepaveApplied                ConditionReason = "RepaveApplied"
+
+	// Automated snapshot scheduling reasons (event-only — report-only, no
+	// gating condition; see internal/controller/backup_schedule.go).
+	ReasonScheduledSnapshotCreated ConditionReason = "ScheduledSnapshotCreated"
+	ReasonScheduledSnapshotSkipped ConditionReason = "ScheduledSnapshotSkipped"
+	ReasonScheduledSnapshotPruned  ConditionReason = "ScheduledSnapshotPruned"
+
+	// Deletion event-only reason: teardown released a snapshot hold whose
+	// DBSnapshot no longer needed it — something failed to release it.
+	ReasonStaleSnapshotHoldReleased ConditionReason = "StaleSnapshotHoldReleased"
 )
 
 var knownConditionReasons = map[string]ConditionReason{
-	string(ReasonFinalizerAdded):              ReasonFinalizerAdded,
-	string(ReasonInvalidClass):                ReasonInvalidClass,
-	string(ReasonNetworkRefMissing):           ReasonNetworkRefMissing,
-	string(ReasonOSImageInvalid):              ReasonOSImageInvalid,
-	string(ReasonOSImageNotFound):             ReasonOSImageNotFound,
-	string(ReasonOSImageNotReady):             ReasonOSImageNotReady,
-	string(ReasonImmutableFieldChanged):       ReasonImmutableFieldChanged,
-	string(ReasonPreflightPassed):             ReasonPreflightPassed,
-	string(ReasonCredentialsResolveFailed):    ReasonCredentialsResolveFailed,
-	string(ReasonCredentialsCreated):          ReasonCredentialsCreated,
-	string(ReasonCredentialsProvisioned):      ReasonCredentialsProvisioned,
-	string(ReasonConnectionSecretReconciled):  ReasonConnectionSecretReconciled,
-	string(ReasonVMPresent):                   ReasonVMPresent,
-	string(ReasonVMCreateFailed):              ReasonVMCreateFailed,
-	string(ReasonVMCreated):                   ReasonVMCreated,
-	string(ReasonUnsupportedShrink):           ReasonUnsupportedShrink,
-	string(ReasonShapeConverged):              ReasonShapeConverged,
-	string(ReasonResizeStopping):              ReasonResizeStopping,
-	string(ReasonResizeWaitingForTeardown):    ReasonResizeWaitingForTeardown,
-	string(ReasonResizeApplied):               ReasonResizeApplied,
-	string(ReasonCrashLoopHalted):             ReasonCrashLoopHalted,
-	string(ReasonStartWaitingForTeardown):     ReasonStartWaitingForTeardown,
-	string(ReasonStarting):                    ReasonStarting,
-	string(ReasonRunning):                     ReasonRunning,
-	string(ReasonStopping):                    ReasonStopping,
-	string(ReasonStopped):                     ReasonStopped,
-	string(ReasonVMBooting):                   ReasonVMBooting,
-	string(ReasonPostgresInitializing):        ReasonPostgresInitializing,
-	string(ReasonPostgresReady):               ReasonPostgresReady,
-	string(ReasonPostgresUnreachable):         ReasonPostgresUnreachable,
-	string(ReasonGuestAgentDisconnected):      ReasonGuestAgentDisconnected,
-	string(ReasonVMRestarting):                ReasonVMRestarting,
-	string(ReasonCrashLoopDetected):           ReasonCrashLoopDetected,
-	string(ReasonRecovered):                   ReasonRecovered,
-	string(ReasonInstanceStopped):             ReasonInstanceStopped,
-	string(ReasonWaitingForEndpoint):          ReasonWaitingForEndpoint,
-	string(ReasonMonitoringDeployFailed):      ReasonMonitoringDeployFailed,
-	string(ReasonMonitoringDeployed):          ReasonMonitoringDeployed,
-	string(ReasonBootstrapCleanupReconciled):  ReasonBootstrapCleanupReconciled,
-	string(ReasonProvisioning):                ReasonProvisioning,
-	string(ReasonDBInstanceReady):             ReasonDBInstanceReady,
-	string(ReasonSpecAccepted):                ReasonSpecAccepted,
-	string(ReasonValidationPending):           ReasonValidationPending,
-	string(ReasonUnknownValidationFailure):    ReasonUnknownValidationFailure,
-	string(ReasonInterventionRequired):        ReasonInterventionRequired,
-	string(ReasonNoInterventionRequired):      ReasonNoInterventionRequired,
-	string(ReasonDeleting):                    ReasonDeleting,
-	string(ReasonDeletionProtected):           ReasonDeletionProtected,
-	string(ReasonTeardownFailed):              ReasonTeardownFailed,
-	string(ReasonOperatorSecretCleanupFailed): ReasonOperatorSecretCleanupFailed,
-	string(ReasonDeletionProgressing):         ReasonDeletionProgressing,
-	string(ReasonOSUpdateAvailable):           ReasonOSUpdateAvailable,
-	string(ReasonEngineVersionEOL):            ReasonEngineVersionEOL,
-	string(ReasonImageUpToDate):               ReasonImageUpToDate,
-	string(ReasonImageCatalogUnresolved):      ReasonImageCatalogUnresolved,
-	string(ReasonCurrentImageRevisionUnknown): ReasonCurrentImageRevisionUnknown,
-	string(ReasonRepaveNotAvailable):          ReasonRepaveNotAvailable,
-	string(ReasonRepaveBlockedEOL):            ReasonRepaveBlockedEOL,
-	string(ReasonRepaveInvalidStream):         ReasonRepaveInvalidStream,
-	string(ReasonRepaveStopping):              ReasonRepaveStopping,
-	string(ReasonRepaveWaitingForTeardown):    ReasonRepaveWaitingForTeardown,
-	string(ReasonRepaveApplied):               ReasonRepaveApplied,
+	string(ReasonFinalizerAdded):               ReasonFinalizerAdded,
+	string(ReasonInvalidClass):                 ReasonInvalidClass,
+	string(ReasonNetworkRefMissing):            ReasonNetworkRefMissing,
+	string(ReasonOSImageInvalid):               ReasonOSImageInvalid,
+	string(ReasonOSImageNotFound):              ReasonOSImageNotFound,
+	string(ReasonOSImageNotReady):              ReasonOSImageNotReady,
+	string(ReasonImmutableFieldChanged):        ReasonImmutableFieldChanged,
+	string(ReasonPreflightPassed):              ReasonPreflightPassed,
+	string(ReasonCredentialsResolveFailed):     ReasonCredentialsResolveFailed,
+	string(ReasonCredentialsCreated):           ReasonCredentialsCreated,
+	string(ReasonCredentialsProvisioned):       ReasonCredentialsProvisioned,
+	string(ReasonConnectionSecretReconciled):   ReasonConnectionSecretReconciled,
+	string(ReasonVMPresent):                    ReasonVMPresent,
+	string(ReasonVMCreateFailed):               ReasonVMCreateFailed,
+	string(ReasonVMCreated):                    ReasonVMCreated,
+	string(ReasonUnsupportedShrink):            ReasonUnsupportedShrink,
+	string(ReasonShapeConverged):               ReasonShapeConverged,
+	string(ReasonResizeStopping):               ReasonResizeStopping,
+	string(ReasonResizeWaitingForTeardown):     ReasonResizeWaitingForTeardown,
+	string(ReasonResizeApplied):                ReasonResizeApplied,
+	string(ReasonCrashLoopHalted):              ReasonCrashLoopHalted,
+	string(ReasonStartWaitingForTeardown):      ReasonStartWaitingForTeardown,
+	string(ReasonStarting):                     ReasonStarting,
+	string(ReasonRunning):                      ReasonRunning,
+	string(ReasonStopping):                     ReasonStopping,
+	string(ReasonStopped):                      ReasonStopped,
+	string(ReasonVMBooting):                    ReasonVMBooting,
+	string(ReasonPostgresInitializing):         ReasonPostgresInitializing,
+	string(ReasonPostgresReady):                ReasonPostgresReady,
+	string(ReasonPostgresUnreachable):          ReasonPostgresUnreachable,
+	string(ReasonGuestAgentDisconnected):       ReasonGuestAgentDisconnected,
+	string(ReasonVMRestarting):                 ReasonVMRestarting,
+	string(ReasonCrashLoopDetected):            ReasonCrashLoopDetected,
+	string(ReasonRecovered):                    ReasonRecovered,
+	string(ReasonInstanceStopped):              ReasonInstanceStopped,
+	string(ReasonWaitingForEndpoint):           ReasonWaitingForEndpoint,
+	string(ReasonMonitoringDeployFailed):       ReasonMonitoringDeployFailed,
+	string(ReasonMonitoringDeployed):           ReasonMonitoringDeployed,
+	string(ReasonBootstrapCleanupReconciled):   ReasonBootstrapCleanupReconciled,
+	string(ReasonProvisioning):                 ReasonProvisioning,
+	string(ReasonDBInstanceReady):              ReasonDBInstanceReady,
+	string(ReasonSpecAccepted):                 ReasonSpecAccepted,
+	string(ReasonValidationPending):            ReasonValidationPending,
+	string(ReasonUnknownValidationFailure):     ReasonUnknownValidationFailure,
+	string(ReasonInterventionRequired):         ReasonInterventionRequired,
+	string(ReasonNoInterventionRequired):       ReasonNoInterventionRequired,
+	string(ReasonDeleting):                     ReasonDeleting,
+	string(ReasonDeletionProtected):            ReasonDeletionProtected,
+	string(ReasonTeardownFailed):               ReasonTeardownFailed,
+	string(ReasonOperatorSecretCleanupFailed):  ReasonOperatorSecretCleanupFailed,
+	string(ReasonDeletionProgressing):          ReasonDeletionProgressing,
+	string(ReasonDeletionWaitingForSnapshot):   ReasonDeletionWaitingForSnapshot,
+	string(ReasonDeletionWaitingForVM):         ReasonDeletionWaitingForVM,
+	string(ReasonOSUpdateAvailable):            ReasonOSUpdateAvailable,
+	string(ReasonEngineVersionEOL):             ReasonEngineVersionEOL,
+	string(ReasonImageUpToDate):                ReasonImageUpToDate,
+	string(ReasonImageCatalogUnresolved):       ReasonImageCatalogUnresolved,
+	string(ReasonCurrentImageRevisionUnknown):  ReasonCurrentImageRevisionUnknown,
+	string(ReasonRepaveNotAvailable):           ReasonRepaveNotAvailable,
+	string(ReasonRepaveBlockedEOL):             ReasonRepaveBlockedEOL,
+	string(ReasonRepaveInvalidStream):          ReasonRepaveInvalidStream,
+	string(ReasonRepaveStopping):               ReasonRepaveStopping,
+	string(ReasonRepaveWaitingForTeardown):     ReasonRepaveWaitingForTeardown,
+	string(ReasonRepaveWaitingForSnapshotHold): ReasonRepaveWaitingForSnapshotHold,
+	string(ReasonRepaveApplied):                ReasonRepaveApplied,
+	string(ReasonScheduledSnapshotCreated):     ReasonScheduledSnapshotCreated,
+	string(ReasonScheduledSnapshotSkipped):     ReasonScheduledSnapshotSkipped,
+	string(ReasonScheduledSnapshotPruned):      ReasonScheduledSnapshotPruned,
+	string(ReasonStaleSnapshotHoldReleased):    ReasonStaleSnapshotHoldReleased,
 }
 
 // ParseConditionReason validates a reason already serialized in status.
@@ -280,12 +300,6 @@ func (s *DBInstanceStatus) IsCurrentConditionFalse(condType string, generation i
 type PhaseSummary struct {
 	Phase   string
 	Message string
-}
-
-// WantRunning reports the desired power state. An omitted running field
-// defaults to true.
-func (s *DBInstanceSpec) WantRunning() bool {
-	return s.Running == nil || *s.Running
 }
 
 func conditionMessage(s *DBInstanceStatus, condType, fallback string) string {

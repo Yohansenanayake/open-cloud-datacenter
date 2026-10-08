@@ -27,6 +27,7 @@ rules:
   resources:
   - persistentvolumeclaims
   verbs:
+  - create
   - delete
   - get
   - list
@@ -59,9 +60,23 @@ rules:
   - get
   - update
 - apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - dbaas.opencloud.wso2.com
   resources:
   - dbinstances
+  - dbrestores
+  - dbsnapshots
   verbs:
   - create
   - delete
@@ -74,16 +89,31 @@ rules:
   - dbaas.opencloud.wso2.com
   resources:
   - dbinstances/finalizers
+  - dbrestores/finalizers
+  - dbsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
   - dbaas.opencloud.wso2.com
   resources:
   - dbinstances/status
+  - dbrestores/status
+  - dbsnapshots/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - harvesterhci.io
+  resources:
+  - virtualmachinebackups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
 - apiGroups:
   - harvesterhci.io
   resources:
@@ -128,6 +158,12 @@ rules:
   - list
   - update
   - watch
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots
+  verbs:
+  - get
 - apiGroups:
   - subresources.kubevirt.io
   resources:

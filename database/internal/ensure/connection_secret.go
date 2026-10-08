@@ -56,10 +56,7 @@ func (r *connectionSecretStep) Run(ctx context.Context, inst *dbaasv1.DBInstance
 		return PendingAfter(dbaasv1.ReasonCredentialsCreated, msg, credentialRequeue)
 	}
 
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
+	dbName := inst.EffectiveDBName()
 	op, err := resource.Apply(ctx, r.Client, r.Scheme(), inst, resource.ConnectionSecret{
 		Instance:  inst,
 		Address:   inst.Status.Endpoint.Address,

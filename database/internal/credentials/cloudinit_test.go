@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
@@ -180,47 +181,6 @@ func TestUserDataTouchesTheProbedBootstrapMarker(t *testing.T) {
 	}
 }
 
-func TestBuildCloudInitBackupConfig(t *testing.T) {
-	p := testBootstrapParams()
-	p.BackupEnabled = true
-	p.S3Config = &dbaasv1.S3BackupConfig{Endpoint: "s3.example.com", Bucket: "backups", Region: "us-east-1", SecretRef: "s3-creds"}
-	userdata, _ := BuildCloudInit(p, testMaterial())
-
-	for _, want := range []string{"S3_ENDPOINT='s3.example.com'", "S3_BUCKET='backups'", "S3_REGION='us-east-1'", "S3_SECRET_REF='s3-creds'"} {
-		if !strings.Contains(userdata, want) {
-			t.Errorf("userdata missing %q", want)
-		}
-	}
-
-	disabled, _ := BuildCloudInit(testBootstrapParams(), testMaterial())
-	if !strings.Contains(disabled, "# backups disabled") {
-		t.Error("userdata should note backups disabled when BackupEnabled is false")
-	}
-}
-
-func TestBuildCloudInitBackupConfigNeutralizesShellMetacharacters(t *testing.T) {
-	p := testBootstrapParams()
-	p.BackupEnabled = true
-	p.S3Config = &dbaasv1.S3BackupConfig{
-		Endpoint:  "s3.example.com$(touch /tmp/pwned)",
-		Bucket:    "backups`touch /tmp/pwned2`",
-		Region:    "us-east-1; touch /tmp/pwned3",
-		SecretRef: "s3-creds' && touch /tmp/pwned4 && echo '",
-	}
-	userdata, _ := BuildCloudInit(p, testMaterial())
-
-	for _, want := range []string{
-		`S3_ENDPOINT='s3.example.com$(touch /tmp/pwned)'`,
-		"S3_BUCKET='backups`touch /tmp/pwned2`'",
-		`S3_REGION='us-east-1; touch /tmp/pwned3'`,
-		`S3_SECRET_REF='s3-creds'\'' && touch /tmp/pwned4 && echo '\'''`,
-	} {
-		if !strings.Contains(userdata, want) {
-			t.Errorf("userdata missing safely-quoted %q\ngot: %s", want, userdata)
-		}
-	}
-}
-
 func TestBuildCloudInitNetworkDataDHCPDefault(t *testing.T) {
 	_, networkdata := BuildCloudInit(testBootstrapParams(), testMaterial())
 	if !strings.Contains(networkdata, "dhcp4: true") {
@@ -247,6 +207,27 @@ func TestBuildCloudInitNetworkDataStatic(t *testing.T) {
 	} {
 		if !strings.Contains(networkdata, want) {
 			t.Errorf("networkdata missing %q, got: %s", want, networkdata)
+		}
+	}
+}
+
+// restore.recoveryTimeout reaches the guest in whole seconds, rounded up (a
+// sub-second remainder must never truncate towards an instant failure), and
+// an unset value falls back to the operator default.
+func TestBuildCloudInitRendersRestoreRecoveryTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		timeout time.Duration
+		want    string
+	}{
+		{90 * time.Second, "RESTORE_RECOVERY_TIMEOUT_SECONDS=90"},
+		{1500 * time.Millisecond, "RESTORE_RECOVERY_TIMEOUT_SECONDS=2"},
+		{0, "RESTORE_RECOVERY_TIMEOUT_SECONDS=3600"},
+	} {
+		p := testBootstrapParams()
+		p.RestoreRecoveryTimeout = tc.timeout
+		userdata, _ := BuildCloudInit(p, testMaterial())
+		if !strings.Contains(userdata, tc.want) {
+			t.Errorf("timeout %v: userdata missing %s", tc.timeout, tc.want)
 		}
 	}
 }

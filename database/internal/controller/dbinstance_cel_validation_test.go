@@ -19,10 +19,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -163,5 +165,188 @@ var _ = Describe("DBInstance immutable-field CEL rules", func() {
 		var got dbaasv1alpha1.DBInstance
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got)).To(Succeed())
 		Expect(got.Spec.AllocatedStorage).To(Equal(30))
+	})
+})
+
+// dbName/masterUsername identifier rules, enforced by the real API server.
+var _ = Describe("DBInstance dbName and masterUsername identifier rules", func() {
+	ctx := context.Background()
+	counter := 0
+
+	create := func(dbName, masterUsername string) error {
+		counter++
+		inst := &dbaasv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("cel-ident-%d", counter), Namespace: "default"},
+			Spec: dbaasv1alpha1.DBInstanceSpec{
+				DBInstanceClass:  "db.t3.small",
+				AllocatedStorage: 20,
+				NetworkRef:       "default/vm-network",
+				DBName:           dbName,
+				MasterUsername:   masterUsername,
+			},
+		}
+		err := k8sClient.Create(ctx, inst)
+		if err == nil {
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, inst) })
+		}
+		return err
+	}
+
+	DescribeTable("accepts unquoted lowercase identifiers",
+		func(dbName, masterUsername string) {
+			Expect(create(dbName, masterUsername)).To(Succeed())
+		},
+		Entry("plain", "orders", "dbadmin"),
+		Entry("underscores and digits", "orders_db_2", "app_owner_1"),
+		Entry("leading underscore", "_orders", "_admin"),
+	)
+
+	DescribeTable("rejects names that need quoting or are reserved",
+		func(dbName, masterUsername, wantMessage string) {
+			err := create(dbName, masterUsername)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+			Expect(err.Error()).To(ContainSubstring(wantMessage))
+		},
+		Entry("dbName with a hyphen", "orders-db", "", "spec.dbName"),
+		Entry("dbName with uppercase", "Orders", "", "spec.dbName"),
+		Entry("dbName with $", "orders$", "", "spec.dbName"),
+		Entry("dbName starting with a digit", "1orders", "", "spec.dbName"),
+		Entry("dbName postgres", "postgres", "", "built-in PostgreSQL database"),
+		Entry("dbName template1", "template1", "", "built-in PostgreSQL database"),
+		Entry("masterUsername with a hyphen", "", "db-admin", "spec.masterUsername"),
+		Entry("masterUsername with uppercase", "", "Admin", "spec.masterUsername"),
+		Entry("masterUsername postgres", "", "postgres", "reserved role"),
+		Entry("masterUsername postgres_exporter", "", "postgres_exporter", "reserved role"),
+		Entry("masterUsername pg_ prefix", "", "pg_admin", "reserved role"),
+	)
+
+	// The default must always be writable back into spec.dbName — restore
+	// copies a source's effective dbName into the target's spec.
+	It("accepts DefaultDBName of any instance name as an explicit dbName", func() {
+		for _, instanceName := range []string{
+			"orders", "orders-db", "rt-src-1791115069", "a.b.c", "9lives", "postgres", "template0",
+			"x123456789-123456789-123456789-123456789-123456789-123456789-123456789",
+		} {
+			Expect(create(dbaasv1alpha1.DefaultDBName(instanceName), "")).To(Succeed(), "instance name %q", instanceName)
+		}
+	})
+})
+
+var _ = Describe("DBInstance and restore-target name rule", func() {
+	ctx := context.Background()
+
+	instance := func(name string) *dbaasv1alpha1.DBInstance {
+		return &dbaasv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: dbaasv1alpha1.DBInstanceSpec{
+				DBInstanceClass: "db.t3.small", AllocatedStorage: 20, NetworkRef: "default/vm-network",
+			},
+		}
+	}
+	restore := func(name, target string) *dbaasv1alpha1.DBRestore {
+		return &dbaasv1alpha1.DBRestore{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: dbaasv1alpha1.DBRestoreSpec{
+				SnapshotRef:        corev1.LocalObjectReference{Name: "some-snapshot"},
+				TargetInstanceName: target,
+				DBInstanceClass:    "db.t3.small",
+				NetworkRef:         "default/vm-network",
+				AllocatedStorage:   20,
+			},
+		}
+	}
+	longest := "n" + strings.Repeat("x", dbaasv1alpha1.MaxInstanceNameLength-1)
+
+	It("accepts a name of exactly the maximum length, and later updates to it", func() {
+		inst := instance(longest)
+		Expect(k8sClient.Create(ctx, inst)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, inst) })
+
+		// The rule is create-only: an update re-checks nothing about the name.
+		inst.Spec.AllocatedStorage = 30
+		Expect(k8sClient.Update(ctx, inst)).To(Succeed())
+	})
+
+	DescribeTable("rejects names its child objects can't use",
+		func(name string) {
+			err := k8sClient.Create(ctx, instance(name))
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+			Expect(err.Error()).To(ContainSubstring("pg-<name>-metrics"))
+		},
+		Entry("one character too long", longest+"x"),
+		Entry("a dot (a valid object name, but not a Service name or hostname)", "orders.prod"),
+	)
+
+	It("holds a restore's target name to the same rule", func() {
+		ok := restore("cel-name-target-ok", longest)
+		Expect(k8sClient.Create(ctx, ok)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ok) })
+
+		for i, target := range []string{longest + "x", "orders.prod", "Orders"} {
+			err := k8sClient.Create(ctx, restore(fmt.Sprintf("cel-name-target-bad-%d", i), target))
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "target %q: error %v", target, err)
+			Expect(err.Error()).To(ContainSubstring("spec.targetInstanceName"))
+		}
+	})
+
+	// Both would otherwise be accepted and fail late: an empty snapshot
+	// name at lookup, an empty network only once the target is created.
+	It("rejects a restore with an empty snapshot name or network", func() {
+		noSnapshot := restore("cel-restore-no-snapshot", "orders-restored")
+		noSnapshot.Spec.SnapshotRef.Name = ""
+		err := k8sClient.Create(ctx, noSnapshot)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("snapshotRef.name must not be empty"))
+
+		noNetwork := restore("cel-restore-no-network", "orders-restored")
+		noNetwork.Spec.NetworkRef = ""
+		err = k8sClient.Create(ctx, noNetwork)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("spec.networkRef"))
+	})
+})
+
+// restoredFrom's field rule (self == oldSelf) only runs when both objects
+// have the field, so its presence needs its own rule: adding or removing it
+// would change the instance's disk names.
+var _ = Describe("DBInstance restoredFrom presence rule", func() {
+	ctx := context.Background()
+
+	create := func(name string, from *dbaasv1alpha1.RestoredFromRef) *dbaasv1alpha1.DBInstance {
+		inst := &dbaasv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: dbaasv1alpha1.DBInstanceSpec{
+				DBInstanceClass: "db.t3.small", AllocatedStorage: 20, NetworkRef: "default/vm-network",
+				RestoredFrom: from,
+			},
+		}
+		Expect(k8sClient.Create(ctx, inst)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, inst) })
+		return inst
+	}
+	from := func() *dbaasv1alpha1.RestoredFromRef {
+		return &dbaasv1alpha1.RestoredFromRef{DBRestoreName: "orders-restore", DBRestoreUID: "restore-uid"}
+	}
+
+	It("rejects adding restoredFrom to an instance created without it", func() {
+		inst := create("cel-restoredfrom-add", nil)
+		inst.Spec.RestoredFrom = from()
+		err := k8sClient.Update(ctx, inst)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("restoredFrom cannot be added or removed"))
+	})
+
+	It("rejects removing restoredFrom from a restored instance", func() {
+		inst := create("cel-restoredfrom-remove", from())
+		inst.Spec.RestoredFrom = nil
+		err := k8sClient.Update(ctx, inst)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("restoredFrom cannot be added or removed"))
+	})
+
+	It("still allows other updates to a restored instance", func() {
+		inst := create("cel-restoredfrom-keep", from())
+		inst.Spec.AllocatedStorage = 30
+		Expect(k8sClient.Update(ctx, inst)).To(Succeed())
 	})
 })

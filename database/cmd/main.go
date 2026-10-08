@@ -35,6 +35,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -152,8 +153,41 @@ func main() {
 		DatabaseDefaults:        cfg.DatabaseDefaults,
 		InstanceClasses:         cfg.InstanceClasses,
 		Monitoring:              cfg.Observability.Monitoring,
+		Restore:                 cfg.Restore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dbinstance")
+		os.Exit(1)
+	}
+	// The backup dispatcher grants backup slots; it wakes a granted snapshot
+	// through this channel. Buffered so a pass never blocks on it.
+	backupWake := make(chan event.GenericEvent, 1024)
+	if err := (&controller.DBSnapshotReconciler{
+		Client:           mgr.GetClient(),
+		Harvester:        hvClient,
+		DatabaseDefaults: cfg.DatabaseDefaults,
+		Backup:           cfg.Backup,
+		SlotNamespace:    operatorNamespace,
+		Wake:             backupWake,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "dbsnapshot")
+		os.Exit(1)
+	}
+	if err := (&controller.BackupDispatcher{
+		Client:        mgr.GetClient(),
+		SlotNamespace: operatorNamespace,
+		Backup:        cfg.Backup,
+		Wake:          backupWake,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "backup-dispatcher")
+		os.Exit(1)
+	}
+	if err := (&controller.DBRestoreReconciler{
+		Client:           mgr.GetClient(),
+		Harvester:        hvClient,
+		DatabaseDefaults: cfg.DatabaseDefaults,
+		Restore:          cfg.Restore,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "dbrestore")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
