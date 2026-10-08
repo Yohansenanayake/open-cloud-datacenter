@@ -16,7 +16,7 @@ limitations under the License.
 
 package controller
 
-// Full-reconcile crash-loop parking and recovery (PR6): condition-driven via
+// Full-reconcile crash-loop parking and recovery: condition-driven via
 // CrashLoopHalted. The health step detects and halts at the threshold; the
 // power step refuses to start while halted; recovery is an out-of-band
 // operator start observed healthy.
@@ -63,7 +63,7 @@ func seedCrashLoopPark(t *testing.T, r *DBInstanceReconciler) {
 	setVMRunStrategy(t, r.Client, "pg-orders", "tenant-a", kubevirtv1.RunStrategyHalted)
 }
 
-// KI-007 regression, PR6 shape: a parked instance idles cold — 30s re-probes,
+// Crash-loop recovery: a parked instance idles cold — 30s re-probes,
 // no VM calls, no phase drift — instead of hot-looping or resurrecting.
 func TestCrashLoopParkDoesNotHotLoop(t *testing.T) {
 	stub := &stubHarvester{} // VMI gone (halted)

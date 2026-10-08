@@ -85,7 +85,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 		t.Fatalf("cond ObservedGeneration = %d, want %d", cond.ObservedGeneration, inst.Generation)
 	}
 
-	// PR7: the provider is asked to stamp a controller owner reference on the
+	// the provider is asked to stamp a controller owner reference on the
 	// VM it creates.
 	if stub.LastVMCreateParams == nil || stub.LastVMCreateParams.Owner == nil {
 		t.Fatal("VMCreateParams.Owner not set")
@@ -98,7 +98,7 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 		t.Fatalf("CloudInitSecretName = %q, want pg-orders-cloudinit", stub.LastVMCreateParams.CloudInitSecretName)
 	}
 
-	// PR8: the cloud-init Secret must exist, owner-ref'd, with rendered content
+	// the cloud-init Secret must exist, owner-ref'd, with rendered content
 	// built from the durable Material observed by ensureVM.
 	var ci corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "pg-orders-cloudinit"}, &ci); err != nil {
@@ -127,9 +127,8 @@ func TestEnsureVMCreatesWhenAbsent(t *testing.T) {
 	}
 }
 
-// VMPassword/StaticNetwork are immutable but had no AppliedSpec coverage at
-// all before PR9 — assert they're snapshotted, and that StaticNetwork is a
-// defensive copy (not aliasing the spec's pointer).
+// VMPassword and StaticNetwork are recorded in AppliedSpec. StaticNetwork
+// must be copied so later spec changes cannot alter the recorded settings.
 func TestEnsureVMSnapshotsVMPasswordAndStaticNetwork(t *testing.T) {
 	inst := newProvisionInst()
 	inst.Spec.VMPassword = "s3cr3t"
@@ -281,7 +280,7 @@ func TestEnsureVMDiskNamesDisjointAcrossSameNameRecreate(t *testing.T) {
 // DBRestore's UID instead of this instance's own UID — this is the whole
 // coordination fix that lets DBRestoreReconciler create the data-disk PVC
 // under a name this instance will later look for, before this instance
-// exists at all (DBInstanceSpec.RestoredFrom's doc comment, design §6).
+// exists at all (see DBInstanceSpec.RestoredFrom).
 func TestEnsureVMUsesRestoredFromUIDAsDiskSalt(t *testing.T) {
 	inst := newProvisionInst()
 	inst.UID = "11111111-1111-1111-1111-111111111111"

@@ -87,7 +87,7 @@ func readyAutomatedSnapshot(name string, owner *dbaasv1.DBInstance, age time.Dur
 	return snap
 }
 
-// --- §3.2 event table ---
+// Scheduling events
 
 func TestBackupScheduleNoSpecBackupIsNoop(t *testing.T) {
 	inst := testutil.NewProvisionInstance() // Spec.Backup left nil
@@ -249,7 +249,7 @@ func TestBackupScheduleCreatesDeterministicallyNamedSnapshotWhenDue(t *testing.T
 	}
 }
 
-// --- §3.3 retention ---
+// Snapshot retention
 
 func TestBackupSchedulePrunesAutomatedSnapshotsPastRetainCount(t *testing.T) {
 	inst := backupEnabledInstance(true)

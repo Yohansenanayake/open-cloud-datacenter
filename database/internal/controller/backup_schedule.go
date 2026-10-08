@@ -34,13 +34,8 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// Automated snapshot scheduling and retention (spec §3.2/§3.3). Deliberately
-// not an ensure.Step: that pipeline's Runner stops at the first non-Satisfied
-// step and only the stopping step's ctrl.Result is honored (internal/ensure/runner.go),
-// so a step here would either gate the rest of DBInstance provisioning on a
-// once-a-day timer or have no way to ever request a timely wake-up. Instead
-// this runs once per reconcile from reconcileInstance, after the ensure run,
-// and its own RequeueAfter is merged into the result rather than replacing it
+// Automated scheduling runs after the ensure pipeline so its timer does not
+// block provisioning. Its requeue delay is merged with the pipeline result.
 const (
 	defaultRetainCount        = 7
 	defaultPreferredWindowUTC = "02:00-03:00"
@@ -145,19 +140,10 @@ func (r *DBInstanceReconciler) attemptScheduledSnapshot(ctx context.Context, ins
 	return nil
 }
 
-// pruneAutomatedSnapshots deletes automated DBSnapshots past retainCount,
-// keeping the newest, with Ready and failed ones counted separately: up to
-// retainCount of each are kept. A failed one (failed, timed out, or
-// rejected) is never retained capacity, but the newest are kept for
-// diagnosis — and capping them means a source whose backups keep failing
-// doesn't accumulate one failed snapshot a day forever. Only this
-// instance's own (owned by its UID — a same-named predecessor's are never
-// touched), finished, not-yet-deleting snapshots are counted or pruned; an
-// in-progress or queued one is neither.
-//
-// No restore-hold check here: DBSnapshot deletion itself waits for any
-// restore reading the source's snapshots, so a pruned snapshot a restore
-// still needs is over-retained (spec §3.3) until that restore ends.
+// pruneAutomatedSnapshots keeps the newest retainCount successful snapshots
+// and, separately, retainCount failed snapshots for diagnosis. It considers
+// only finished, non-deleting snapshots owned by this instance UID.
+// Snapshot deletion waits for restore holds before deleting backend data.
 func (r *DBInstanceReconciler) pruneAutomatedSnapshots(ctx context.Context, inst *dbaasv1.DBInstance, retainCount int) error {
 	var list dbaasv1.DBSnapshotList
 	if err := r.List(ctx, &list, client.InNamespace(inst.Namespace),

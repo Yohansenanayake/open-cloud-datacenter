@@ -233,7 +233,7 @@ func ParseConditionReason(value string) (ConditionReason, bool) {
 
 // SetCondition adds or updates a status condition. meta.SetStatusCondition only
 // bumps LastTransitionTime when Status actually changes, which keeps the
-// DeepEqual status-write-skip honest (no spurious writes on unchanged status).
+// status equality checks stable and avoids writes when status is unchanged.
 func (s *DBInstanceStatus) SetCondition(c metav1.Condition) {
 	meta.SetStatusCondition(&s.Conditions, c)
 }

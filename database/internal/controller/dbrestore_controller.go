@@ -235,18 +235,11 @@ func (r *DBRestoreReconciler) settle(ctx context.Context, restore *dbaasv1.DBRes
 	return ctrl.Result{}, true, nil
 }
 
-// settleRestorePVC deletes the restore PVC of a restore that ended without
-// handing it to a target, and reports gone once nothing of this restore is
-// left using it.
-//
-// A target that claims this restore (spec.restoredFrom) mounts the PVC as
-// its data disk — even a failed or deleting one — and its own teardown
-// deletes it; a Succeeded restore's PVC is such a target's. Otherwise
-// nothing else ever will. Only a PVC carrying this restore's UID label is
-// touched (never a RestorePVCConflict one), and only after a live read
-// confirms no target claims it. Until the PVC is gone the hold stays: an
-// abandoned PVC may still be copying from the VolumeSnapshot the hold
-// protects.
+// settleRestorePVC deletes an abandoned restore PVC after a live read
+// confirms that no target claims it. It only touches PVCs labeled with this
+// restore UID. A target that claims the restore owns data-disk cleanup.
+// The hold remains until the PVC disappears because it may still be
+// copying data from the protected VolumeSnapshot.
 func (r *DBRestoreReconciler) settleRestorePVC(ctx context.Context, restore *dbaasv1.DBRestore) (bool, error) {
 	if restore.Status.Stage == dbaasv1.RestoreStageSucceeded {
 		return true, nil
@@ -486,7 +479,7 @@ func (r *DBRestoreReconciler) reconcileRestorePass(ctx context.Context, restore 
 	return r.observeTargetReadiness(ctx, restore, target)
 }
 
-// captureSnapshot resolves spec.snapshotRef, validates it (design §2.4), and
+// captureSnapshot resolves spec.snapshotRef, validates it, and
 // captures the inputs later passes need. Captured inputs are frozen on
 // purpose; the snapshot itself is still re-verified live (readableSnapshot)
 // for as long as the restore depends on it.
@@ -690,7 +683,7 @@ func isOurRestorePVC(pvc *corev1.PersistentVolumeClaim, restore *dbaasv1.DBResto
 }
 
 // createRestorePVC creates the restore PVC under the name the target's own
-// ensureVM will compute (ensure.RestoreDataVolumeName, design §6).
+// ensureVM will compute (ensure.RestoreDataVolumeName).
 //
 // No owner reference, deliberately: this PVC becomes the target's live data
 // volume and outlives the DBRestore, and Harvester's VM controller never
@@ -706,7 +699,7 @@ func (r *DBRestoreReconciler) createRestorePVC(ctx context.Context, restore *dba
 }
 
 // createTarget creates the target DBInstance with spec.restoredFrom set in
-// the same Create() call — the coordination fix of design §6. AlreadyExists
+// the same Create() call. AlreadyExists
 // is returned as an error: the next pass re-observes whoever holds the name
 // and decides from that, rather than assuming the winner was us.
 func (r *DBRestoreReconciler) createTarget(ctx context.Context, restore *dbaasv1.DBRestore) (*dbaasv1.DBInstance, error) {
@@ -763,7 +756,7 @@ func (r *DBRestoreReconciler) observeTargetReadiness(ctx context.Context, restor
 		if live == nil || !owned || !live.DeletionTimestamp.IsZero() || !targetRejected(live) {
 			return ctrl.Result{Requeue: true}, nil // re-derive next pass from fresh state
 		}
-		// Tear the target down (design §7); the DBRestore survives as the
+		// Tear the target down; the DBRestore survives as the
 		// diagnostic record.
 		if res, err := r.deleteConfirmedTarget(ctx, live); err != nil || res.Requeue {
 			return res, err
@@ -780,20 +773,12 @@ func (r *DBRestoreReconciler) observeTargetReadiness(ctx context.Context, restor
 	}
 }
 
-// reconcileDelete handles deletion of a DBRestore. Deleting an unfinished
-// restore cancels it: our target is deleted and, once it's confirmed gone
-// and the restore PVC settled, settled lets finishPass release the hold and
-// remove the finalizer — the same way deleting an in-progress Job cleans up
-// its Pods (design §7).
+// reconcileDelete cancels an unfinished restore and cleans up its target
+// and PVC before releasing holds and removing the finalizer.
 //
-// Critical safety invariant: a target that has become ready has graduated
-// into an ordinary, independent database, and deleting this diagnostic
-// record must never touch it. That is decided from live state as well as
-// the recorded Stage — a Succeeded write that never landed must not turn a
-// healthy database into a cancellation casualty.
-//
-// The delete is preconditioned on the object just observed, so a target
-// that changed in between (e.g. just became Ready) is re-judged next pass.
+// A ready target is preserved, even if Succeeded was never recorded. Live
+// state and deletion preconditions protect targets that become ready or
+// change identity between observation and deletion.
 func (r *DBRestoreReconciler) reconcileDelete(ctx context.Context, restore *dbaasv1.DBRestore) (ctrl.Result, bool, error) {
 	// Uncached: every outcome here is irreversible — deleting the target, or
 	// declaring teardown done and removing the finalizer — and a stale cache
@@ -838,7 +823,7 @@ func setRestoreProgress(restore *dbaasv1.DBRestore, stage string, reason dbaasv1
 }
 
 // failTearingDownTarget fails the restore after deleting the unfinished
-// target it created, as the timeout and rejection paths do (design §7): a
+// target it created, as the timeout and rejection paths do: a
 // target whose restore PVC is lost or not ours can never become a usable
 // restore, and nothing else would delete it, or the disks it holds. The
 // target is confirmed live first. One that is already Ready means the

@@ -23,9 +23,8 @@ import (
 	kvfake "kubevirt.io/client-go/kubevirt/fake"
 )
 
-// mgmtNetInterface is the legacy dynamic-client's dial-probe NIC name
-// (removed in PR9 along with DialVMListener) — kept here only so the tests
-// below can assert it never appears on a TypedClient-built VM.
+// mgmtNetInterface names the removed management NIC. Tests verify that
+// new VMs contain only the supported data-network interface.
 const mgmtNetInterface = "mgmt-net"
 
 func testVMCreateParams() VMCreateParams {
@@ -465,10 +464,8 @@ func TestResolveVMImageDisplayNameReturnsEmptyOnNotFound(t *testing.T) {
 	}
 }
 
-// CreatePostgresVM no longer generates credentials/cloud-init (PR8 — that
-// moved to internal/credentials + internal/resource; the reuse-on-reentry
-// invariant is now tested there). It only builds the VM against an
-// already-provisioned cloud-init Secret name.
+// CreatePostgresVM uses the supplied cloud-init Secret. Credential creation
+// and reuse are tested in the credentials and resource packages.
 func TestTypedCreatePostgresVMUsesSuppliedCloudInitSecret(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(testTypedVMImage())

@@ -61,21 +61,14 @@ type EffectiveSettings struct {
 	StorageType    string
 }
 
-// EffectiveSettingsFor resolves inst's effective settings. status.appliedSpec
-// wins where it has a value: it records what the instance was provisioned
-// with, already defaulted, so a later change to the operator's defaults
-// can't rewrite history. Only if it was never recorded does this fall back
-// to spec plus the current defaults — the same defaulting createVM applies.
+// EffectiveSettingsFor prefers recorded AppliedSpec values, falling back to
+// spec and current operator defaults for settings not yet recorded. This
+// preserves provisioned settings when operator defaults change.
+// An omitted engine version resolves from the recorded image revision, or
+// remains empty if that revision is unknown.
 //
-// appliedSpec keeps engineVersion as written, so an unset one resolves to the
-// default of the catalog entry for the image revision the instance runs
-// (status.currentImageRevision); "" when that can't be determined.
-//
-// TODO(defaulting-webhook): once a mutating webhook persists these defaults
-// into spec at creation, spec *is* the effective value and this reduces to
-// copying it (same for immutableDrift's post-defaulting comparison). A plain
-// CRD +kubebuilder:default can't do it — the defaults come from operator
-// config, dbName from metadata.name, engineVersion from the catalog.
+// TODO(defaulting-webhook): Persist dynamic defaults at creation to avoid
+// recomputing values from operator config, instance name, and image catalog.
 func EffectiveSettingsFor(inst *dbaasv1.DBInstance, defaults operatorconfig.DatabaseDefaults) EffectiveSettings {
 	defaults = withBuiltInDatabaseDefaults(defaults)
 	s := EffectiveSettings{

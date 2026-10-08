@@ -16,11 +16,9 @@ limitations under the License.
 
 package controller
 
-// Deletion cleanup for the two controller-private, cross-namespace Secrets
-// (PR8). They can't carry an owner reference (different namespace than the
-// DBInstance), so reconcileDelete must remove them itself: by the recorded
-// ref first, then a UID-label sweep as backstop for a ref lost to a status
-// reset or a Secret created before the ref was recorded.
+// Deletion explicitly removes controller-private Secrets in the operator
+// namespace, where cross-namespace owner references are unavailable. Tests
+// cover recorded references and UID-label cleanup when references are missing.
 
 import (
 	"context"
