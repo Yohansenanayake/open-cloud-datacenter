@@ -1,0 +1,35 @@
+{{- if .Values.rbac.tenantRoles.enable }}
+# Aggregates into the built-in edit and admin roles, so a user granted either
+# in a namespace can manage the Registries there. Granted through a namespaced
+# RoleBinding, it reaches that namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "registry.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+  name: {{ include "registry.resourceName" (dict "suffix" "registry-editor-role" "context" $) }}
+rules:
+- apiGroups:
+  - registry.opencloud.wso2.com
+  resources:
+  - registries
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - registry.opencloud.wso2.com
+  resources:
+  - registries/status
+  verbs:
+  - get
+{{- end }}

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["harbor"],
+  "properties": {
+    "harbor": {
+      "type": "object",
+      "required": ["url", "credentialsSecret"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https?://[^/\\s]+",
+          "description": "Base URL of Harbor, the same address every client uses"
+        },
+        "credentialsSecret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credentials": {
+          "type": "object",
+          "properties": {
+            "username": { "type": "string" },
+            "password": { "type": "string" }
+          },
+          "if": {
+            "properties": { "password": { "minLength": 1 } },
+            "required": ["password"]
+          },
+          "then": {
+            "properties": { "username": { "minLength": 1 } },
+            "required": ["username"]
+          },
+          "description": "The operator's Harbor account; when password is set, the chart creates credentialsSecret"
+        },
+        "caBundle": {
+          "type": "string",
+          "pattern": "^\\s*$|-----BEGIN CERTIFICATE-----",
+          "description": "PEM certificate of a private CA that issued Harbor's certificate"
+        },
+        "caSecret": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "networkAttachment": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "description": "Multus attachment as <namespace>/<name>, or empty"
+        },
+        "allowPlaintextURL": { "type": "boolean" }
+      }
+    }
+  }
+}

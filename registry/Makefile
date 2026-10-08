@@ -2,6 +2,9 @@
 # Layout follows the KeyVault operator (crds/keyvault) conventions.
 
 IMG ?= controller:latest
+# Release version baked into the binary and reported in its startup log. Keep
+# it equal to the image tag and to charts/chart/Chart.yaml's appVersion.
+VERSION ?= dev
 CONTAINER_TOOL ?= docker
 
 # Tooling
@@ -58,11 +61,17 @@ run: fmt vet ## Run the provisioner from your host.
 
 .PHONY: docker-build
 docker-build: ## Build the container image ($(IMG)).
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build --build-arg VERSION=$(VERSION) -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push the container image ($(IMG)).
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: build-installer
+build-installer: manifests generate kustomize ## Generate a consolidated YAML with the CRD and deployment into dist/install.yaml.
+	mkdir -p dist
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	"$(KUSTOMIZE)" build config/default > dist/install.yaml
 
 ##@ Deployment
 
@@ -132,3 +141,57 @@ mv "$(LOCALBIN)/$$(basename "$(1)")" "$(1)-$(3)" ;\
 } ;\
 ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"
 endef
+
+##@ Helm Deployment
+
+## Helm binary to use for deploying the chart
+HELM ?= helm
+## Namespace to deploy the Helm release
+HELM_NAMESPACE ?= registry-system
+## Name of the Helm release
+HELM_RELEASE ?= registry-operator
+## Path to the Helm chart directory
+HELM_CHART_DIR ?= charts/chart
+## Additional arguments to pass to helm commands
+HELM_EXTRA_ARGS ?=
+
+.PHONY: install-helm
+install-helm: ## Install the latest version of Helm.
+	@command -v $(HELM) >/dev/null 2>&1 || { \
+		echo "Installing Helm..." && \
+		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
+	}
+
+.PHONY: helm-deploy
+helm-deploy: install-helm ## Deploy manager via Helm. Specify an image with IMG and Harbor with HELM_EXTRA_ARGS="--set harbor.url=https://...".
+	@img='$(IMG)'; \
+	last_segment="$${img##*/}"; \
+	if [ "$${last_segment}" != "$${last_segment%:*}" ]; then \
+		repo="$${img%:*}"; tag="$${img##*:}"; \
+	else \
+		repo="$$img"; tag="latest"; \
+	fi; \
+	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--set manager.image.repository="$$repo" \
+		--set manager.image.tag="$$tag" \
+		--wait \
+		--timeout 5m \
+		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-uninstall
+helm-uninstall: ## Uninstall the Helm release from the K8s cluster.
+	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-status
+helm-status: ## Show Helm release status.
+	$(HELM) status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-history
+helm-history: ## Show Helm release history.
+	$(HELM) history $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-rollback
+helm-rollback: ## Rollback to previous Helm release.
+	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)

@@ -1,0 +1,24 @@
+{{- if .Values.rbac.helpers.enable }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "registry.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  name: {{ include "registry.resourceName" (dict "suffix" "registry-admin-role" "context" $) }}
+rules:
+- apiGroups:
+  - registry.opencloud.wso2.com
+  resources:
+  - registries
+  verbs:
+  - '*'
+- apiGroups:
+  - registry.opencloud.wso2.com
+  resources:
+  - registries/status
+  verbs:
+  - get
+{{- end }}
