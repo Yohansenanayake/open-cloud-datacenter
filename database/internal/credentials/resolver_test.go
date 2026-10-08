@@ -153,7 +153,7 @@ func TestResolveCreatesAllThreeSecretsWithCorrectShapes(t *testing.T) {
 	}
 }
 
-// The load-bearing invariant (ported from the pre-PR8 Harvester client test):
+// Repeated resolution must reuse the existing credential material:
 // re-resolving must reuse existing material, not regenerate it — otherwise a
 // booted VM's password/CA would diverge from what's persisted.
 func TestResolveReusesExistingMaterialOnReentry(t *testing.T) {

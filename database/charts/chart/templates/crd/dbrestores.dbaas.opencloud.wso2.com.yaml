@@ -38,10 +38,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: |-
-          DBRestore represents one restore operation: a snapshot plus target-instance
-          parameters in, a new DBInstance out. Namespaced. A one-time operation
-          request — see the package doc comment on DBRestoreSpec.
+        description: DBRestore is a namespaced request to restore a snapshot into
+          a new DBInstance.
         properties:
           apiVersion:
             description: |-
@@ -62,16 +60,13 @@ spec:
             type: object
           spec:
             description: |-
-              DBRestoreSpec requests restoring a DBSnapshot into a new DBInstance
-              (design §3/§6). A one-time operation request, not a durable resource —
-              closer to a Job than to a DBInstance — so the whole spec is immutable:
-              nothing in it means anything to change mid-flight.
+              DBRestoreSpec restores a ready DBSnapshot into a new DBInstance.
+              The spec is immutable; retry a failed operation with a new DBRestore.
             properties:
               allocatedStorage:
                 description: |-
-                  AllocatedStorage must be at least the snapshot's recorded data-volume
-                  size (§2.4) — smaller is rejected, larger is accepted and passed
-                  through to the restore PVC's request.
+                  AllocatedStorage is the target data-volume size in GiB. It must be
+                  at least the snapshot's recorded size; larger values expand the restore PVC.
                 minimum: 1
                 type: integer
               backup:
@@ -123,16 +118,15 @@ spec:
               mode:
                 default: Snapshot
                 description: |-
-                  Mode selects the recovery mechanism. Snapshot (default) uses only the
-                  snapshot's own captured local data and works after the source
-                  instance is deleted. AvailableWAL is reserved for a future stage.
+                  Mode selects the recovery mechanism. Only Snapshot is supported.
+                  It uses the snapshot data and works after the source instance is deleted.
                 enum:
                 - Snapshot
                 type: string
               networkRef:
                 description: |-
-                  NetworkRef is the target instance's network — user-specified, never
-                  inherited from the source (design §2.4).
+                  NetworkRef is the target instance's network, supplied by the caller.
+                  It is not inherited from the source.
                 minLength: 1
                 type: string
               snapshotRef:
@@ -191,12 +185,8 @@ spec:
                 type: object
               targetInstanceName:
                 description: |-
-                  TargetInstanceName is the name of the DBInstance this restore
-                  creates. Deliberately independent of this object's own name: a retry
-                  after a failed attempt creates a new DBRestore object and can still
-                  target the same instance name. Held to DBInstance's own name rule
-                  (MaxInstanceNameLength, DNS-label alphabet), so a restore can't be
-                  accepted only to fail when it creates its target.
+                  TargetInstanceName names the new DBInstance. It must be a DNS label
+                  of at most 52 characters and may differ from the DBRestore name.
                 maxLength: 52
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
@@ -226,10 +216,8 @@ spec:
                 type: string
               deadline:
                 description: |-
-                  Deadline is when this restore times out: its creation time plus the
-                  operator's restore.timeout. Shown for visibility only — the
-                  controller recomputes it every pass from metadata.creationTimestamp
-                  and never reads it back.
+                  Deadline is the creation time plus the operator's restore timeout.
+                  It is informational; the controller recomputes it on each pass.
                 format: date-time
                 type: string
               message:
@@ -261,10 +249,8 @@ spec:
                 type: object
               snapshotUID:
                 description: |-
-                  SnapshotUID is the UID of the DBSnapshot spec.snapshotRef resolved to,
-                  captured once at admission so a later rename or recreation of the
-                  same-named snapshot can never silently redirect an in-progress
-                  restore.
+                  SnapshotUID records the snapshot identity at admission, preventing
+                  a recreated snapshot with the same name from redirecting the restore.
                 type: string
               sourceInstanceName:
                 description: |-
@@ -273,28 +259,20 @@ spec:
                 type: string
               sourceInstanceUID:
                 description: |-
-                  SourceInstanceUID mirrors the snapshot's own status.source.instanceUID
-                  — never a live lookup of the source DBInstance, which is what lets
-                  this be captured (and the restore-hold Lease labeled with it) even
-                  after the source is deleted.
+                  SourceInstanceUID is copied from the snapshot's source metadata. It
+                  identifies the source for restore holds even after the source is deleted.
                 type: string
               stage:
                 description: |-
-                  Stage is the controller-observed restore progress (§5.1), recomputed
-                  from live cluster state every pass. Non-terminal values are output
-                  only — reconcile logic never branches on them. Succeeded/Failed mark
-                  the end of this one-time operation (like a Job's completion) and stop
-                  further convergence, but never by themselves justify a destructive
-                  action: deletion re-checks the target's live readiness too.
+                  Stage reports progress observed from live cluster state. Succeeded and
+                  Failed end reconciliation. Deletion also checks live target readiness
+                  to protect a database that became ready before its status was recorded.
                 type: string
               targetInstanceUID:
                 description: |-
-                  TargetInstanceUID is the UID of the DBInstance this restore created,
-                  recorded once and never cleared — not even after that instance is
-                  gone. It only ever restricts what the controller does: once set, a
-                  missing target means "lost", never "not created yet", so it is never
-                  recreated. Liveness and readiness are always re-observed from the
-                  cluster, never inferred from this field.
+                  TargetInstanceUID records the created database identity and is never
+                  cleared. If that instance disappears, the restore fails instead of
+                  recreating it. Readiness is checked from live state.
                 type: string
             type: object
         type: object

@@ -16,7 +16,7 @@ limitations under the License.
 
 package ensure
 
-// Steady-state liveness (PR6): report-only Degraded on a caught-up instance,
+// Steady-state liveness: report-only Degraded on a caught-up instance,
 // driven by ensureDatabaseHealth (which absorbed legacy phaseAvailable's
 // liveness). All cases must return Satisfied — a blip never gates the pass or
 // restarts the VM.
@@ -157,9 +157,8 @@ func TestHealthCaughtUpHealthyClearsDegraded(t *testing.T) {
 	}
 }
 
-// RF-3 regression, PR6 shape: a failed VMI fetch is not a health signal. The
-// step returns Transient (taxonomy §8.2 — backoff) but must not flip Degraded
-// from the zero-value Readiness and must not touch the VM.
+// A VMI fetch error is transient, not a health signal. It must leave
+// Degraded and VM power state unchanged.
 func TestHealthReadinessFetchErrorIsTransientAndLeavesConditionsUntouched(t *testing.T) {
 	stub := &stubHarvester{ReadinessErr: errors.New("apiserver timeout")}
 	r, inst := newCaughtUpFixture(stub)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# E2E test for backup concurrency control (Phase 10) against a real cluster.
+# E2E test for backup concurrency control against a real cluster.
 #
 # What it proves:
 #   1. Global cap: with backup.maxConcurrent=K, never more than K backups

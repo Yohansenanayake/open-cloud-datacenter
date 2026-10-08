@@ -27,13 +27,9 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
-// These two tests prove the mutual exclusion described in
-// yohan-docs/backups/harvester-vm-backup/: a snapshot in progress blocks
-// repave from starting, and repave in progress blocks a new snapshot from
-// being admitted — both through the one shared snapshot-hold lease, not two
-// independent mechanisms. Phase 4 (snapshot creation) doesn't exist yet, so
-// "a snapshot" here is simulated by acquiring/checking the same lease
-// directly, exactly as that future caller will.
+// These tests verify that snapshots and repave exclude each other through
+// the shared snapshot-hold Lease. Snapshot activity is simulated by directly
+// acquiring and checking the Lease.
 
 func TestEnsureRepaveWaitsForAnInProgressSnapshotHold(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})

@@ -104,8 +104,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// Snapshot-hold/restore-hold coordination (internal/backup) — plain Lease
-// objects, no custom coordination CRD (yohan-docs/backups/harvester-vm-backup/).
+// Snapshot and restore holds use coordination Leases (internal/backup).
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main entry point called by controller-runtime.
@@ -265,20 +264,12 @@ func (r *DBInstanceReconciler) teardownFailed(inst *dbaasv1.DBInstance, err erro
 	return err
 }
 
-// settleSnapshotHold makes sure no backup is reading the VM before teardown
-// deletes it. The snapshot hold is read live and judged by who holds it:
-//
-//   - a DBSnapshot whose backup is still running: wait for it to finish and
-//     release the hold itself (waiting=true). DBSnapshot admission re-checks
-//     this instance's deletionTimestamp live after taking the hold, so no new
-//     backup can start once this pass has seen the hold free.
-//   - a DBSnapshot that no longer exists, belongs to another source, or has
-//     already finished: the hold is stale, and nobody else will release it.
-//   - repave (this instance's own hold): repave never runs during deletion,
-//     so nothing else will release it either.
-//
-// Restore holds are not waited on: a restore reads the snapshot's
-// VolumeSnapshot, which outlives this instance.
+// settleSnapshotHold waits for an active backup before deleting its source
+// VM. It releases holds for completed, missing, or unrelated snapshots and
+// for repave, which does not run during deletion. Snapshot admission checks
+// deletionTimestamp under the hold to prevent new backups.
+// Restore holds do not block instance deletion because restores read
+// VolumeSnapshots, which outlive the instance.
 func (r *DBInstanceReconciler) settleSnapshotHold(ctx context.Context, inst *dbaasv1.DBInstance, prevReason dbaasv1.ConditionReason) (ctrl.Result, bool, error) {
 	holds := backup.Holds{Live: r.APIReader, Writer: r.Client}
 	leaseName := backup.SnapshotHoldName(inst.UID)

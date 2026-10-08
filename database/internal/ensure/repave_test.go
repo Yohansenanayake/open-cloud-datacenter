@@ -321,7 +321,7 @@ func TestEnsureRepaveTriggerNotAvailableIsTerminal(t *testing.T) {
 	}
 }
 
-// Regression guard for M1's Bug-2-class ordering: engineVersion must be
+// Repave ordering: engineVersion must be
 // re-validated before any destructive operation, so no StopVM call happens.
 func TestEnsureRepaveTriggerEngineVersionEOLBlockedIsTerminal(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
@@ -349,7 +349,7 @@ func TestEnsureRepaveTriggerEngineVersionEOLBlockedIsTerminal(t *testing.T) {
 	}
 }
 
-// M1's never-executed no-op case: already on the target revision.
+// Repave is a no-op when the target revision is already applied.
 func TestEnsureRepaveTriggerAlreadyOnTargetIsNoop(t *testing.T) {
 	r, inst, stub := newRepaveFixture(t, kubevirtv1.RunStrategyAlways, harvester.VMIReadiness{Running: true})
 	inst.Status.CurrentImageRevision = defaultBakedImageName

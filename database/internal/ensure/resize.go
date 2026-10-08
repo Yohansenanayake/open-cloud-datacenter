@@ -87,23 +87,10 @@ func observeShapeDrift(vm *kubevirtv1.VirtualMachine, inst *dbaasv1.DBInstance, 
 	return drift
 }
 
-// ensureResize converges the VM's declared shape (cpu/memory from the
-// instance class, data-disk size from spec.allocatedStorage) via a cold resize:
-// halt → apply → let ensurePowerState (ordered after this step) restart.
-//
-//	shape matches            → Satisfied
-//	drift, runStrategy!=Halted → StopVM            → Pending
-//	drift, VMI still running   → wait for teardown  → Pending (timer)
-//	drift, VM down             → ResizeVM/ResizeDataVolume → Pending (re-observe)
-//
-// Ordered BEFORE ensurePowerState so the two never fight: this step holds the VM
-// down only while drift exists; once the shape converges, the power step observes
-// "desired running, declared Halted" and restarts.
-//
-// This step runs before ensureDatabaseHealth, so health never gets a chance to
-// re-observe the VM while a resize holds VM down — each halting branch sets
-// DatabaseReady=False itself so Ready doesn't stay stale-True for the whole
-// resize window (same reasoning as the crash-loop halt in ensure_health.go).
+// Run applies compute and data-volume changes while the VM is stopped.
+// It waits for VMI teardown, applies the resize, then lets the power step
+// restart the VM. Halting branches set DatabaseReady=False because the
+// health step does not run while resize is pending.
 func (r *resizeStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	class, ok := r.instanceClasses()[inst.Spec.DBInstanceClass]
 	if !ok {

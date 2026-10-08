@@ -16,12 +16,8 @@ limitations under the License.
 
 package controller
 
-// Full-reconcile stop/start lifecycle through the bounded runner (PR5). The legacy
-// reconcileStop/reconcileStart/phaseStopped pre-dispatcher paths are gone: the
-// power step converges spec.running from observed runStrategy + VMI state across
-// multiple reconciles. The stubHarvester does not mutate the fake cluster, so
-// tests simulate each provider call's side effect (runStrategy flip, VMI
-// teardown) between passes — exactly what Harvester/KubeVirt would do.
+// These tests exercise stop/start reconciliation from runStrategy and VMI
+// state. Provider effects are applied to the fake cluster between passes.
 
 import (
 	"context"
@@ -136,7 +132,7 @@ func TestStopConvergesToStopped(t *testing.T) {
 	}
 }
 
-// Port of TestStoppedInstanceIsNotResurrected (RF-1): idle reconciles of a
+// Idle reconciles of a
 // stopped instance must not restart the VM, re-stop it, or flip the phase.
 func TestStoppedInstanceIsNotResurrected(t *testing.T) {
 	stub := &stubHarvester{Readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"}}

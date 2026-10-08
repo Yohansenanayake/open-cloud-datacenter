@@ -36,18 +36,11 @@ func newPreflightStep(deps Dependencies) Step { return &preflightStep{Dependenci
 
 func (*preflightStep) Name() string { return "preflight" }
 
-// ensurePreflight validates the spec references the runner cannot create on the
-// user's behalf: the instance class must exist in InstanceClasses,
-// spec.networkRef must be set, and — for an instance that has never been
-// provisioned (AppliedSpec == nil) — the OS image resolved from the
-// baked-image catalog (internal/catalog, keyed by databaseDefaults.osVersion —
-// there is no per-instance spec field) must exist and be ready. An unresolved
-// catalog entry is Terminal (see the comment at that check for why); once
-// resolved, an image still importing in Harvester itself is Pending, since
-// that state can change without an operator restart.
+// Run validates the instance class, network reference, and immutable settings.
+// Before provisioning, it also requires a validated catalog entry and a ready
+// Harvester image. NAD existence is not currently checked.
 
-// NAD existence is not yet verified (no NAD type in the manager scheme); RBAC for
-// get/list is already in place, so the check can be added once the scheme is.
+// NAD existence checks require registering its type with the manager scheme.
 func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	if _, ok := r.instanceClasses()[inst.Spec.DBInstanceClass]; !ok {
 		msg := fmt.Sprintf("unknown dbInstanceClass %q", inst.Spec.DBInstanceClass)
@@ -55,7 +48,7 @@ func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resul
 		return Terminal(dbaasv1.ReasonInvalidClass, msg)
 	}
 
-	// Need to really check whether the NAD exists,
+	// Validate that a network reference was supplied.
 	if inst.Spec.NetworkRef == "" {
 		msg := "spec.networkRef is required (namespace/nad of an existing Multus NetworkAttachmentDefinition)"
 		inst.SetCurrentCondition(dbaasv1.ConditionPreflightReady, metav1.ConditionFalse, dbaasv1.ReasonNetworkRefMissing, msg)
@@ -71,19 +64,10 @@ func (r *preflightStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Resul
 		return Terminal(dbaasv1.ReasonImmutableFieldChanged, msg)
 	}
 
-	// Catalog entries are compiled into the binary, so ValidationState can
-	// only ever change via a rebuild+redeploy — and that redeploy's initial
-	// cache sync already re-reconciles every instance regardless of its
-	// prior condition. A retry timer here would just re-check the same
-	// unchanged answer until the next restart, so an unresolved stream
-	// (unknown, or simply not yet validated) is Terminal, not Pending.
-	//
-	// Applies only pre-provisioning (AppliedSpec == nil). Once a VM exists,
-	// engineVersion/catalog compatibility is ensureRepave's concern alone —
-	// it reports drift via ImageDrift (OSUpdateAvailable/EngineVersionEOL)
-	// and blocks only the repave trigger (RepaveBlockedEOL), never
-	// PreflightReady/Accepted/Phase. A catalog change must never
-	// retroactively fail an instance that was already running fine.
+	// Catalog entries change only on redeployment, which requeues instances.
+	// An unresolved entry is therefore terminal. Validate it only before
+	// provisioning; repave handles compatibility for existing instances without
+	// invalidating a running database.
 	if inst.Status.AppliedSpec == nil {
 		entry, stream, ok := resolveBakedImage(defaults)
 		if !ok {

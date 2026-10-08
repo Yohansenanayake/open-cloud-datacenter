@@ -268,7 +268,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 		t.Fatalf("Endpoint = %+v, want address 192.168.40.50", got.Status.Endpoint)
 	}
 
-	// The builder-managed monitoring trio exists, controller-owned (PR7).
+	// The builder-managed monitoring trio exists, controller-owned.
 	for _, check := range []struct {
 		name string
 		obj  client.Object
@@ -286,7 +286,7 @@ func TestReconcileInstanceFullWalk(t *testing.T) {
 		}
 	}
 
-	// PR8: the full credential/TLS secret inventory exists — slim tenant
+	// the full credential/TLS secret inventory exists — slim tenant
 	// credentials + connection Secret in the tenant namespace, internal +
 	// TLS Secrets in the operator namespace — and status.caCertPem is gone
 	// (the field no longer exists on DBInstanceStatus at all).

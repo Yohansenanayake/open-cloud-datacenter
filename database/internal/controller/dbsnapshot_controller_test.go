@@ -124,7 +124,7 @@ func TestDBSnapshotRejectsWhenSourceNotFound(t *testing.T) {
 
 func TestDBSnapshotRejectsWhenSourceHasNoBackupCapability(t *testing.T) {
 	source := availableSourceInstance()
-	source.Spec.Backup = nil // §2.1: no backup field, no backup capability at all
+	source.Spec.Backup = nil // no backup field, no backup capability at all
 	snap := testSnapshot()
 	snap.Finalizers = []string{dbaasv1.DBSnapshotFinalizerName}
 	stub := &testutil.StubHarvester{}

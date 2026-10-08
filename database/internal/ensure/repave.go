@@ -33,10 +33,8 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/resource"
 )
 
-// repaveSnapshotHoldHolder identifies repave as a holder of the snapshot-hold
-// lease (backup.SnapshotHoldName) — the same lease a snapshot creation
-// acquires, so the two exclude each other through one shared lock rather
-// than two independent mechanisms (yohan-docs/backups/harvester-vm-backup/).
+// repaveSnapshotHoldHolder identifies repave in the shared snapshot-hold
+// Lease, preventing concurrent snapshot creation and OS disk replacement.
 const repaveSnapshotHoldHolder = "repave"
 
 type repaveStep struct{ Dependencies }
@@ -45,23 +43,13 @@ func newRepaveStep(deps Dependencies) Step { return &repaveStep{Dependencies: de
 
 func (*repaveStep) Name() string { return "repave" }
 
-// ensureRepave reports baked-image drift (ConditionImageDrift, report-only,
-// every pass) and applies a repave when dbaasv1.AnnotationRepaveTrigger's
-// value differs from Status.LastAppliedRepaveTrigger: cold-halt the VM, swap
-// the OS disk to the catalog's current revision, regenerate cloud-init, and
-// let ensurePowerState (ordered after this step) restart it — same
-// halt/apply/restart shape as ensureResize, and ordered directly before it so
-// the two never fight over the VM's power state. The annotation itself is
-// never modified by the controller (Flux ReconcileRequestAnnotation style);
-// each accept/reject/apply outcome instead records the value it processed
-// into Status.LastAppliedRepaveTrigger through the normal deferred status
-// patch, so a new repave only dispatches once the annotation is set to a
-// fresh value.
+// Run reports baked-image drift and processes new repave-trigger values.
+// It halts the VM, replaces its OS disk, and regenerates cloud-init before
+// the power step restarts it. Each handled trigger is recorded in status;
+// the annotation is not modified.
 //
-// If the catalog can't resolve a stream for databaseDefaults.osVersion (unset,
-// unknown, or not yet Validated — see resolveBakedImage), this step no-ops
-// entirely: no drift is reported and the trigger annotation is left
-// unexamined for the next pass to reconsider once the catalog is validated.
+// An unresolved image stream reports unknown drift and leaves the trigger
+// unprocessed until the catalog can resolve it.
 func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// crash-safety recovery. Runs first, unconditionally,
 	// regardless of catalog state or image observability: if a prior pass
@@ -78,20 +66,9 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 		inst.Status.Resources.PendingDeleteOSDiskPVCName = ""
 	}
 
-	// Self-heal CurrentImageRevision from the VM's actual OS-disk PVC: a
-	// status write here can be lost to a conflicted patch with nothing else
-	// to ever retry it (every other writer is gated behind the one-shot
-	// repave-trigger annotation).
-	//
-	// imageID's name half is the real Harvester object name, not
-	// necessarily internal/catalog's ImageName string — on a real cluster,
-	// imported images typically get an auto-generated object name and only
-	// carry the catalog string as DisplayName, which is why
-	// ResolveVMImageDisplayName is needed here rather than comparing
-	// imageID's name half against the catalog directly (verified against a
-	// real deployment: this exact gap is why a lost status write never
-	// self-healed and left the instance stuck on RepaveInProgress/Modifying
-	// indefinitely, despite the swap and the database both being healthy).
+	// Recover CurrentImageRevision from the live OS disk if a status write was
+	// lost. Harvester image object names may be generated, so resolve the
+	// display name before matching the catalog.
 	if inst.Status.AppliedSpec != nil {
 		imageID, err := r.Harvester.GetVMOSDiskImageID(ctx, inst.Namespace, vmNameFor(inst))
 		if err != nil {
@@ -113,11 +90,8 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	defaults := r.databaseDefaults()
 	entry, stream, ok := resolveBakedImage(defaults)
 	if !ok {
-		// Nothing to compare against — the repave feature no-ops exactly as
-		// if the catalog were empty. Report Unknown rather than clearing the
-		// condition: any stale True from before the stream became
-		// unresolvable must stop looking actionable, but "I could not check"
-		// is a misconfiguration and must not masquerade as False/up-to-date.
+		// An unresolved catalog cannot establish whether the image is current.
+		// Report Unknown to avoid retaining a stale drift result.
 		inst.SetCurrentCondition(dbaasv1.ConditionImageDrift, metav1.ConditionUnknown,
 			dbaasv1.ReasonImageCatalogUnresolved,
 			fmt.Sprintf("no validated baked-image stream for osVersion %q — image drift cannot be evaluated",
@@ -190,7 +164,7 @@ func (r *repaveStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	}
 	// Re-check engineVersion compatibility independently of the drift
 	// condition's cached Reason above — defense-in-depth, validate again
-	// immediately before any destructive operation (§7 ordering safety).
+	// immediately before any destructive operation.
 	engineVersion, ok := effectiveEngineVersion(inst.Spec.EngineVersion, entry)
 	if !ok {
 		msg := fmt.Sprintf("engineVersion %q is not available in revision %q; migrate data before repaving",

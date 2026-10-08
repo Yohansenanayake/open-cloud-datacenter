@@ -853,9 +853,8 @@ func (c *TypedClient) DeletePVCWithUID(ctx context.Context, ns, name string, uid
 	}))
 }
 
-// CreateVMBackup requests a durable Harvester backup of sourceVMName. Always
-// spec.type: Backup — Snapshot is local-only and must never be used for this
-// design (yohan-docs/backups/harvester-vm-backup/).
+// CreateVMBackup requests a durable Harvester backup of sourceVMName.
+// It uses type Backup; type Snapshot provides only local snapshots.
 func (c *TypedClient) CreateVMBackup(ctx context.Context, ns, name, sourceVMName string, owner *metav1.OwnerReference) error {
 
 	_, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Get(ctx, name, metav1.GetOptions{})

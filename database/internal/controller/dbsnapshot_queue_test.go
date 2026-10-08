@@ -16,7 +16,7 @@ limitations under the License.
 
 package controller
 
-// The DBSnapshot side of backup concurrency control (Phase 10): a snapshot
+// The DBSnapshot side of backup concurrency control: a snapshot
 // starts only while it holds a slot, and every way it stops needing one
 // gives it back.
 
