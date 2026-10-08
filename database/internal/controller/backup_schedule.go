@@ -73,7 +73,7 @@ func (r *DBInstanceReconciler) evaluateBackupSchedule(ctx context.Context, inst 
 	next := inst.Status.Backup.NextScheduledSnapshotTime
 
 	//recompute from scratch, always landing strictly in the future.
-	if next == nil || !scheduledInstant(inst.UID, windowStart, windowDur, next.Time).Equal(next.Time) {
+	if next == nil || !isScheduledInstant(inst.UID, windowStart, windowDur, next.Time) {
 		fresh := nextOccurrence(inst.UID, windowStart, windowDur, now)
 		inst.Status.Backup.NextScheduledSnapshotTime = &metav1.Time{Time: fresh}
 		return r.pruneAndReturn(ctx, inst, automated, time.Until(fresh))
@@ -215,10 +215,12 @@ func (r *DBInstanceReconciler) pruneOldest(ctx context.Context, inst *dbaasv1.DB
 }
 
 // parsePreferredWindow parses "HH:MM-HH:MM" into the window's start-of-day
-// offset and duration. Falls back to the documented default on anything
-// malformed or empty (e.g. a unit test building a DBInstance by hand, where
-// the +kubebuilder:default never ran) rather than erroring out of a
-// report-only step.
+// offset and duration. An end earlier than the start is a window that
+// crosses midnight ("23:00-01:00" is two hours, ending the next UTC day);
+// only an empty window (start == end) is invalid. Falls back to the
+// documented default on anything malformed or empty (e.g. a unit test
+// building a DBInstance by hand, where the +kubebuilder:default never ran)
+// rather than erroring out of a report-only step.
 func parsePreferredWindow(window string) (start, duration time.Duration) {
 	parse := func(w string) (time.Duration, time.Duration, bool) {
 		lo, hi, ok := strings.Cut(w, "-")
@@ -235,8 +237,11 @@ func parsePreferredWindow(window string) (start, duration time.Duration) {
 		}
 		s := loT.Sub(loT.Truncate(24 * time.Hour))
 		e := hiT.Sub(hiT.Truncate(24 * time.Hour))
-		if e <= s {
+		switch {
+		case e == s:
 			return 0, 0, false
+		case e < s:
+			e += 24 * time.Hour // crosses midnight
 		}
 		return s, e - s, true
 	}
@@ -265,7 +270,9 @@ func stableOffsetWithinWindow(uid types.UID, windowDur time.Duration) time.Durat
 // scheduledInstant is the exact timestamp this instance's stable slot falls
 // on for the UTC calendar date of "on" (only on's date is used, its
 // time-of-day is ignored) — e.g. window 02:00-03:00 plus a 12-minute offset
-// gives that date's 02:12 UTC.
+// gives that date's 02:12 UTC. For a window that crosses midnight, the slot
+// of date D can fall early on D+1 (23:00-01:00 plus 90 minutes is D+1
+// 00:30).
 //
 // A pure function of (uid, window, date): calling it again for the same date
 // always gives the same answer. That's what lets evaluateBackupSchedule
@@ -278,12 +285,23 @@ func scheduledInstant(uid types.UID, windowStart, windowDur time.Duration, on ti
 }
 
 // nextOccurrence returns the next instant, strictly after "after", that this
-// instance's stable slot occurs: today's slot if it hasn't happened yet,
-// otherwise tomorrow's.
+// instance's stable slot occurs. It starts from yesterday's slot: with a
+// window that crosses midnight, yesterday's can still be ahead (at 00:10,
+// the 23:00-01:00 slot landing at 00:30 belongs to yesterday). A slot is
+// under 48h past its date's midnight, so this ends within three dates.
 func nextOccurrence(uid types.UID, windowStart, windowDur time.Duration, after time.Time) time.Time {
-	candidate := scheduledInstant(uid, windowStart, windowDur, after)
-	if !candidate.After(after) {
-		candidate = scheduledInstant(uid, windowStart, windowDur, after.AddDate(0, 0, 1))
+	for day := -1; ; day++ {
+		if candidate := scheduledInstant(uid, windowStart, windowDur, after.AddDate(0, 0, day)); candidate.After(after) {
+			return candidate
+		}
 	}
-	return candidate
+}
+
+// isScheduledInstant reports whether t is one of this instance's slots for
+// the current window — the check that detects a changed window. A slot
+// falls on its own date or, for a window crossing midnight, early the next
+// day, so both t's date and the one before are tried.
+func isScheduledInstant(uid types.UID, windowStart, windowDur time.Duration, t time.Time) bool {
+	return scheduledInstant(uid, windowStart, windowDur, t).Equal(t) ||
+		scheduledInstant(uid, windowStart, windowDur, t.AddDate(0, 0, -1)).Equal(t)
 }

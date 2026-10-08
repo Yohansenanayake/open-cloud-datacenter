@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -415,4 +416,75 @@ func TestBackupSchedulePrunesFailedAutomatedSnapshotsSeparately(t *testing.T) {
 	assertSnapshotExists(t, r, ready2.Name, true)
 	assertSnapshotExists(t, r, inProgress.Name, true)
 	assertSnapshotExists(t, r, theirsFailed.Name, true)
+}
+
+// ---- windows that cross midnight (e.g. 23:00-01:00) ----
+
+func TestParsePreferredWindow(t *testing.T) {
+	for window, want := range map[string][2]time.Duration{
+		"02:00-03:00": {2 * time.Hour, time.Hour},
+		"23:00-01:00": {23 * time.Hour, 2 * time.Hour}, // ends the next UTC day
+		"23:30-00:00": {23*time.Hour + 30*time.Minute, 30 * time.Minute},
+		"10:00-10:00": {2 * time.Hour, time.Hour}, // empty: the default
+		"garbage":     {2 * time.Hour, time.Hour},
+	} {
+		start, dur := parsePreferredWindow(window)
+		if start != want[0] || dur != want[1] {
+			t.Errorf("parsePreferredWindow(%q) = (%v, %v), want (%v, %v)", window, start, dur, want[0], want[1])
+		}
+	}
+}
+
+// lateSlotUID finds a UID whose stable offset in a 2h window is at least an
+// hour, so its slot in a 23:00-01:00 window falls after midnight.
+func lateSlotUID(t *testing.T) types.UID {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		uid := types.UID(fmt.Sprintf("late-slot-%d", i))
+		if stableOffsetWithinWindow(uid, 2*time.Hour) >= time.Hour {
+			return uid
+		}
+	}
+	t.Fatal("no UID with an after-midnight slot found")
+	return ""
+}
+
+// At 00:10, a slot at 00:30 that belongs to yesterday's 23:00-01:00 window
+// is the next run — not tomorrow night's.
+func TestNextOccurrenceInAWindowCrossingMidnight(t *testing.T) {
+	uid := lateSlotUID(t)
+	start, dur := parsePreferredWindow("23:00-01:00")
+	day := time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)
+	slot := scheduledInstant(uid, start, dur, day) // falls on Oct 9, after midnight
+	if slot.Day() != 9 {
+		t.Fatalf("test setup: slot %v should fall on Oct 9", slot)
+	}
+
+	justAfterMidnight := time.Date(2026, 10, 9, 0, 0, 30, 0, time.UTC)
+	if got := nextOccurrence(uid, start, dur, justAfterMidnight); !got.Equal(slot) {
+		t.Fatalf("nextOccurrence(%v) = %v, want the still-ahead slot %v", justAfterMidnight, got, slot)
+	}
+	if got := nextOccurrence(uid, start, dur, slot); !got.Equal(slot.AddDate(0, 0, 1)) {
+		t.Fatalf("nextOccurrence(slot) = %v, want the next day's %v", got, slot.AddDate(0, 0, 1))
+	}
+}
+
+// A due after-midnight slot is recognized as this window's own, so it
+// fires — not mistaken for a changed window and pushed into the future.
+func TestBackupScheduleFiresADueSlotInAWindowCrossingMidnight(t *testing.T) {
+	inst := backupEnabledInstance(true)
+	inst.UID = lateSlotUID(t)
+	inst.Spec.Backup.Automated.PreferredWindowUTC = "23:00-01:00"
+	start, dur := parsePreferredWindow("23:00-01:00")
+	due := metav1.NewTime(scheduledInstant(inst.UID, start, dur, time.Now().UTC().AddDate(0, 0, -2)))
+	inst.Status.Backup = &dbaasv1.BackupStatus{NextScheduledSnapshotTime: &due}
+	r := newScheduleReconciler(t, inst)
+
+	if _, err := r.evaluateBackupSchedule(context.Background(), inst); err != nil {
+		t.Fatalf("evaluateBackupSchedule: %v", err)
+	}
+
+	if got := listAutomatedSnapshots(t, r, inst); len(got) != 1 {
+		t.Fatalf("automated snapshots = %d, want the due slot %v to fire", len(got), due.Time)
+	}
 }

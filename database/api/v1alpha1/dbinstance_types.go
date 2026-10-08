@@ -283,9 +283,12 @@ type AutomatedBackupSpec struct {
 	RetainCount int `json:"retainCount,omitempty"`
 
 	// PreferredWindowUTC is the UTC window, e.g. "02:00-03:00", the daily
-	// snapshot is scheduled inside. The controller derives one stable
-	// minute inside the window per instance (hashed from the instance
-	// UID) rather than starting every instance at the window's edge.
+	// snapshot is scheduled inside. An end earlier than the start crosses
+	// midnight ("23:00-01:00" is two hours ending the next UTC day); equal
+	// start and end is not a window, and the default is used instead. The
+	// controller derives one stable minute inside the window per instance
+	// (hashed from the instance UID) rather than starting every instance at
+	// the window's edge.
 	// +optional
 	// +kubebuilder:default="02:00-03:00"
 	// +kubebuilder:validation:Pattern=`^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`
