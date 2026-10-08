@@ -1,0 +1,55 @@
+# Smallest Harbor that can create projects, set quotas and mint robots, for the
+# chart-test workflow (.github/workflows/registry-test-chart.yaml). Plain HTTP
+# inside the kind cluster, no persistence, no scanner. Never use outside CI.
+#
+# Chart goharbor/harbor 1.19.2 -> Harbor 2.15.2
+expose:
+  type: clusterIP
+  tls:
+    enabled: false
+  clusterIP:
+    name: harbor
+
+externalURL: http://harbor.harbor.svc.cluster.local
+
+persistence:
+  enabled: false
+
+trivy:
+  enabled: false
+
+metrics:
+  enabled: false
+
+internalTLS:
+  enabled: false
+
+nginx:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+portal:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+core:
+  resources:
+    requests: {cpu: 50m, memory: 192Mi}
+jobservice:
+  resources:
+    requests: {cpu: 10m, memory: 64Mi}
+registry:
+  registry:
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+  controller:
+    resources:
+      requests: {cpu: 10m, memory: 64Mi}
+database:
+  type: internal
+  internal:
+    resources:
+      requests: {cpu: 50m, memory: 192Mi}
+redis:
+  type: internal
+  internal:
+    resources:
+      requests: {cpu: 10m, memory: 48Mi}
