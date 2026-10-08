@@ -41,11 +41,13 @@ Once `Ready`, two Secrets exist in the same namespace, both
 | Status field | Grants | Use it for |
 |:---|:---|:---|
 | `.status.pullSecretName` | pull only | `imagePullSecrets` on the clusters that run these images |
-| `.status.pushSecretName` | pull, push, tag | a build pipeline |
+| `.status.pushSecretName` | pull, push, tag, delete | a build pipeline |
 
 They are separate Harbor accounts. A pull credential is copied onto every cluster
 that runs the images and ends up in many hands, so it must not be able to
-overwrite what it reads.
+overwrite what it reads. The push credential can also delete images, so a
+pipeline can clean up after itself; treat it as able to destroy everything in
+the project.
 
 Copying the pull Secret to another cluster means stripping the fields that tie it
 to this one — `ownerReferences`, `uid`, `resourceVersion`, `creationTimestamp`

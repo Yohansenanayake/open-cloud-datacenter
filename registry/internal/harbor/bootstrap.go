@@ -174,9 +174,9 @@ const (
 	// to start a container, and what a Secret copied onto a cluster should carry.
 	AccessPull RobotAccess = iota
 
-	// AccessPush can additionally publish images and tags. Deletion is not
-	// granted: destroying images is the Registry owner's decision, taken by
-	// deleting the Registry, not something a leaked build credential should do.
+	// AccessPush can additionally publish, tag and delete images, so a build
+	// pipeline can also clean up after itself. A leaked push credential can
+	// therefore destroy images; revoke it by deleting its Secret.
 	AccessPush
 )
 
@@ -193,6 +193,11 @@ func (a RobotAccess) harborAccess() []map[string]string {
 		map[string]string{"resource": "repository", "action": "push"},
 		map[string]string{"resource": "tag", "action": "create"},
 		map[string]string{"resource": "scan", "action": "create"},
+		// Each delete path checks its own resource: the registry API (docker,
+		// crane) the repository, Harbor's API the artifact, untagging the tag.
+		map[string]string{"resource": "repository", "action": "delete"},
+		map[string]string{"resource": "artifact", "action": "delete"},
+		map[string]string{"resource": "tag", "action": "delete"},
 	)
 }
 
