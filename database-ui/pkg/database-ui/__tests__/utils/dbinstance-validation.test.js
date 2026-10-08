@@ -45,10 +45,8 @@ describe('validators', () => {
     expect(key(v.validateMasterUsername('pg_admin'))).toBe('dbaas.instance.validation.reservedUsername');
   });
 
-  it('port, IPv4, backup window and retain count', () => {
+  it('port, backup window and retain count', () => {
     expect(key(v.validatePort(70000))).toBe('dbaas.instance.validation.port');
-    expect(v.validateIPv4('10.0.0.10')).toBeUndefined();
-    expect(key(v.validateIPv4('300.1.1.1'))).toBe('dbaas.instance.validation.ipv4');
     expect(v.validateBackupWindow('02:00-03:00')).toBeUndefined();
     expect(key(v.validateBackupWindow('24:00-01:00'))).toBe('dbaas.instance.validation.backupWindow');
     expect(key(v.validateRetainCount(0))).toBe('dbaas.instance.validation.retainCount');

@@ -13,4 +13,4 @@ Database as a Service for Harvester. Self-service managed databases on dedicated
 ## Requirements
 
 - Rancher 2.15 or later.
-- A Harvester cluster with the DBaaS operator and its CRDs installed. Clusters without the operator do not appear in the list.
+- A Harvester cluster with the DBaaS operator 0.1.0 or later (API `dbaas.opencloud.wso2.com/v1alpha1`) installed. Clusters without the operator do not appear in the list.

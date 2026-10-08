@@ -23,17 +23,14 @@ import { NETWORK_ATTACHMENT, STORAGE_CLASS } from '@shell/config/types';
 import { DBAAS } from '../types';
 import { BACKUP_DEFAULTS, ENGINE_VERSIONS, INSTANCE_CLASSES, OPERATOR_DEFAULTS } from '../config/catalog';
 import {
-  defaultDBName, validateBackupWindow, validateDBName, validateInstanceName, validateIPv4,
+  defaultDBName, validateBackupWindow, validateDBName, validateInstanceName,
   validateMasterUsername, validatePort, validateRequired, validateRetainCount, validateStorage
 } from '../utils/dbinstance-validation';
-
-const NETWORK_TYPE_LABEL = 'network.harvesterhci.io/type';
-const OVERLAY_NETWORK = 'OverlayNetwork';
-const STORAGE_NETWORK_ANNOTATION = 'storage-network.settings.harvesterhci.io';
+import { databaseNetworkOptions } from '../utils/networks';
 
 // Optional spec fields the operator defaults when absent. Empty values are
 // removed before saving so the operator default applies.
-const OPTIONAL_SPEC_FIELDS = ['engineVersion', 'dbName', 'masterUsername', 'port', 'storageType', 'dnsServerIP'];
+const OPTIONAL_SPEC_FIELDS = ['engineVersion', 'dbName', 'masterUsername', 'port', 'storageType'];
 
 // Create/edit/view form for a DBInstance, laid out like Harvester's VM form:
 // name and namespace on top, settings in side tabs. Inert API fields
@@ -78,7 +75,7 @@ export default {
     ]);
 
     this.canListNetworks = canList(NETWORK_ATTACHMENT);
-    this.networks = networks.filter((n) => !n.metadata?.annotations?.[STORAGE_NETWORK_ANNOTATION]);
+    this.networks = networks;
     this.storageClasses = storageClasses;
   },
 
@@ -103,7 +100,6 @@ export default {
         { path: 'spec.dbName', rules: ['dbName'] },
         { path: 'spec.masterUsername', rules: ['masterUsername'] },
         { path: 'spec.port', rules: ['port'] },
-        { path: 'spec.dnsServerIP', rules: ['ipv4'] },
         { path: 'spec.backup.automated.preferredWindowUTC', rules: ['backupWindow'] },
         { path: 'spec.backup.automated.retainCount', rules: ['retainCount'] },
       ],
@@ -159,31 +155,15 @@ export default {
     },
 
     networkOptions() {
-      const options = this.networks
-        .map((n) => {
-          const type = n.metadata?.labels?.[NETWORK_TYPE_LABEL];
-          const typeLabel = type === OVERLAY_NETWORK ? this.t('dbaas.instance.form.networkTypeOverlay') : this.t('dbaas.instance.form.networkTypeVlan');
-
-          return { label: `${ n.id } (${ typeLabel })`, value: n.id };
-        })
-        .sort((a, b) => a.label.localeCompare(b.label));
+      const options = databaseNetworkOptions(this.networks);
       const current = this.value.spec.networkRef;
 
+      // Keep the network of an existing instance, even one no longer offered
       if (current && !options.find((o) => o.value === current)) {
         options.unshift({ label: current, value: current });
       }
 
       return options;
-    },
-
-    isOverlayNetwork() {
-      const network = this.networks.find((n) => n.id === this.value.spec.networkRef);
-
-      return network?.metadata?.labels?.[NETWORK_TYPE_LABEL] === OVERLAY_NETWORK;
-    },
-
-    showDNSServer() {
-      return this.isOverlayNetwork || !!this.value.spec.dnsServerIP;
     },
 
     dbNamePlaceholder() {
@@ -232,7 +212,6 @@ export default {
         dbName:         wrap(validateDBName),
         masterUsername: wrap(validateMasterUsername),
         port:           wrap(validatePort),
-        ipv4:           wrap(validateIPv4),
         backupWindow:   wrap(validateBackupWindow),
         retainCount:    wrap(validateRetainCount),
       };
@@ -474,20 +453,13 @@ export default {
               :tooltip="t('dbaas.instance.form.networkTooltip')"
             />
           </div>
-          <div
-            v-if="showDNSServer"
-            class="col span-6"
-          >
-            <LabeledInput
-              v-model:value="value.spec.dnsServerIP"
-              :label="t('dbaas.instance.form.dnsServerIP')"
-              :placeholder="t('dbaas.instance.form.dnsServerIPPlaceholder')"
-              :mode="createOnlyMode"
-              :rules="fvGetAndReportPathRules('spec.dnsServerIP')"
-              :tooltip="t('dbaas.instance.form.dnsServerIPTooltip')"
-            />
-          </div>
         </div>
+        <p
+          v-if="isCreate"
+          class="text-muted mb-20"
+        >
+          {{ t('dbaas.instance.form.vlanOnly') }}
+        </p>
         <Banner
           v-if="isCreate"
           color="info"

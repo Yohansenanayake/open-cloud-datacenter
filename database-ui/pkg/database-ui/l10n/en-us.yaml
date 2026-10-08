@@ -97,7 +97,6 @@ dbaas:
       targetName: Instance Name
       namespaceTooltip: A restore creates the new instance in the namespace of the snapshot.
       storageTooltip: At least the size of the snapshot. It can be increased later but never reduced.
-      vlanOnly: Only VLAN networks are offered. Restoring onto overlay networks is not supported yet.
       backupEnabled: Allow backups for the new instance
       credentialsInfo: The new instance gets its own admin password (see its Connection tab). Database roles you created are restored as they were. The source instance and the snapshot are not changed.
     validation:
@@ -275,12 +274,8 @@ dbaas:
       network: Network
       networkTooltip: Existing Harvester network the database VM attaches to. Cannot be changed after the instance is created.
       networkPlaceholder: namespace/name
-      networkTypeVlan: VLAN
-      networkTypeOverlay: Overlay
+      vlanOnly: Only VLAN networks are offered. Overlay (Kube-OVN) networks are not supported yet.
       networkInfo: The network must give the VM internet access during provisioning so it can install packages.
-      dnsServerIP: DNS Server IP
-      dnsServerIPPlaceholder: e.g. 10.0.0.10
-      dnsServerIPTooltip: Required on overlay (Kube-OVN VPC) networks, where the VM cannot reach the cluster DNS. Leave empty on VLAN networks.
       backupEnabled: Allow backups for this instance
       backupEnabledDescription: Needed for any snapshot, manual or automated. You can only choose this when the instance is created.
       automatedBackupEnabled: Automated daily snapshots
@@ -301,7 +296,6 @@ dbaas:
       reservedDBName: 'Cannot be a built-in PostgreSQL database ({names}).'
       reservedUsername: Cannot be postgres or postgres_exporter, or start with pg_.
       port: Must be a whole number between 1 and 65535.
-      ipv4: Must be an IPv4 address.
       backupWindow: 'Must be a UTC time range like 02:00-03:00.'
       retainCount: Must be a whole number of at least 1.
     list:

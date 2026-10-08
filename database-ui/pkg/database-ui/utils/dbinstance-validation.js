@@ -13,7 +13,6 @@ const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 const PG_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
 const RESERVED_DB_NAMES = ['postgres', 'template0', 'template1'];
 const RESERVED_USERNAMES = ['postgres', 'postgres_exporter'];
-const IPV4 = /^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$/;
 const UTC_WINDOW = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
 
 const isEmpty = (val) => val === undefined || val === null || val === '';
@@ -78,12 +77,6 @@ export function validatePort(val) {
 
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return { key: 'dbaas.instance.validation.port' };
-  }
-}
-
-export function validateIPv4(val) {
-  if (!isEmpty(val) && !IPV4.test(val)) {
-    return { key: 'dbaas.instance.validation.ipv4' };
   }
 }
 
