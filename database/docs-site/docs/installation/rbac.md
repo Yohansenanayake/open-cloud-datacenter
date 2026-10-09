@@ -5,63 +5,54 @@ sidebar_position: 5
 
 # RBAC
 
-The manager reconciles `DBInstance` objects in every namespace, so its permissions are a `ClusterRole` bound with a `ClusterRoleBinding` to the `controller-manager` ServiceAccount (name prefixed by the release or `dbaas-`). A namespaced install is not offered; with only a `Role` the manager would hit `forbidden` errors on cluster-wide list and watch.
+Two sets of permissions matter: what the **operator** is allowed to do, and what your **users** need to manage databases.
 
-The rules below come from the `+kubebuilder:rbac` markers in `internal/controller/dbinstance_controller.go` and are identical in `config/rbac/role.yaml` and the chart template `charts/chart/templates/rbac/manager-role.yaml`.
+## Give users access
 
-## Manager ClusterRole
+Users manage `DBInstance`, `DBSnapshot` and `DBRestore` objects in their own namespace. The chart ships roles for this, but they are **off by default**:
 
-| API group | Resources | Verbs | Why |
-| --- | --- | --- | --- |
-| `dbaas.opencloud.wso2.com` | `dbinstances` | get, list, watch, create, update, patch, delete | Reconcile the custom resource; also used by the REST gateway path. |
-| `dbaas.opencloud.wso2.com` | `dbinstances/status` | get, update, patch | Write phase, conditions and applied spec. |
-| `dbaas.opencloud.wso2.com` | `dbinstances/finalizers` | update | Add and remove the cleanup finalizer. |
-| `kubevirt.io` | `virtualmachines` | get, list, watch, create, update, delete | Create, resize and delete the database VM; watched so the controller reacts to VM changes. |
-| `kubevirt.io` | `virtualmachineinstances` | get, list, watch | Read runtime state and health. |
-| `subresources.kubevirt.io` | `virtualmachines/start`, `/stop`, `/restart` | update | Power control (`running`) and restarts. |
-| `cdi.kubevirt.io` | `datavolumes` | get, create, update, delete | Data disks. |
-| `harvesterhci.io` | `virtualmachineimages` | get, list | Resolve baked images in preflight; never created by the operator. |
-| `""` | `persistentvolumeclaims` | delete, get, list | Repave deletes the old OS-disk PVC after swapping the VM to a new image. |
-| `k8s.cni.cncf.io` | `network-attachment-definitions` | get, list | Read-only reference to the Multus NAD. Existing-NAD validation in preflight is not yet implemented, so this is currently unused by the check. |
-| `monitoring.coreos.com` | `servicemonitors` | get, list, watch, create, update, delete | Per-instance `ServiceMonitor`. Requires Rancher Monitoring. |
-| `""` | `secrets` | get, list, watch, create, update, patch, delete | Credentials, connection secrets and TLS material for each instance. |
-| `""` | `services`, `endpoints` | get, list, watch, create, update, delete | Per-instance service and endpoints exposing the VM. |
-| `""` | `pods` | get, list | Read pod state (list and get only). |
-| `""` | `events` | create, patch | Emit Kubernetes events. |
+```bash
+helm upgrade --install dbaas-operator <chart> --set rbac.helpers.enable=true
+```
 
-:::note
-The `secrets` rule is cluster-wide and write-capable. It is needed because the operator creates Secrets in tenant namespaces. Treat the manager ServiceAccount as highly privileged.
+Once enabled, anyone holding Kubernetes' built-in `admin`, `edit` or `view` role in a namespace automatically gets matching access to all three kinds there, with no extra bindings:
+
+| Built-in role | Access to `DBInstance`, `DBSnapshot`, `DBRestore` |
+| --- | --- |
+| `admin` | Everything |
+| `edit` | Create, delete, get, list, patch, update, watch |
+| `view` | Get, list, watch |
+
+Without these roles, tenants cannot see or create the three kinds.
+
+## What the operator is allowed to do
+
+The operator runs with a cluster-wide `ClusterRole`, because it manages databases in every tenant namespace. A single-namespace install is not supported: a namespaced `Role` would fail with `forbidden` errors on cluster-wide list and watch.
+
+| Area | Access | Used for |
+| --- | --- | --- |
+| DBaaS resources (`dbinstances`, `dbsnapshots`, `dbrestores`, plus their `status` and `finalizers`) | Full | Reconciling databases, snapshots and restores. |
+| KubeVirt (`virtualmachines`, `virtualmachineinstances`, power subresources) and `datavolumes` | Create, update, delete (VMs, data volumes); read-only for VM instances | Creating, resizing, starting, stopping and deleting the database VM. |
+| Harvester `virtualmachineimages` | Read-only | Finding the baked image. The operator never creates images. |
+| Harvester `virtualmachinebackups` | Create, update, delete, read | Backups behind each `DBSnapshot`. |
+| `volumesnapshots` | Read-only | Checking the snapshot a restore reads from. |
+| `persistentvolumeclaims` | Create, delete, get, list | Deleting the old OS disk after a repave; creating the data disk for a restore. |
+| `leases` | Full | Backup slots and holds. |
+| Multus `network-attachment-definitions` | Read-only | Referencing the VM network. |
+| `servicemonitors` (Rancher Monitoring) | Full | The per-database `ServiceMonitor`. |
+| `secrets` | Full | Credentials, connection details and TLS for each database. |
+| `services`, `endpoints` | Full | The per-database metrics Service. |
+| `pods`, `events` | Read pods; create events | Status and Kubernetes events. |
+
+:::caution
+The `secrets` permission is cluster-wide and can write. It is needed because the operator creates Secrets in tenant namespaces. Treat the operator's ServiceAccount as highly privileged.
 :::
 
-## Leader election (namespaced Role)
+## Leader election and metrics
 
-Created in the install namespace and bound to the manager ServiceAccount.
+Created by the chart and bound to the operator's ServiceAccount:
 
-| API group | Resources | Verbs |
-| --- | --- | --- |
-| `""` | `configmaps` | get, list, watch, create, update, patch, delete |
-| `coordination.k8s.io` | `leases` | get, list, watch, create, update, patch, delete |
-| `""` | `events` | create, patch |
+- **Leader election:** a namespaced `Role` in the install namespace for `configmaps`, `leases` and `events`.
+- **Metrics authentication:** a `ClusterRole` that lets the operator authenticate and authorize scrapers of its secure metrics endpoint.
 
-## Metrics roles
-
-| Role | Rules | Purpose |
-| --- | --- | --- |
-| `metrics-auth-role` (ClusterRole, bound to the manager SA) | `authentication.k8s.io/tokenreviews` create; `authorization.k8s.io/subjectaccessreviews` create | Authenticate and authorise scrapers of the secure metrics endpoint. |
-| `metrics-reader` (ClusterRole, no binding in the default install) | non-resource URL `/metrics` get | Grant to the Prometheus ServiceAccount. |
-
-## Optional helper roles
-
-`dbinstance-admin-role`, `dbinstance-editor-role` and `dbinstance-viewer-role` are convenience ClusterRoles for people managing `DBInstance` objects, not used by the operator. In kustomize they are always installed; in the chart they are installed only when `rbac.helpers.enable` is `true` (default `false`). The admin role carries the `rbac.authorization.k8s.io/aggregate-to-admin` label in the chart.
-
-## Regenerating
-
-After changing markers, run `make manifests` to regenerate `config/rbac/role.yaml`. The chart copy is not generated by that target and must be kept in sync (chart regeneration with kubebuilder resets it to the plugin output).
-
-:::info Verified against
-- `internal/controller/dbinstance_controller.go` (RBAC markers)
-- `config/rbac/role.yaml`, `leader_election_role.yaml`, `metrics_auth_role.yaml`, `metrics_reader_role.yaml`, `kustomization.yaml`
-- `charts/chart/templates/rbac/*.yaml`
-- `charts/chart/values.yaml`
-- `internal/ensure/preflight.go`
-:::
+To let Prometheus scrape the operator's metrics, bind the chart's `metrics-reader` ClusterRole (read access to `/metrics`) to the Prometheus ServiceAccount. It has no binding by default.

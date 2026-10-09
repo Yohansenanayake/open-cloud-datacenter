@@ -91,10 +91,3 @@ manager:
 prometheus:
   enable: true
 ```
-
-:::info Verified against
-- `charts/chart/values.yaml`, `charts/chart/Chart.yaml`
-- `charts/chart/templates/manager/manager.yaml`
-- `charts/chart/templates/_helpers.tpl`
-- `charts/chart/templates/metrics/*`, `prometheus/*`, `rbac/*`, `crd/*`
-:::

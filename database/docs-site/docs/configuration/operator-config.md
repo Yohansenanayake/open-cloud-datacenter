@@ -5,31 +5,43 @@ sidebar_position: 1
 
 # Operator configuration
 
-The manager loads one typed configuration with [`nil-go/konf`](https://github.com/nil-go/konf). Every key has a built-in default, so the operator starts with no file at all.
+The operator works out of the box. Every setting has a built-in default, so you only set the values you want to change.
 
-## Sources and precedence
+## How settings are loaded
 
-From lowest to highest:
+![Configuration sources and precedence](@site/static/img/config-sources-precedence.svg)
 
-```text
-built-in defaults < config file < environment variables < explicit flags
-```
+Settings come from four places. When the same setting appears in more than one, the later one wins:
 
-```mermaid
-flowchart LR
-  D[Defaults] --> F["/etc/dbaas/config.json"] --> E["DBAAS_ env"] --> G[Flags] --> V{Validate}
-  V -->|ok| R[Run]
-  V -->|error| X[Exit]
-```
+1. Built-in defaults
+2. Config file: `/etc/dbaas/config.json`
+3. Environment variables
+4. Command-line flags
 
-- **File.** Only the fixed path `/etc/dbaas/config.json` is read, and only if it exists. There is no flag or environment variable to choose another path. A file that exists but cannot be parsed is a startup error. Keys use the camelCase names in the tables below, nested as JSON objects.
-- **Environment.** Variables start with `DBAAS_`; `__` separates hierarchy levels and a single `_` separates words inside one key, converted to lowerCamelCase. Example: `DBAAS_CONTROLLER__MAX_CONCURRENT_RECONCILES=4` is `controller.maxConcurrentReconciles`; `DBAAS_SECURITY__REJECT_VM_PASSWORD=true` is `security.rejectVMPassword`. An empty segment makes the variable ignored.
-- **Flags.** Dotted paths such as `--controller.maxConcurrentReconciles=4`. Only flags you pass explicitly override lower sources, so passing a value equal to its default still wins over a file or environment value.
-- **Restart required.** Configuration is read once at startup; live reload is not implemented.
-- **Validation.** After merging, the whole configuration is validated; any failure stops the manager with `validate configuration: ...`.
-- **Rejected key.** `operator.namespace` in any source fails startup, because the namespace is taken from the `POD_NAMESPACE` environment variable (Downward API), which is required.
+Good to know:
 
-Example file:
+- The operator reads its configuration **once at startup**. Restart it to apply a change.
+- If a value is invalid, the operator refuses to start and logs `validate configuration: ...`.
+- The config file path is fixed, and the file is optional. If it exists but cannot be parsed, startup fails.
+- `operator.namespace` is not a setting. The operator takes its namespace from the `POD_NAMESPACE` environment variable (set through the Downward API, and required). Setting `operator.namespace` anywhere fails startup.
+
+## Changing a setting
+
+Every setting has a key such as `controller.maxConcurrentReconciles`. You can set it three ways:
+
+| Method | Example |
+| --- | --- |
+| Config file | `{ "controller": { "maxConcurrentReconciles": 4 } }` |
+| Environment variable | `DBAAS_CONTROLLER__MAX_CONCURRENT_RECONCILES=4` |
+| Flag | `--controller.maxConcurrentReconciles=4` |
+
+**Naming rules**
+
+- **Flag:** `--` plus the key, exactly as written.
+- **Environment variable:** `DBAAS_` plus the key in upper case. Use `__` between levels and `_` between words. So `databaseDefaults.storageClass` becomes `DBAAS_DATABASE_DEFAULTS__STORAGE_CLASS`.
+- **Flags win even when equal to the default.** A flag you pass explicitly always overrides the file and environment, even if its value matches the default.
+
+**Example config file**
 
 ```json
 {
@@ -39,97 +51,120 @@ Example file:
 }
 ```
 
-How to deliver the file or flags: kustomize uses the overlay ConfigMap ([Kustomize](/installation/kustomize)); the Helm chart sets flags through `manager.args` and environment through `manager.env` or `manager.envOverrides` ([Helm values](/configuration/helm-values)). The chart has no value that mounts a config file by itself; `manager.extraVolumes` and `manager.extraVolumeMounts` are supported by the template for that purpose.
+**With Helm.** The chart passes flags through `manager.args` and environment variables through `manager.env` or `manager.envOverrides` (see [Helm values](/configuration/helm-values)). The chart has no value that mounts a config file for you. If you need one, use `manager.extraVolumes` and `manager.extraVolumeMounts`.
 
-## Reference
+## Settings most people change
 
-Environment names are derived by the rule above. A dash in the Flag column means no flag is registered.
+| Key | Default | Why change it |
+| --- | --- | --- |
+| `databaseDefaults.osVersion` | `22.04` | Choose the OS image stream for new databases (`22.04` or `24.04`) |
+| `databaseDefaults.storageClass` | `longhorn` | Use a different storage class for database disks |
+| `controller.maxConcurrentReconciles` | `1` | Process more `DBInstance`s in parallel (raise for many tenants) |
+| `backup.maxConcurrent` | `4` | Limit how many backups run at once |
+| `security.rejectVMPassword` | `false` | Block password login to new database VMs |
+| `observability.monitoring.serviceMonitorLabels` | `{release: prometheus}` | Match your Prometheus `ServiceMonitor` selector |
+| `observability.grafana.baseURL` | `https://grafana.monitoring.svc` | Point per-instance Grafana links at your Grafana |
+| `logging.level` | `info` | Turn on `debug` logs when troubleshooting |
 
-### operator and controller
+## All settings
 
-| Key | Type | Default | Flag | Env | Validation |
-| --- | --- | --- | --- | --- | --- |
-| `operator.leaderElection.enabled` | bool | `false` | `--operator.leaderElection.enabled` | `DBAAS_OPERATOR__LEADER_ELECTION__ENABLED` | none |
-| `operator.leaderElection.id` | string | `734f9ee3.opencloud.wso2.com` | `--operator.leaderElection.id` | `DBAAS_OPERATOR__LEADER_ELECTION__ID` | non-blank when leader election is enabled |
-| `controller.maxConcurrentReconciles` | int | `1` | `--controller.maxConcurrentReconciles` | `DBAAS_CONTROLLER__MAX_CONCURRENT_RECONCILES` | at least 1 |
+Defaults are shown in the tables. Flags and environment variables follow the [naming rules](#changing-a-setting) above.
 
-The built-in default for leader election is off, but both the chart and the kustomize Deployment pass `--operator.leaderElection.enabled=true`.
+### Operator and controller
 
-### server
+| Key | Default | Notes |
+| --- | --- | --- |
+| `operator.leaderElection.enabled` | `false` | Run only one active operator replica. The Helm chart turns it on. |
+| `operator.leaderElection.id` | `734f9ee3.opencloud.wso2.com` | Must not be blank when leader election is on |
+| `controller.maxConcurrentReconciles` | `1` | At least 1 |
 
-| Key | Type | Default | Flag | Env | Validation |
-| --- | --- | --- | --- | --- | --- |
-| `server.enableHTTP2` | bool | `false` | `--server.enableHTTP2` | `DBAAS_SERVER__ENABLE_HTTP2` | none |
-| `server.health.bindAddress` | string | `:8081` | `--server.health.bindAddress` | `DBAAS_SERVER__HEALTH__BIND_ADDRESS` | `host:port`, port 1-65535, non-empty |
-| `server.gateway.enabled` | bool | `true` | `--server.gateway.enabled` | `DBAAS_SERVER__GATEWAY__ENABLED` | none |
-| `server.gateway.bindAddress` | string | `:8080` | `--server.gateway.bindAddress` | `DBAAS_SERVER__GATEWAY__BIND_ADDRESS` | validated only when the gateway is enabled; `host:port` |
-| `server.gateway.defaultNamespace` | string | `default` | `--server.gateway.defaultNamespace` | `DBAAS_SERVER__GATEWAY__DEFAULT_NAMESPACE` | validated only when enabled; DNS-1123 label |
-| `server.webhook.tls.certDir` | string | empty | `--server.webhook.tls.certDir` | `DBAAS_SERVER__WEBHOOK__TLS__CERT_DIR` | none |
-| `server.webhook.tls.certFile` | string | `tls.crt` | `--server.webhook.tls.certFile` | `DBAAS_SERVER__WEBHOOK__TLS__CERT_FILE` | non-empty when `certDir` is set |
-| `server.webhook.tls.keyFile` | string | `tls.key` | `--server.webhook.tls.keyFile` | `DBAAS_SERVER__WEBHOOK__TLS__KEY_FILE` | non-empty when `certDir` is set |
+### Servers
 
-`server.enableHTTP2=false` makes the manager disable HTTP/2 on its servers. The health listener serves `/healthz` and `/readyz` and backs the Deployment probes on port 8081. The gateway is an HTTP REST endpoint (`/healthz`, `/dbinstances`, `/dbinstances/...`) that forwards the caller's bearer token to the API server; it is on by default.
+| Key | Default | Notes |
+| --- | --- | --- |
+| `server.enableHTTP2` | `false` | Leave off unless you need HTTP/2 |
+| `server.health.bindAddress` | `:8081` | Serves `/healthz` and `/readyz`, which the Deployment probes use |
+| `server.gateway.enabled` | `true` | The optional REST gateway |
+| `server.gateway.bindAddress` | `:8080` | Checked only when the gateway is enabled |
+| `server.gateway.defaultNamespace` | `default` | Namespace used when a request names none |
+| `server.webhook.tls.certDir` | empty | Certificate folder for the webhook server |
+| `server.webhook.tls.certFile` | `tls.crt` | Required when `certDir` is set |
+| `server.webhook.tls.keyFile` | `tls.key` | Required when `certDir` is set |
+
+The REST gateway (`/healthz`, `/dbinstances`, `/dbinstances/...`) forwards the caller's bearer token to the API server, so Kubernetes still decides who may do what.
 
 :::note
-The operator registers no admission or conversion webhooks in this release. The `server.webhook.tls.*` keys only configure the webhook server's certificate location in `cmd/main.go`.
+This release registers no admission or conversion webhooks. The `server.webhook.tls.*` keys only set where the webhook server looks for its certificate.
 :::
 
-### infrastructure
+### Harvester
 
-| Key | Type | Default | Flag | Env | Validation |
-| --- | --- | --- | --- | --- | --- |
-| `infrastructure.harvester.managementLogicalSwitch` | string | `ovn-default` | `--infrastructure.harvester.managementLogicalSwitch` | `DBAAS_INFRASTRUCTURE__HARVESTER__MANAGEMENT_LOGICAL_SWITCH` | none |
-| `infrastructure.harvester.imageNamespace` | string | `default` | `--infrastructure.harvester.imageNamespace` | `DBAAS_INFRASTRUCTURE__HARVESTER__IMAGE_NAMESPACE` | DNS-1123 label (so cannot be empty) |
+| Key | Default | Notes |
+| --- | --- | --- |
+| `infrastructure.harvester.imageNamespace` | `default` | Where image names without a `namespace/name` prefix are looked up. Must be a valid namespace name. |
 
-`managementLogicalSwitch` is the Kube-OVN logical switch for VM launcher management networking. `imageNamespace` is where baked-image names without a `namespace/name` prefix are resolved.
+### Database defaults
 
-### databaseDefaults
+Applied when a `DBInstance` leaves the field out.
 
-| Key | Type | Default | Flag | Env | Validation |
-| --- | --- | --- | --- | --- | --- |
-| `databaseDefaults.storageClass` | string | `longhorn` | `--databaseDefaults.storageClass` | `DBAAS_DATABASE_DEFAULTS__STORAGE_CLASS` | non-empty |
-| `databaseDefaults.masterUsername` | string | `dbadmin` | `--databaseDefaults.masterUsername` | `DBAAS_DATABASE_DEFAULTS__MASTER_USERNAME` | non-empty |
-| `databaseDefaults.port` | int | `5432` | `--databaseDefaults.port` | `DBAAS_DATABASE_DEFAULTS__PORT` | 1-65535 |
-| `databaseDefaults.osVersion` | string | `22.04` | `--databaseDefaults.osVersion` | `DBAAS_DATABASE_DEFAULTS__OS_VERSION` | non-blank |
+| Key | Default | Notes |
+| --- | --- | --- |
+| `databaseDefaults.storageClass` | `longhorn` | Not empty |
+| `databaseDefaults.masterUsername` | `dbadmin` | Not empty |
+| `databaseDefaults.port` | `5432` | 1-65535 |
+| `databaseDefaults.osVersion` | `22.04` | OS stream for the whole platform; no per-instance override |
 
-`osVersion` is the catalog stream key (`22.04` or `24.04` in this release), platform-wide with no per-instance override. Validation accepts any non-blank string, but an unknown or unvalidated stream makes every new instance fail preflight with `OSImageInvalid`. See [Prerequisites](/installation/prerequisites).
+:::caution
+`osVersion` accepts any non-blank text, but an unknown or not-yet-validated stream makes every new instance fail with `OSImageInvalid`. See [Prerequisites](/installation/prerequisites).
+:::
 
-### observability
+### Observability
 
-| Key | Type | Default | Flag | Env | Validation |
-| --- | --- | --- | --- | --- | --- |
-| `observability.grafana.baseURL` | string | `https://grafana.monitoring.svc` | `--observability.grafana.baseURL` | `DBAAS_OBSERVABILITY__GRAFANA__BASE_URL` | empty allowed; otherwise absolute URL with scheme and host |
-| `observability.metrics.bindAddress` | string | `0` (disabled) | `--observability.metrics.bindAddress` | `DBAAS_OBSERVABILITY__METRICS__BIND_ADDRESS` | `0` or `host:port` |
-| `observability.metrics.secure` | bool | `true` | `--observability.metrics.secure` | `DBAAS_OBSERVABILITY__METRICS__SECURE` | none |
-| `observability.metrics.tls.certDir` | string | empty | `--observability.metrics.tls.certDir` | `DBAAS_OBSERVABILITY__METRICS__TLS__CERT_DIR` | none |
-| `observability.metrics.tls.certFile` | string | `tls.crt` | `--observability.metrics.tls.certFile` | `DBAAS_OBSERVABILITY__METRICS__TLS__CERT_FILE` | non-empty when `certDir` set |
-| `observability.metrics.tls.keyFile` | string | `tls.key` | `--observability.metrics.tls.keyFile` | `DBAAS_OBSERVABILITY__METRICS__TLS__KEY_FILE` | non-empty when `certDir` set |
-| `observability.monitoring.scrapeInterval` | duration | `15s` | `--observability.monitoring.scrapeInterval` | `DBAAS_OBSERVABILITY__MONITORING__SCRAPE_INTERVAL` | greater than zero |
-| `observability.monitoring.serviceMonitorLabels` | map of string to string | `{release: prometheus}` | - | - | none |
+| Key | Default | Notes |
+| --- | --- | --- |
+| `observability.grafana.baseURL` | `https://grafana.monitoring.svc` | Builds per-instance Grafana links. Empty is allowed; otherwise a full URL. |
+| `observability.metrics.bindAddress` | `0` (off) | `0` or `host:port` |
+| `observability.metrics.secure` | `true` | Serve metrics over TLS with authentication |
+| `observability.metrics.tls.certDir` | empty | If unset while secure, a self-generated certificate is used |
+| `observability.metrics.tls.certFile` | `tls.crt` | Required when `certDir` is set |
+| `observability.metrics.tls.keyFile` | `tls.key` | Required when `certDir` is set |
+| `observability.monitoring.scrapeInterval` | `15s` | Per-instance `ServiceMonitor` interval; must be above zero |
+| `observability.monitoring.serviceMonitorLabels` | `{release: prometheus}` | Must match your Prometheus selector. **Config file only** (see below). |
 
-`grafana.baseURL` builds the per-instance Grafana links. `scrapeInterval` and `serviceMonitorLabels` configure the per-instance `ServiceMonitor` (labels must match your Prometheus selector). Set `serviceMonitorLabels` in the config file; map keys are case sensitive, so environment variables are not a reliable way to set it. When secure serving is on and no `certDir` is set, controller-runtime serves a self-generated certificate. See [Monitoring](/monitoring).
+### Backup and restore
 
-### logging
+| Key | Default | Notes |
+| --- | --- | --- |
+| `backup.maxConcurrent` | `4` | Backups running at once, cluster-wide. At least 1. |
+| `backup.timeout` | `6h` | Limit for one backup |
+| `restore.recoveryTimeout` | `1h` | How long a restored instance waits for PostgreSQL recovery |
+| `restore.timeout` | `6h` | Limit for a whole restore. Must be greater than `restore.recoveryTimeout`. |
 
-| Key | Type | Default | Flag | Env | Validation |
-| --- | --- | --- | --- | --- | --- |
-| `logging.development` | bool | `false` | `--logging.development` | `DBAAS_LOGGING__DEVELOPMENT` | none |
-| `logging.encoder` | string | `json` | `--logging.encoder` | `DBAAS_LOGGING__ENCODER` | `json` or `console` |
-| `logging.level` | string | `info` | `--logging.level` | `DBAAS_LOGGING__LEVEL` | `debug`, `info`, `warn`, `error`, `panic` |
-| `logging.stacktraceLevel` | string | `error` | `--logging.stacktraceLevel` | `DBAAS_LOGGING__STACKTRACE_LEVEL` | same set as `level` |
-| `logging.timeEncoding` | string | `rfc3339` | `--logging.timeEncoding` | `DBAAS_LOGGING__TIME_ENCODING` | `epoch`, `millis`, `nano`, `iso8601`, `rfc3339`, `rfc3339nano` |
+- **Concurrency.** Extra backups wait their turn, oldest first. Each namespace may use at most half the slots (rounded up, never below 1), so the default of 4 gives 2 per namespace. See [Concurrency and holds](/backup-restore/concurrency-and-holds).
+- **Backup timeout.** Counted from when the Harvester backup is created, not from queue time. On expiry the snapshot fails as `BackupTimedOut`, the backup is deleted and the slot is freed.
+- **Recovery timeout.** Recovery time grows with the amount of WAL the snapshot captured, so size it for your largest database.
+- **Restore timeout.** Counted from when the `DBRestore` is created. On expiry the restore fails as `RestoreTimedOut` and its unfinished target is deleted.
+- **Duration format.** Values use Go syntax, such as `90m` or `3h`. See [Restore](/backup-restore/restore#timeouts).
 
-### security
+### Logging
 
-| Key | Type | Default | Flag | Env |
-| --- | --- | --- | --- | --- |
-| `security.rejectVMPassword` | bool | `false` | `--security.rejectVMPassword` | `DBAAS_SECURITY__REJECT_VM_PASSWORD` |
+| Key | Default | Allowed values |
+| --- | --- | --- |
+| `logging.development` | `false` | `true`, `false` |
+| `logging.encoder` | `json` | `json`, `console` |
+| `logging.level` | `info` | `debug`, `info`, `warn`, `error`, `panic` |
+| `logging.stacktraceLevel` | `error` | same as `level` |
+| `logging.timeEncoding` | `rfc3339` | `epoch`, `millis`, `nano`, `iso8601`, `rfc3339`, `rfc3339nano` |
 
-See [Policy switches](/configuration/policy-switches).
+### Security
 
-### instanceClasses
+| Key | Default | Notes |
+| --- | --- | --- |
+| `security.rejectVMPassword` | `false` | Reject VM password login for new instances. See [Policy switches](/configuration/policy-switches). |
 
-A map from class name to `cpuCores`, `memoryMB` and `maxConnections`. It has no flag. The default is the compiled-in catalog:
+### Instance classes
+
+An instance class sets a database VM's size. The default is the built-in catalog:
 
 | Class | CPU cores | Memory (MB) | Max connections |
 | --- | --- | --- | --- |
@@ -146,15 +181,27 @@ A map from class name to `cpuCores`, `memoryMB` and `maxConnections`. It has no 
 | `db.r5.xlarge` | 4 | 32768 | 500 |
 | `db.r5.2xlarge` | 8 | 65536 | 800 |
 
-Validation: at least one class; no blank name; every class needs `cpuCores`, `memoryMB` and `maxConnections` each at least 1. A `DBInstance` whose `dbInstanceClass` is not in the map fails preflight with `InvalidClass`. Class names contain dots, so define the map in the config file rather than through environment variables. How a file-supplied map merges with the built-in defaults (replace versus per-key merge) was not confirmed in the code; include every class you need.
+- Each class needs `cpuCores`, `memoryMB` and `maxConnections`, all at least 1. At least one class must exist, and no name may be blank.
+- A `DBInstance` that names a class not in the list fails with `InvalidClass`.
+- See [DBInstance spec](/reference/dbinstance-spec) for how instances pick a class.
 
-See [DBInstance spec](/reference/dbinstance-spec) for how instances select a class.
+To define your own classes, put them in the config file as `instanceClasses`. There is no flag.
 
-:::info Verified against
-- `internal/config/types.go`, `defaults.go`, `flags.go`, `load.go`, `validate.go`, `namespace.go`
-- `internal/config/load_test.go`
-- `api/v1alpha1/dbinstance_types.go` (`InstanceClasses`)
-- `cmd/main.go`
-- `internal/gateway/gateway.go`
-- `config/overlays/operator-config/*`, `charts/chart/templates/manager/manager.yaml`
+```json
+{
+  "instanceClasses": {
+    "db.custom.small": { "cpuCores": 2, "memoryMB": 4096, "maxConnections": 150 }
+  }
+}
+```
+
+:::caution
+It is not confirmed whether a class list in the config file replaces the built-in list or merges with it. Include every class you need to be safe.
 :::
+
+## Settings that must go in the config file
+
+Names that contain dots or are case sensitive can't be set reliably through environment variables:
+
+- `instanceClasses` (class names contain dots, and there is no flag)
+- `observability.monitoring.serviceMonitorLabels` (map keys are case sensitive, and there is no flag)

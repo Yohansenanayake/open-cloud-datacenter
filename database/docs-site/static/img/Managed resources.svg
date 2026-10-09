@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" width="1600" height="1000">
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .title-text { font-family: 'Poppins', 'Nunito', 'Segoe UI', system-ui, -apple-system, sans-serif; font-weight: 700; font-size: 13px; fill: #666666; letter-spacing: 1.5px; text-transform: uppercase; }
+      .box-text { font-family: 'Poppins', 'Nunito', 'Segoe UI', system-ui, -apple-system, sans-serif; font-weight: 700; font-size: 15px; fill: #ffffff; text-anchor: middle; dominant-baseline: central; }
+      .caption-text { font-family: 'Poppins', 'Nunito', 'Segoe UI', system-ui, -apple-system, sans-serif; font-weight: 700; font-size: 12px; fill: #555555; text-anchor: middle; dominant-baseline: central; }
+      
+      .line-solid { fill: none; stroke: #3A4040; stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; }
+      .line-dashed { fill: none; stroke: #3A4040; stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 5 5; }
+      
+      .group-box { fill: none; stroke: #B0B5B3; stroke-width: 2px; stroke-dasharray: 6 6; rx: 12px; }
+      
+      .fill-blue { fill: #0070A8; }
+      .fill-plum { fill: #66184B; }
+      .fill-green { fill: #00A685; }
+      .fill-grey { fill: #B0B5B3; }
+    </style>
+    
+    <marker id="arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#3A4040" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" width="100%" height="100%" />
+
+  <!-- ================= GROUPS ================= -->
+  
+  <!-- Group 1: Compute -->
+  <rect class="group-box" x="360" y="40" width="1160" height="240" />
+  <text class="title-text" x="385" y="70">COMPUTE</text>
+
+  <!-- Group 2: Secrets -->
+  <rect class="group-box" x="360" y="310" width="1160" height="160" />
+  <text class="title-text" x="385" y="340">SECRETS</text>
+
+  <!-- Group 3: Metrics -->
+  <rect class="group-box" x="360" y="500" width="1160" height="160" />
+  <text class="title-text" x="385" y="530">METRICS</text>
+
+  <!-- Group 4: Operator Namespace -->
+  <rect class="group-box" x="360" y="690" width="1160" height="160" />
+  <text class="title-text" x="385" y="720">OPERATOR NAMESPACE</text>
+
+  <!-- ================= CONNECTIONS / ARROWS ================= -->
+
+  <!-- 1. DBInstance -> VM (Solid) -->
+  <path class="line-solid" marker-end="url(#arrow)" d="M 260 440 L 300 440 L 300 102.5 L 605 102.5" />
+
+  <!-- 2. DBInstance -> Secrets (Solid Fan) -->
+  <path class="line-solid" d="M 260 460 L 320 460 L 320 350 L 985 350" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 585 350 L 585 380" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 785 350 L 785 380" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 985 350 L 985 380" />
+
+  <!-- 3. DBInstance -> Metrics (Solid Fan) -->
+  <path class="line-solid" d="M 260 480 L 340 480 L 340 540 L 985 540" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 585 540 L 585 570" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 785 540 L 785 570" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 985 540 L 985 570" />
+
+  <!-- Internal Metrics connections: Monitor -> Service -> Endpoints -->
+  <path class="line-solid" marker-end="url(#arrow)" d="M 660 597.5 L 710 597.5" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 860 597.5 L 910 597.5" />
+
+  <!-- 4. VM -> Cloud-init (Dashed, "mounts") -->
+  <path class="line-dashed" marker-end="url(#arrow)" d="M 605 118 L 440 118 L 440 407.5 L 510 407.5" />
+  <rect x="402" y="248" width="60" height="20" fill="#ffffff" />
+  <text class="caption-text" x="432" y="258">mounts</text>
+
+  <!-- 5. DBInstance -> Operator Namespace (Dashed Fan, "label only") -->
+  <path class="line-dashed" d="M 260 500 L 300 500 L 300 730 L 785 730" />
+  <path class="line-dashed" marker-end="url(#arrow)" d="M 585 730 L 585 760" />
+  <path class="line-dashed" marker-end="url(#arrow)" d="M 785 730 L 785 760" />
+  <rect x="305" y="605" width="70" height="20" fill="#ffffff" />
+  <text class="caption-text" x="340" y="615">label only</text>
+
+  <!-- Internal Compute connections: VM -> OS Disk, VM -> Data Disk -->
+  <path class="line-solid" marker-end="url(#arrow)" d="M 645 130 L 645 160 L 585 160 L 585 190" />
+  <path class="line-solid" marker-end="url(#arrow)" d="M 725 130 L 725 160 L 785 160 L 785 190" />
+
+
+  <!-- ================= RESOURCE BOXES & LABELS ================= -->
+
+  <!-- DBInstance (BLUE) -->
+  <rect class="fill-blue" x="80" y="425" width="180" height="90" rx="10" />
+  <text class="box-text" x="170" y="470">DBInstance</text>
+
+  <!-- COMPUTE GROUP BOXES -->
+  <!-- VM (PLUM) -->
+  <rect class="fill-plum" x="605" y="75" width="160" height="55" rx="10" />
+  <text class="box-text" x="685" y="102.5">VM</text>
+
+  <!-- OS Disk (GREEN) -->
+  <rect class="fill-green" x="510" y="190" width="150" height="55" rx="10" />
+  <text class="box-text" x="585" y="217.5">OS Disk</text>
+
+  <!-- Data Disk (GREEN) -->
+  <rect class="fill-green" x="710" y="190" width="150" height="55" rx="10" />
+  <text class="box-text" x="785" y="217.5">Data Disk</text>
+
+  <!-- SECRETS GROUP BOXES -->
+  <!-- Cloud-init (GREEN) -->
+  <rect class="fill-green" x="510" y="380" width="150" height="55" rx="10" />
+  <text class="box-text" x="585" y="407.5">Cloud-init</text>
+
+  <!-- Credentials (GREEN) -->
+  <rect class="fill-green" x="710" y="380" width="150" height="55" rx="10" />
+  <text class="box-text" x="785" y="407.5">Credentials</text>
+
+  <!-- Connection (GREEN) -->
+  <rect class="fill-green" x="910" y="380" width="150" height="55" rx="10" />
+  <text class="box-text" x="985" y="407.5">Connection</text>
+
+  <!-- METRICS GROUP BOXES -->
+  <!-- Monitor (GREEN) -->
+  <rect class="fill-green" x="510" y="570" width="150" height="55" rx="10" />
+  <text class="box-text" x="585" y="597.5">Monitor</text>
+
+  <!-- Service (GREEN) -->
+  <rect class="fill-green" x="710" y="570" width="150" height="55" rx="10" />
+  <text class="box-text" x="785" y="597.5">Service</text>
+
+  <!-- Endpoints (GREEN) -->
+  <rect class="fill-green" x="910" y="570" width="150" height="55" rx="10" />
+  <text class="box-text" x="985" y="597.5">Endpoints</text>
+
+  <!-- OPERATOR NAMESPACE GROUP BOXES -->
+  <!-- Internal (GREY) -->
+  <rect class="fill-grey" x="510" y="760" width="150" height="55" rx="10" />
+  <text class="box-text" x="585" y="787.5">Internal</text>
+
+  <!-- TLS (GREY) -->
+  <rect class="fill-grey" x="710" y="760" width="150" height="55" rx="10" />
+  <text class="box-text" x="785" y="787.5">TLS</text>
+
+</svg>

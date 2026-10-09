@@ -8,28 +8,11 @@ sidebar_position: 3
 For a `DBInstance` named `NAME` in namespace `NS` with UID `UID`, the operator creates the objects below. All names
 are deterministic and recomputable from the instance, so a lost `status` never orphans anything.
 
-```mermaid
-flowchart TD
-  DBI[DBInstance NS/NAME]
-  DBI --> VM[VirtualMachine pg-NAME]
-  VM --> OS[(OS disk PVC pg-NAME-uid8-os)]
-  VM --> DATA[(Data disk PVC pg-NAME-uid8-data)]
-  VM -.mounts.-> CI[Secret pg-NAME-cloudinit]
-  DBI --> CRED[Secret pg-NAME-credentials]
-  DBI --> CONN[Secret pg-NAME-connect]
-  DBI --> CI
-  DBI --> SVC[Service pg-NAME-metrics]
-  DBI --> EP[Endpoints pg-NAME-metrics]
-  DBI --> SM[ServiceMonitor pg-NAME-monitor]
-  DBI -. label only .-> INT[Operator ns: Secret dbi-UID-internal]
-  DBI -. label only .-> TLS[Operator ns: Secret dbi-UID-tls]
-  SM --> SVC
-  SVC --> EP
-```
+![Managed resources](@site/static/img/Managed%20resources.svg)
 
-Solid arrows are controller owner references (garbage collection); dotted arrows to the operator namespace are
-label-based links, because owner references cannot cross namespaces. The PVCs are created by Harvester from the VM's
-volume claim templates, not directly by the operator.
+Objects in the operator namespace are linked to the instance by label rather than by owner reference, because owner
+references cannot cross namespaces. The PVCs are created by Harvester from the VM's volume claim templates, not
+directly by the operator.
 
 ## Tenant namespace objects
 
@@ -43,7 +26,7 @@ volume claim templates, not directly by the operator.
 | `Secret` (connection) | `pg-NAME-connect` | `connection-secret` | Password-free: `host`, `port`, `dbname`, `jdbcUrl`, `sslmode` (`verify-ca`), `ca.crt`. Reconciled every pass so the address follows IP changes. See [Connecting](/connecting). |
 | `Service` (headless, no selector) | `pg-NAME-metrics` | `monitoring` | Labels `dbaas.opencloud.wso2.com/instance` and `dbaas.opencloud.wso2.com/metrics=true`; port `metrics` 9187/TCP. |
 | `Endpoints` | `pg-NAME-metrics` | `monitoring` | Manually binds the Service to the VM's data-network IP (the database is a VM, not a pod). Subsets stay empty until the IP is known. |
-| `ServiceMonitor` | `pg-NAME-monitor` | `monitoring` | Selects the metrics Service, port `metrics`, path `/metrics`, labelled `release=prometheus` unless `observability.monitoring.serviceMonitorLabels` says otherwise; scrape interval 15 s unless configured. See [Monitoring](/monitoring). |
+| `ServiceMonitor` | `pg-NAME-monitor` | `monitoring` | Selects the metrics Service, port `metrics`, path `/metrics`, labelled `release=prometheus` unless `observability.monitoring.serviceMonitorLabels` says otherwise; scrape interval 15 s unless configured. |
 
 All builder-managed objects (cloud-init, connection, Service, Endpoints, ServiceMonitor) also carry the label
 `dbaas.opencloud.wso2.com/instance=NAME`. The credentials Secret is created with a controller owner reference.
@@ -65,6 +48,22 @@ Two controller-private Secrets, never exposed to tenants, live in the operator n
 Both carry labels `dbaas.opencloud.wso2.com/instance` and `dbaas.opencloud.wso2.com/dbinstance-uid`. They are
 recorded in `status.resources.internalSecretRef` and `privateTLSSecretRef` as `namespace/name`.
 
+The operator namespace also holds the backup-slot `Lease`s (see below).
+
+## Backup and restore objects
+
+Created only when a backup or restore is in use. See [Backup and restore](/backup-restore/overview).
+
+| Kind | Name | Namespace | Created by | Owner reference | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `DBSnapshot` | `<instance>-auto-<YYYYMMDD>` for automated ones | instance | the instance's scheduler | the `DBInstance` (controller) | Label `dbaas.opencloud.wso2.com/snapshot-origin: Automated`. Manual snapshots are named and created by you and have no owner. |
+| `VirtualMachineBackup` (Harvester) | same name as the `DBSnapshot` | instance | `DBSnapshot` controller | the `DBSnapshot` (controller) | `spec.type: Backup`. Produces the `VolumeSnapshot` of the data volume. |
+| `Lease` (snapshot hold) | `dbaas-snapshot-hold-<instance UID>` | instance | `DBSnapshot` controller or repave | the `DBInstance` (controller) | Holder `snapshot:<name>` or `repave`. |
+| `Lease` (backup slot) | `dbaas-backup-slot-<index>` | operator namespace | `BackupDispatcher` | none | Holder is the `DBSnapshot` UID. Labels `dbaas.opencloud.wso2.com/backup-slot` and `dbaas.opencloud.wso2.com/snapshot-namespace`; annotation `dbaas.opencloud.wso2.com/snapshot`. Exists only while granted. |
+| `Lease` (restore hold) | `dbaas-restore-hold-<DBRestore UID>` | restore | `DBRestore` controller | the `DBRestore` (controller) | Label `dbaas.opencloud.wso2.com/source-uid`. |
+| PVC (restore data disk) | `pg-<target>-restore-<DBRestore UID8>-data` | restore | `DBRestore` controller | **none** | Label `dbaas.opencloud.wso2.com/restore-uid`. Becomes the target's data volume and outlives the `DBRestore`. |
+| `DBInstance` (restore target) | `spec.targetInstanceName` | restore | `DBRestore` controller | none | Created with `spec.restoredFrom`. An ordinary, independent instance afterward. |
+
 ## Where the operator records what it made
 
 `status.resources` holds: `nadName`, `dataVolumeName`, `osDiskPVCName`, `pendingDeleteOSDiskPVCName` (during a
@@ -83,14 +82,3 @@ Fields that can be observed from the live cluster (VM name, disk names) are re-r
    `spec.credentials.passwordSource`.
 4. The data and OS disk PVCs are not deleted by the operator. Check `kubectl get pvc -n NS` after deletion; this
    behaviour is not verified in the code.
-
-:::info Verified against
-`database/internal/resource/builder.go`, `database/internal/resource/cloudinit_secret.go`,
-`database/internal/resource/connection_secret.go`, `database/internal/resource/metrics_service.go`,
-`database/internal/resource/metrics_endpoints.go`, `database/internal/resource/servicemonitor.go`,
-`database/internal/credentials/resolver.go`, `database/internal/credentials/cloudinit.go`,
-`database/internal/ensure/vm.go`, `database/internal/ensure/monitoring.go`,
-`database/internal/ensure/bootstrap_cleanup.go`, `database/internal/harvester/typed_client.go`,
-`database/internal/controller/dbinstance_controller.go`, `database/api/v1alpha1/dbinstance_types.go`,
-`database/CREDENTIALS.md`.
-:::

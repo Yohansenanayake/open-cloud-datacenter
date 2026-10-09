@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background-color: #ffffff;">
+  <defs>
+    <!-- Arrowhead Marker -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#3A4040" />
+    </marker>
+
+    <!-- Typography Styles -->
+    <style>
+      .box-title { font-family: 'Poppins', 'Montserrat', 'Segoe UI', system-ui, sans-serif; font-weight: 700; font-size: 15px; fill: #ffffff; text-anchor: middle; dominant-baseline: central; }
+      .container-title { font-family: 'Poppins', 'Montserrat', 'Segoe UI', system-ui, sans-serif; font-weight: 700; font-size: 13px; fill: #6A706E; letter-spacing: 0.5px; }
+      .col-header { font-family: 'Poppins', 'Montserrat', 'Segoe UI', system-ui, sans-serif; font-weight: 700; font-size: 11px; fill: #757B79; letter-spacing: 0.5px; text-anchor: middle; }
+      .caption-text { font-family: 'Poppins', 'Montserrat', 'Segoe UI', system-ui, sans-serif; font-weight: 700; font-size: 11px; fill: #3A4040; text-anchor: middle; dominant-baseline: central; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1600" height="900" fill="#ffffff" />
+
+  <!-- Harvester Cluster Outer Container -->
+  <rect x="230" y="35" width="1330" height="830" rx="16" ry="16" fill="#FAFBFB" stroke="#C8CDCA" stroke-width="2" stroke-dasharray="6,6" />
+  <text x="255" y="62" class="container-title">Harvester Cluster</text>
+
+  <!-- Manager Pod Inner Container -->
+  <rect x="460" y="125" width="510" height="385" rx="14" ry="14" fill="#F2F4F3" stroke="#B8BDBC" stroke-width="2" stroke-dasharray="5,5" />
+  <text x="480" y="147" class="container-title">Manager Pod</text>
+  <text x="550" y="180" class="col-header">CONTROLLERS</text>
+
+  <!-- ARROWS & CONNECTORS -->
+
+  <!-- 1. Tenant -> Harvester API (caption: DBInstance, Snapshot, Restore) -->
+  <path d="M 210,200 L 235,200 L 235,420 L 270,420" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" stroke-linejoin="round" />
+  <rect x="145" y="300" width="180" height="20" fill="#ffffff" rx="4" />
+  <text x="235" y="310" class="caption-text">DBInstance, Snapshot, Restore</text>
+
+  <!-- 2. Harvester API <-> Instance, Backup, Restore (three two-headed arrows) -->
+  <path d="M 430,400 L 455,400 L 455,227.5 L 480,227.5" fill="none" stroke="#3A4040" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)" stroke-linejoin="round" />
+  <path d="M 430,420 L 455,420 L 455,312.5 L 480,312.5" fill="none" stroke="#3A4040" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)" stroke-linejoin="round" />
+  <path d="M 430,440 L 455,440 L 455,397.5 L 480,397.5" fill="none" stroke="#3A4040" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)" stroke-linejoin="round" />
+
+  <!-- Single caption for watch / reconcile -->
+  <rect x="405" y="350" width="100" height="20" fill="#ffffff" rx="4" />
+  <text x="455" y="360" class="caption-text">watch / reconcile</text>
+
+  <!-- 3. Instance, Backup, Restore -> Harvester Client (three short arrows) -->
+  <path d="M 620,227.5 L 770,227.5" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" />
+  <path d="M 620,312.5 L 770,312.5" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" />
+  <path d="M 620,397.5 L 770,397.5" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" />
+
+  <!-- 4. Harvester Client -> Harvester API (caption: VM, PVC, routed over Manager Pod) -->
+  <path d="M 845,200 L 845,80 L 350,80 L 350,380" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" stroke-linejoin="round" />
+  <rect x="560" y="70" width="70" height="20" fill="#ffffff" rx="4" />
+  <text x="595" y="80" class="caption-text">VM, PVC</text>
+
+  <!-- 5. Harvester API -> KubeVirt -->
+  <path d="M 310,380 L 310,55 L 1420,55 L 1420,200" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" stroke-linejoin="round" />
+
+  <!-- 6. KubeVirt -> PostgreSQL VM -->
+  <path d="M 1420,270 L 1420,450" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" />
+
+  <!-- 7. Application -> PostgreSQL VM (caption: TLS 5432) -->
+  <path d="M 210,790 L 1420,790 L 1420,530" fill="none" stroke="#3A4040" stroke-width="2" marker-end="url(#arrow)" stroke-linejoin="round" />
+  <rect x="770" y="780" width="80" height="20" fill="#ffffff" rx="4" />
+  <text x="810" y="790" class="caption-text">TLS 5432</text>
+
+  <!-- BOXES -->
+
+  <!-- Tenant (GREY #B0B5B3) -->
+  <rect x="60" y="170" width="150" height="60" rx="10" ry="10" fill="#B0B5B3" />
+  <text x="135" y="200" class="box-title">Tenant</text>
+  <circle cx="60" cy="200" r="5" fill="#3A4040" />
+
+  <!-- Application (GREY #B0B5B3) -->
+  <rect x="60" y="760" width="150" height="60" rx="10" ry="10" fill="#B0B5B3" />
+  <text x="135" y="790" class="box-title">Application</text>
+  <circle cx="60" cy="790" r="5" fill="#3A4040" />
+
+  <!-- Harvester API (GREEN #00A685) -->
+  <rect x="270" y="380" width="160" height="80" rx="10" ry="10" fill="#00A685" />
+  <text x="350" y="420" class="box-title">Harvester API</text>
+
+  <!-- Manager Pod Components (BLUE #0070A8) -->
+
+  <!-- Controllers Column -->
+  <!-- Instance -->
+  <rect x="480" y="200" width="140" height="55" rx="10" ry="10" fill="#0070A8" />
+  <text x="550" y="227.5" class="box-title">Instance</text>
+
+  <!-- Backup -->
+  <rect x="480" y="285" width="140" height="55" rx="10" ry="10" fill="#0070A8" />
+  <text x="550" y="312.5" class="box-title">Backup</text>
+
+  <!-- Restore -->
+  <rect x="480" y="370" width="140" height="55" rx="10" ry="10" fill="#0070A8" />
+  <text x="550" y="397.5" class="box-title">Restore</text>
+
+  <!-- Harvester Client (Tall) -->
+  <rect x="770" y="200" width="150" height="225" rx="10" ry="10" fill="#0070A8" />
+  <text x="845" y="302.5" class="box-title">Harvester</text>
+  <text x="845" y="322.5" class="box-title">Client</text>
+
+  <!-- Right Side Components -->
+  <!-- KubeVirt (GREEN #00A685) -->
+  <rect x="1340" y="200" width="160" height="70" rx="10" ry="10" fill="#00A685" />
+  <text x="1420" y="235" class="box-title">KubeVirt</text>
+
+  <!-- PostgreSQL VM (PLUM #66184B) -->
+  <rect x="1340" y="450" width="160" height="80" rx="10" ry="10" fill="#66184B" />
+  <text x="1420" y="490" class="box-title">PostgreSQL VM</text>
+
+</svg>

@@ -9,7 +9,7 @@ Every DBInstance VM boots from a **baked image**: an Ubuntu VM image with all su
 
 ## Image catalog
 
-The catalog lives in `internal/catalog/baked_images.go` and is compiled into the operator binary. It can only change by shipping a new operator build. It has two maps.
+The catalog is compiled into the operator binary. It can only change by shipping a new operator build. It has two maps.
 
 | Map | Key | Meaning |
 | --- | --- | --- |
@@ -22,9 +22,6 @@ Registered revisions in v0.1.0:
 | --- | --- | --- | --- |
 | `ubuntu-2204-postgres-v20260515` | 22.04 | 15, 16, 17 | 17 |
 | `ubuntu-2404-postgres-v20260701` | 24.04 | 15, 16, 17, 18 | 17 |
-| `ubuntu-2404-postgres-v20260815` | 24.04 | 18 | 18 |
-
-The third revision is registered but not active: it simulates a PostgreSQL major going end-of-life and is not referenced by `LatestBakedImages`.
 
 Active streams in v0.1.0:
 
@@ -104,42 +101,9 @@ kubectl get dbinstance mydb -o jsonpath='{.status.currentImageRevision}{"\n"}{.s
 
 A rejected trigger is recorded in `status.lastAppliedRepaveTrigger`, so you must set a new value to retry.
 
-## Repave phases
-
-```mermaid
-stateDiagram-v2
-    [*] --> Available
-    Available --> Stopping: trigger differs from lastAppliedRepaveTrigger
-    Stopping: RepaveStopping
-    Stopping --> WaitingForTeardown: StopVM issued
-    WaitingForTeardown: RepaveWaitingForTeardown
-    WaitingForTeardown --> WaitingForTeardown: VMI still running (requeue 5s)
-    WaitingForTeardown --> Swapping: VMI gone
-    Swapping: swap OS disk, delete old PVC, regenerate cloud-init
-    Swapping --> Applied: RepaveApplied
-    Applied --> Starting: power step starts VM
-    Starting --> Available: DatabaseReady and Ready true
-    Available --> Rejected: not available / EOL
-    Rejected: RepaveNotAvailable or RepaveBlockedEOL
-    Rejected --> [*]
-```
-
-1. **Stopping** (`RepaveStopping`). `RepaveInProgress=True`, the VM `runStrategy` is set to Halted, `DatabaseReady=False`. Phase becomes `modifying`.
-2. **Waiting for teardown** (`RepaveWaitingForTeardown`). The step requeues every 5 s until the VMI is gone.
-3. **Swap and apply** (`RepaveApplied`). In one pass:
-   - the VM's `os-disk` claim is repointed to a new PVC named `pg-<name>-<uid8>-os-<image-object-name>`, created by Harvester from the new image;
-   - the old OS PVC name is written to `status.resources.pendingDeleteOSDiskPVCName`, the PVC is deleted, then the field is cleared. If the process is interrupted, the next reconcile retries the delete first;
-   - `status.resources.osDiskPVCName` and `status.currentImageRevision` are updated, and `ImageDrift` is set to `False / ImageUpToDate`;
-   - the cloud-init Secret is regenerated from the stored credentials and the resolved engine version;
-   - `status.lastAppliedRepaveTrigger` is set to the annotation value.
-4. **Restart.** The power step sees "desired running, declared Halted" and starts the VM. Cloud-init runs on the fresh OS disk.
-5. **Settle.** `RepaveInProgress` is removed only when `ImageDrift` is no longer `True` and the instance is `Ready` for the current generation. Phase returns to `available`.
-
-While a repave is in flight the instance reports phase `modifying`.
-
 ## Data preservation
 
-- The **data disk** (`pg-<name>-<uid8>-data`, mounted at `/var/lib/postgresql`) is not touched. Only the OS disk is replaced.
+- The **data disk** (`pg-<name>-<uid8>-data`, mounted at `/var/lib/postgresql`; for an instance created by a restore, `pg-<name>-restore-<uid8>-data`) is not touched. Only the OS disk is replaced.
 - On the new OS disk, the bootstrap script detects the existing data disk (filesystem present, `PG_VERSION` marker present) and keeps it. It never runs `mkfs` on a formatted disk and never copies the throwaway cluster over existing data.
 - The bootstrap script checks whether the master role already exists on the data disk (`ROLE_EXISTED`) before running its role setup, and the credentials are rebuilt from the same durable Secrets, not regenerated. See [credentials](/security/credentials).
 - The `engineVersion` does not change during a repave. The new image must support the same major.
@@ -150,7 +114,7 @@ See [storage](/operations/storage) for the disk layout.
 
 There is no rollback or abort command. Specifically:
 
-- The old OS PVC is deleted as part of the swap, so the previous image cannot be restored by the operator.
+- The old OS PVC is deleted as part of the swap, so the previous image cannot be restored by the operator. A [snapshot](/backup-restore/snapshots) taken earlier covers the OS disk too, but a restore only uses the data volume's snapshot.
 - Removing or changing the annotation does not stop an in-flight repave; the controller only compares it to `status.lastAppliedRepaveTrigger`.
 - Before the swap, the trigger has not been recorded yet, so a transient failure (for example a Harvester API error) is simply retried on the next reconcile; the VM stays halted until the swap completes or the instance is otherwise changed.
 - To recover from a bad image, ship an operator build whose catalog points the stream at a good revision and trigger another repave.
@@ -160,7 +124,7 @@ There is no rollback or abort command. Specifically:
 | Where | Field | Values during a repave |
 | --- | --- | --- |
 | `status.phase` | | `available`, then `modifying`, then `starting`, then `available` |
-| Condition `RepaveInProgress` | `reason` | `RepaveStopping`, `RepaveWaitingForTeardown`, `RepaveApplied` |
+| Condition `RepaveInProgress` | `reason` | `RepaveWaitingForSnapshotHold` (only if a backup is running), `RepaveStopping`, `RepaveWaitingForTeardown`, `RepaveApplied` |
 | Condition `ImageDrift` | `status` | `True` before, `False` after the swap |
 | Condition `DatabaseReady` | | `False` with the repave reason until PostgreSQL is back |
 | `status.currentImageRevision` | | Old revision, then new revision |
@@ -169,17 +133,3 @@ There is no rollback or abort command. Specifically:
 | `status.resources.pendingDeleteOSDiskPVCName` | | Briefly set, then empty |
 
 When the repave is rejected, `RepaveInProgress` is `False` with reason `RepaveNotAvailable` or `RepaveBlockedEOL`. Full condition reference: [status and conditions](/reference/status-and-conditions).
-
-:::info Verified against
-- `database/internal/catalog/baked_images.go`
-- `database/internal/ensure/repave.go`
-- `database/internal/ensure/defaults.go`
-- `database/internal/ensure/preflight.go`
-- `database/internal/ensure/vm.go`
-- `database/internal/harvester/typed_client.go` (`SwapVMOSDisk`, `DeletePVC`)
-- `database/internal/controller/status_conditions.go`
-- `database/internal/credentials/cloudinit.go`
-- `database/internal/config/defaults.go`
-- `database/api/v1alpha1/dbinstance_types.go`
-- `database/api/v1alpha1/dbinstance_conditions.go`
-:::

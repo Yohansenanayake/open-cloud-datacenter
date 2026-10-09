@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 500" width="1600" height="500">
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .text-shape { font-family: 'Poppins', 'Nunito', 'Segoe UI', system-ui, -apple-system, sans-serif; font-weight: 700; font-size: 16px; fill: #ffffff; text-anchor: middle; dominant-baseline: central; }
+      .text-label { font-family: 'Poppins', 'Nunito', 'Segoe UI', system-ui, -apple-system, sans-serif; font-weight: 700; font-size: 13px; fill: #555555; text-anchor: middle; dominant-baseline: central; }
+      .text-override { font-family: 'Poppins', 'Nunito', 'Segoe UI', system-ui, -apple-system, sans-serif; font-weight: 700; font-size: 13px; fill: #555555; text-anchor: middle; dominant-baseline: central; }
+
+      .flow-line { fill: none; stroke: #3A4040; stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; }
+      .override-line { fill: none; stroke: #B0B5B3; stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; }
+
+      .fill-blue { fill: #0070A8; }
+      .fill-plum { fill: #66184B; }
+      .fill-green { fill: #00A685; }
+      .fill-grey { fill: #B0B5B3; }
+    </style>
+
+    <marker id="arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#3A4040" />
+    </marker>
+
+    <marker id="arrow-grey" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#B0B5B3" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" width="100%" height="100%" />
+
+  <!-- ================= OVERRIDE INDICATOR ================= -->
+  <path class="override-line" marker-end="url(#arrow-grey)" d="M 80 140 L 870 140" />
+  <rect x="420" y="128" width="110" height="24" fill="#ffffff" />
+  <text class="text-override" x="475" y="140">later wins</text>
+
+  <!-- ================= FLOW LINES ================= -->
+  <!-- Defaults -> Config File -->
+  <path class="flow-line" marker-end="url(#arrow)" d="M 240 250 L 290 250" />
+
+  <!-- Config File -> Env Vars -->
+  <path class="flow-line" marker-end="url(#arrow)" d="M 450 250 L 500 250" />
+
+  <!-- Env Vars -> Flags -->
+  <path class="flow-line" marker-end="url(#arrow)" d="M 660 250 L 710 250" />
+
+  <!-- Flags -> Valid? -->
+  <path class="flow-line" marker-end="url(#arrow)" d="M 870 250 L 920 250" />
+
+  <!-- Valid? -> Run (Yes) -->
+  <path class="flow-line" marker-end="url(#arrow)" d="M 1000 195 L 1000 170 L 1220 170" />
+  <text class="text-label" x="1110" y="153">Yes</text>
+
+  <!-- Valid? -> Exit (No) -->
+  <path class="flow-line" marker-end="url(#arrow)" d="M 1000 305 L 1000 330 L 1220 330" />
+  <text class="text-label" x="1110" y="347">No</text>
+
+  <!-- ================= SHAPES ================= -->
+
+  <!-- 1. BLUE: Defaults -->
+  <rect class="fill-blue" x="80" y="220" width="160" height="60" rx="12" />
+  <text class="text-shape" x="160" y="250">Defaults</text>
+
+  <!-- 2. BLUE: Config File -->
+  <rect class="fill-blue" x="290" y="220" width="160" height="60" rx="12" />
+  <text class="text-shape" x="370" y="250">Config File</text>
+
+  <!-- 3. BLUE: Env Vars -->
+  <rect class="fill-blue" x="500" y="220" width="160" height="60" rx="12" />
+  <text class="text-shape" x="580" y="250">Env Vars</text>
+
+  <!-- 4. BLUE: Flags -->
+  <rect class="fill-blue" x="710" y="220" width="160" height="60" rx="12" />
+  <text class="text-shape" x="790" y="250">Flags</text>
+
+  <!-- 5. PLUM: Valid? (Diamond) -->
+  <polygon class="fill-plum" points="1000,195 1080,250 1000,305 920,250" />
+  <text class="text-shape" x="1000" y="250">Valid?</text>
+
+  <!-- 6. GREEN: Run -->
+  <rect class="fill-green" x="1220" y="140" width="160" height="60" rx="12" />
+  <text class="text-shape" x="1300" y="170">Run</text>
+
+  <!-- 7. GREY: Exit -->
+  <rect class="fill-grey" x="1220" y="300" width="160" height="60" rx="12" />
+  <text class="text-shape" x="1300" y="330">Exit</text>
+
+</svg>

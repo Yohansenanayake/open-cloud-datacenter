@@ -1,0 +1,5 @@
+{
+  "label": "Rancher UI extension",
+  "position": 4,
+  "link": { "type": "generated-index", "description": "Manage databases from the Rancher UI: create, connect, resize, update, back up, restore and delete." }
+}

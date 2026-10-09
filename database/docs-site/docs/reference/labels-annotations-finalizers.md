@@ -5,36 +5,13 @@ sidebar_position: 3
 
 # Labels, annotations, finalizers and Secrets
 
-Everything the operator reads or writes on Kubernetes objects, in the API group `dbaas.opencloud.wso2.com`.
+What the operator reads or writes on Kubernetes objects, in the API group `dbaas.opencloud.wso2.com`.
 
-## Finalizer
+## What you set
 
-| Key | Object | Written by | Purpose |
-| --- | --- | --- | --- |
-| `dbaas.opencloud.wso2.com/cleanup` | `DBInstance` | operator | Added on the first reconcile, before any child resource is created. Blocks deletion until the controller has torn down the Harvester resources and the operator-namespace Secrets. Removed only after teardown succeeds and `spec.deletionProtection` is `false`. |
-
-See [Lifecycle and deletion](/operations/lifecycle-and-deletion).
-
-## Labels
-
-| Key | Value | Applied to | Purpose |
-| --- | --- | --- | --- |
-| `dbaas.opencloud.wso2.com/instance` | the `DBInstance` name | VirtualMachine, VMI template (so each VMI), Secrets `pg-<name>-credentials`, `pg-<name>-connect`, `pg-<name>-cloudinit`, the operator-namespace Secrets `dbi-<uid>-internal` and `dbi-<uid>-tls`, the metrics Service, its Endpoints and the ServiceMonitor | Associates a child object with its instance. The VMI watch uses it on VirtualMachineInstances to map a VMI event back to the owning `DBInstance` in the same namespace. |
-| `dbaas.opencloud.wso2.com/role` | `primary` | VirtualMachine only | Marks the primary VM. Not read by the controller. |
-| `dbaas.opencloud.wso2.com/metrics` | `true` | metrics Service, its Endpoints | Selector label used by the ServiceMonitor (`matchLabels` of `metrics: "true"` and `instance: <name>`). |
-| `dbaas.opencloud.wso2.com/dbinstance-uid` | the `DBInstance` UID | the two operator-namespace Secrets | Cross-namespace objects cannot carry owner references, so this label is the backstop: on deletion the controller lists Secrets in the operator namespace with this label and deletes them, in addition to the refs recorded in `status.resources`. |
-
-Additional labels set on the ServiceMonitor: those configured under the operator's monitoring `serviceMonitorLabels` (default `release: prometheus`), so a Prometheus Operator selector can pick it up. See [Operator configuration](/configuration/operator-config) and [Monitoring](/monitoring).
-
-The sample manifests carry the user-owned labels `app.kubernetes.io/name: dbaas` and `app.kubernetes.io/managed-by: kustomize` on the `DBInstance`. The operator does not read them.
-
-## Annotations
-
-### On the DBInstance (written by you)
-
-| Key | Value | Purpose |
+| Where | Key | Purpose |
 | --- | --- | --- |
-| `dbaas.opencloud.wso2.com/repave-trigger` | any string | Requests a repave onto the catalog's current validated image revision. A repave is dispatched only when the value differs from `status.lastAppliedRepaveTrigger`. The controller never modifies or clears the annotation: set a fresh value (for example an RFC 3339 timestamp) for each new repave. The instance must be in phase `available`. |
+| `DBInstance` annotation | `dbaas.opencloud.wso2.com/repave-trigger` | Requests a repave onto the current database image. Set a **new value** each time (a timestamp works well). A repave starts only when the value differs from `status.lastAppliedRepaveTrigger`, and only when the instance is `available`. The operator never changes or clears it. |
 
 ```bash
 kubectl annotate dbinstance dbinstance-sample \
@@ -43,83 +20,53 @@ kubectl annotate dbinstance dbinstance-sample \
 
 See [Images and repave](/operations/images-and-repave).
 
-### On the VirtualMachine (written by the operator)
+## Finalizers
 
-| Key | Value | Purpose |
+Each blocks deletion until cleanup is finished. See [Lifecycle and deletion](/operations/lifecycle-and-deletion), [Snapshots](/backup-restore/snapshots) and [Restore](/backup-restore/restore).
+
+| Key | Object | Waits for |
 | --- | --- | --- |
-| `dbaas.opencloud.wso2.com/crash-loop-halted-vmi-uid` | UID of the halted VMI | Set when the controller halts the VM after repeated unplanned restarts. It lets reconciliation tell that VMI tearing down apart from a later out-of-band recovery VMI. Removed on recovery. |
-| `harvesterhci.io/volumeClaimTemplates` | JSON | Written for Harvester's control plane: describes the OS and data volume claims. Rewritten on repave when the OS disk is swapped. |
-| Harvester run-strategy annotation (`util.AnnotationRunStrategy` from the Harvester API) | `Always` | Makes Harvester's webhook confirm the operator's intended run strategy instead of overriding it. |
+| `dbaas.opencloud.wso2.com/cleanup` | `DBInstance` | The VM and other resources to be deleted (and `deletionProtection` to be `false`) |
+| `dbaas.opencloud.wso2.com/snapshot-cleanup` | `DBSnapshot` | The Harvester backup to be deleted, and restores reading the source to end |
+| `dbaas.opencloud.wso2.com/restore-cleanup` | `DBRestore` | An unfinished new database to be removed |
 
-### On the VM template (written by the operator)
+## Labels the operator adds
 
-| Key | Value | Purpose |
+| Key | On | Purpose |
 | --- | --- | --- |
-| `ovn.kubernetes.io/logical_switch` | the configured management logical switch (default `ovn-default`) | Placed on the VMI and launcher pod for Kube-OVN. Set only when the switch name is non-empty. |
+| `dbaas.opencloud.wso2.com/instance` | The VM and everything created for an instance | Links an object back to its `DBInstance` |
+| `dbaas.opencloud.wso2.com/dbinstance-uid` | The two operator-namespace Secrets | Lets deletion find them (they can't have an owner in another namespace) |
+| `dbaas.opencloud.wso2.com/metrics` | The metrics Service and Endpoints | Lets the ServiceMonitor select them |
+| `dbaas.opencloud.wso2.com/snapshot-origin` | `DBSnapshot` | `Automated` on scheduled snapshots. Missing means manual. |
+| `dbaas.opencloud.wso2.com/restore-uid` | The restore's data disk | Identifies the disk as this restore's |
+| `dbaas.opencloud.wso2.com/source-uid`, `backup-slot`, `snapshot-namespace` | Backup and restore locks | Internal bookkeeping |
 
-### On the tenant credentials Secret (written by the operator)
+The ServiceMonitor also carries the labels from the `serviceMonitorLabels` setting (default `release: prometheus`) so Prometheus selects it. See [Operator configuration](/configuration/operator-config).
 
-Set only when the password was copied from a user-provided Secret. A credentials Secret without them was generated by the controller. They never hold the password or anything derived from it.
+## Secrets the operator creates
 
-| Key | Value |
-| --- | --- |
-| `dbaas.opencloud.wso2.com/password-source-secret` | Name of the user's Secret that was accepted. |
-| `dbaas.opencloud.wso2.com/password-source-uid` | UID of that Secret at acceptance. |
-| `dbaas.opencloud.wso2.com/password-source-resource-version` | Its `resourceVersion` at acceptance. |
+`<uid>` is the instance's full UID.
 
-## Secrets
+| Secret | Namespace | Holds | Notes |
+| --- | --- | --- | --- |
+| `pg-<name>-credentials` | instance | `admin_user`, `admin_password` | Deleted with the instance. If it goes missing, `CredentialsLost` is reported. |
+| `pg-<name>-connect` | instance | host, port, database, JDBC URL, `sslmode`, `ca.crt` | **No password.** See [Connecting](/connecting). |
+| `pg-<name>-cloudinit` | instance | First-boot data | The sensitive part is wiped once the database is ready. The Secret stays, because the VM has it mounted. |
+| `dbi-<uid>-internal` | operator | Internal replication and metrics passwords | Not for tenants |
+| `dbi-<uid>-tls` | operator | The certificate authority and server certificate | Not for tenants. Only the CA certificate is published. |
 
-### Secrets the operator creates
-
-| Secret | Namespace | Type | Keys | Owner reference | Lifetime |
-| --- | --- | --- | --- | --- | --- |
-| `pg-<name>-credentials` | instance namespace | `Opaque` | `admin_user`, `admin_password` | `DBInstance` (controller) | Deleted with the instance. Durable: if it goes missing after provisioning, `CredentialsLost` is reported. |
-| `pg-<name>-connect` | instance namespace | `Opaque` | `host`, `port`, `dbname`, `jdbcUrl`, `sslmode` (`verify-ca`), `ca.crt` | `DBInstance` (controller) | Connection metadata with no password. See [Connecting](/connecting). |
-| `pg-<name>-cloudinit` | instance namespace | `Opaque` | `userdata`, `networkdata` | `DBInstance` (controller) | Ephemeral. Once PostgreSQL is ready, the controller replaces `userdata` with a no-op cloud-config (`#cloud-config` and `{}`) but keeps the object, because the running VMI keeps it mounted. |
-| `dbi-<uid>-internal` | operator namespace | `Opaque` | `repl_password`, `exporter_password` | none (cross-namespace) | Deleted by the finalizer using `status.resources.internalSecretRef` plus the `dbinstance-uid` label sweep. |
-| `dbi-<uid>-tls` | operator namespace | `kubernetes.io/tls` | `ca.crt`, `ca.key`, `tls.crt`, `tls.key` | none (cross-namespace) | Private CA and server certificate. Deleted like the internal Secret. Only the CA certificate is published, in the connection Secret. |
-
-`<uid>` is the full `DBInstance` UID. Names of the instance-namespace Secrets are derived from the instance name, so they are reserved: a user password Secret may not use them.
-
-### Secret the user provides
-
-| Secret | Type | Purpose |
-| --- | --- | --- |
-| any name in the instance namespace, referenced by `spec.credentials.passwordSource.secretRef` | `dbaas.opencloud.wso2.com/master-password` | Supplies the master password. The type is a guardrail against pointing at an unrelated Secret by mistake, not access control. DBaaS reads it once, never modifies or deletes it. |
-
-```bash
-kubectl create secret generic orders-db-password \
-  --type=dbaas.opencloud.wso2.com/master-password \
-  --from-file=password=./password.txt
-```
+These names are reserved. See [Credentials](/security/credentials).
 
 ## Other objects the operator creates
 
-| Object | Name | Namespace | Notes |
-| --- | --- | --- | --- |
-| VirtualMachine | `pg-<name>` | instance | Controller-owned. |
-| Data volume | `pg-<id>-data` | instance | `<id>` is the first 8 characters of the UID without dashes. Created by Harvester from the VM's volume claim templates. |
-| OS disk PVC | `pg-<id>-os`, or `pg-<id>-os-<image>` after a repave | instance | Tracked in `status.resources.osDiskPVCName`. |
-| Service | `pg-<name>-metrics` | instance | Headless and selectorless, port `metrics` (9187). Controller-owned. |
-| Endpoints | `pg-<name>-metrics` | instance | Pinned to the VM data-network IP. Controller-owned. |
-| ServiceMonitor | `pg-<name>-monitor` | instance | Path `/metrics`, port `metrics`. Controller-owned. |
+All are in the instance's namespace and are deleted with it.
 
-The controller watches (`Owns`) Secrets, Services, Endpoints, VirtualMachines and ServiceMonitors it owns, and VirtualMachineInstances through the `instance` label, so drift or deletion of those objects is repaired on the next reconcile.
+| Object | Name |
+| --- | --- |
+| VirtualMachine | `pg-<name>` |
+| Data disk | `pg-<id>-data` (`<id>` is the first 8 characters of the UID) |
+| OS disk | `pg-<id>-os`, or `pg-<id>-os-<image>` after a repave |
+| Metrics Service and Endpoints | `pg-<name>-metrics` |
+| ServiceMonitor | `pg-<name>-monitor` |
 
-:::info Verified against
-- `database/api/v1alpha1/dbinstance_types.go`
-- `database/internal/credentials/resolver.go`
-- `database/internal/credentials/passwordsource.go`
-- `database/internal/resource/builder.go`
-- `database/internal/resource/connection_secret.go`
-- `database/internal/resource/cloudinit_secret.go`
-- `database/internal/resource/metrics_service.go`
-- `database/internal/resource/metrics_endpoints.go`
-- `database/internal/resource/servicemonitor.go`
-- `database/internal/harvester/typed_client.go`
-- `database/internal/controller/dbinstance_controller.go`
-- `database/internal/controller/watches.go`
-- `database/internal/ensure/bootstrap_cleanup.go`
-- `database/internal/ensure/power.go`
-- `database/internal/ensure/repave.go`
-:::
+If one of these is deleted by hand, the operator puts it back on the next reconcile.

@@ -1,11 +1,11 @@
 ---
 title: FAQ
-sidebar_position: 10
+sidebar_position: 14
 ---
 
 # Frequently asked questions
 
-Answers describe what the v0.1.0 code does. Anything not implemented is stated as such and listed on the [Roadmap](/roadmap).
+Answers describe what the v0.1.0 code does. Anything not implemented is stated as such.
 
 ## General
 
@@ -15,7 +15,7 @@ A Kubernetes operator that provisions managed PostgreSQL on Harvester HCI. You c
 
 ### Is it production ready?
 
-No. v0.1.0 is an experimental release (chart and app version `0.1.0-experiment.2`) with API version `v1alpha1`. There is no backup, no high availability and no supported upgrade path between releases yet. See [Release notes](/release-notes).
+No. v0.1.0 is an experimental release (chart and app version `0.1.0-experiment.2`) with API version `v1alpha1`. Backup and restore exist (see below), but there is no high availability and no supported upgrade path between releases yet. See [Release notes](/release-notes).
 
 ### Which PostgreSQL versions are supported?
 
@@ -26,7 +26,7 @@ Versions come from the baked-image catalog compiled into the operator.
 | `22.04` | `ubuntu-2204-postgres-v20260515` | 15, 16, 17 | 17 |
 | `24.04` | `ubuntu-2404-postgres-v20260701` | 15, 16, 17, 18 | 17 |
 
-`databaseDefaults.osVersion` selects the stream for all new instances and defaults to `22.04`. A third revision, `ubuntu-2404-postgres-v20260815`, is in the catalog as a test fixture that simulates a PostgreSQL major going end of life. It supports only 18 and is not the active revision of any stream.
+`databaseDefaults.osVersion` selects the stream for all new instances and defaults to `22.04`.
 
 ### Which Harvester version is supported?
 
@@ -36,7 +36,7 @@ The repository documents testing on Harvester 1.7.1 on RKE2 v1.34.3. It is compi
 
 ### How do I install it?
 
-Through the Helm chart, normally wrapped by a Harvester `Addon`. See [Helm and Harvester Addon install](/installation/helm-addon) and [Known gotchas](/installation/known-gotchas).
+Through the Helm chart, normally wrapped by a Harvester `Addon`. See [Helm and Harvester Addon install](/installation/helm-addon).
 
 ### Does the operator import the PostgreSQL VM image?
 
@@ -62,7 +62,7 @@ For an Addon install, change `spec.version` on the `Addon`. Harvester performs a
 
 ### Which fields can I change after creation?
 
-Mutable: `dbInstanceClass`, `allocatedStorage` (grow only), `running` and `deletionProtection`. Immutable: `networkRef`, `dbName`, `masterUsername`, `port`, `storageType`, `staticNetwork`, `vmPassword`, `engineVersion` and `credentials`. Edits to immutable fields are rejected, some by the API server and the rest by the operator with `ImmutableFieldChanged`.
+Mutable: `dbInstanceClass`, `allocatedStorage` (grow only), `running` and `deletionProtection`. Immutable: `networkRef`, `dbName`, `masterUsername`, `port`, `storageType`, `vmPassword`, `engineVersion` and `credentials`. Edits to immutable fields are rejected, some by the API server and the rest by the operator with `ImmutableFieldChanged`.
 
 ### Can I resize a database without downtime?
 
@@ -82,7 +82,19 @@ Replacing the VM's OS disk with a newer baked image while keeping the data disk.
 
 ### Does it back up my database?
 
-No. The fields `s3BackupConfig`, `backupRetentionPeriod` and `preferredBackupWindow` exist in the schema but the reconciler does nothing with them. Take your own `pg_dump` backups.
+Yes, if you opt in when you create the instance. Set `spec.backup` and the operator takes one automated snapshot a day in a UTC window (default `02:00-03:00`) and keeps the newest seven. You can also take a manual snapshot at any time by applying a `DBSnapshot`. A snapshot is a Harvester `VirtualMachineBackup`. `spec.backup` cannot be added to an existing instance. See [Backup and restore](/backup-restore/overview).
+
+### How do I restore a backup?
+
+Apply a `DBRestore` that names a `Ready` `DBSnapshot` and gives the new instance's name, class, network and storage. The operator creates a new, independent `DBInstance` from the snapshot's data. It never overwrites an existing instance, and it works after the source instance was deleted. See [Restore](/backup-restore/restore).
+
+### Can I restore to a point in time?
+
+No. A restore returns the database as of the snapshot. Continuous WAL archiving is not configured by the operator in this release, and `DBRestore.spec.mode` accepts only `Snapshot`.
+
+### What survives if I delete the source instance?
+
+Manual snapshots do, and can still be restored. Automated snapshots are owned by their instance and are garbage-collected with it. See [Lifecycle and deletion](/operations/lifecycle-and-deletion#deletion-and-backups).
 
 ### Is there high availability or read replicas?
 
@@ -138,22 +150,4 @@ Yes, a thin HTTP gateway over the CRD, enabled by default on `:8080`. It forward
 
 ### Is there a UI?
 
-Not yet. A Rancher UI extension has been researched but is paused. See the [Roadmap](/roadmap).
-
-:::info Verified against
-- `database/README.md`
-- `database/INSTALL.md`
-- `database/CREDENTIALS.md`
-- `database/go.mod`
-- `database/api/v1alpha1/dbinstance_types.go`
-- `database/api/v1alpha1/dbinstance_conditions.go`
-- `database/internal/catalog/baked_images.go`
-- `database/internal/config/defaults.go`
-- `database/internal/config/flags.go`
-- `database/internal/ensure/health.go`
-- `database/internal/ensure/preflight.go`
-- `database/internal/ensure/repave.go`
-- `database/internal/ensure/credentials.go`
-- `database/internal/controller/dbinstance_controller.go`
-- `database/internal/harvester/typed_client.go`
-:::
+Yes. The Rancher UI extension lets you create, resize, back up, restore and delete databases. See [Rancher UI extension](/rancher-ui-extension).

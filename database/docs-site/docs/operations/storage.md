@@ -62,13 +62,3 @@ kubectl get pvc -n <namespace>
 ```
 
 Use your tenant namespace in place of the `<namespace>` placeholder.
-
-:::info Verified against
-- `database/internal/harvester/typed_client.go` (`buildPostgresVM`, `ResizeDataVolume`, `SwapVMOSDisk`)
-- `database/internal/ensure/vm.go`
-- `database/internal/ensure/resize.go`
-- `database/internal/ensure/defaults.go`
-- `database/internal/credentials/cloudinit.go`
-- `database/internal/config/defaults.go`
-- `database/api/v1alpha1/dbinstance_types.go`
-:::

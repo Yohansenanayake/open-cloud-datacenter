@@ -31,16 +31,17 @@ Release version: `v0.1.0` (experimental). The class names (`db.t3.medium`) and t
 
 - **One `DBInstance` = one VM = one PostgreSQL server.** The database runs inside a VM on Harvester, not in a pod.
 - **Declarative and idempotent.** A fixed, ordered chain of "ensure" steps re-observes real cluster state on every
-  reconcile and repairs drift, for example an out-of-band `kubectl delete vm`
-  (see [Reconcile pipeline](/architecture/reconcile-pipeline)).
+  reconcile and repairs drift, for example an out-of-band `kubectl delete vm`.
 - **Secure by default.** TLS with a per-instance CA, `hostssl ... scram-sha-256` only, and the master password is
   never placed in the connection Secret (see [Credentials](/security/credentials) and
   [TLS and access](/security/tls-and-access)).
 - **Lifecycle operations.** Stop/start (`spec.running`), cold resize of CPU/memory/storage, and OS-image "repave"
   onto a newer baked image (see [Resize and power](/operations/resize-and-power) and
   [Images and repave](/operations/images-and-repave)).
-- **Observable.** Conditions, a derived `status.phase`, and a per-instance metrics `Service` plus `ServiceMonitor`
-  (see [Monitoring](/monitoring)).
+- **Backup and restore.** Opt an instance into daily automated snapshots with retention (`spec.backup`) and take manual
+  ones with a `DBSnapshot`; restore any `Ready` snapshot into a new, independent instance with a `DBRestore`
+  (see [Backup and restore](/backup-restore/overview)).
+- **Observable.** Conditions, a derived `status.phase`, and a per-instance metrics `Service` plus `ServiceMonitor`.
 - **Optional REST gateway.** A thin HTTP layer over the CRD that forwards the caller's bearer token to the
   Kubernetes API server, so RBAC and audit are the same as `kubectl`. It is enabled by default on `:8080`.
 
@@ -49,17 +50,19 @@ Release version: `v0.1.0` (experimental). The class names (`db.t3.medium`) and t
 - Give tenants self-service PostgreSQL on a private Harvester cloud, using ordinary Kubernetes RBAC for access
   control.
 - Provision per-application databases from GitOps manifests.
+- Take scheduled and on-demand snapshots, and clone or recover a database from one into a new instance.
 - Run dev/test databases that can be stopped (storage preserved) and started again.
 
 ## What it is not
 
 DBaaS v0.1.0 is deliberately narrow. The CRD schema is broader than the implementation, so the following are **not**
-available yet (see the [Roadmap](/roadmap)):
+available yet:
 
 - High availability or replicas: `multiAZ` is reserved, no standby is created and `status.readReplicas` is not
   populated.
-- Backups: `backupRetentionPeriod`, `preferredBackupWindow` and `s3BackupConfig` are accepted, and the S3 settings are
-  written into the VM's bootstrap configuration, but no backup schedule, retention or restore runs.
+- Point-in-time recovery or continuous archiving. Backups are snapshots; a restore returns the database as of the
+  snapshot (see [what is not implemented](/backup-restore/overview#what-is-not-implemented)). Backup is opt-in when
+  the instance is created: `spec.backup` cannot be added later.
 - Parameter groups (`dbParameterGroupRef`) and `tags` propagation.
 - `manageMasterUserPassword` and `masterUserPasswordRef`: reserved and ignored. Use `spec.credentials` to bring your
   own password.
@@ -82,10 +85,3 @@ available yet (see the [Roadmap](/roadmap)):
 
 Installation is covered in [Helm and Addon install](/installation/helm-addon) and operator flags in
 [Operator configuration](/configuration/operator-config). To try it right away, go to the [Quickstart](/quickstart).
-
-:::info Verified against
-`database/README.md`, `database/INSTALL.md`, `database/internal/ensure/preflight.go`,
-`database/internal/catalog/baked_images.go`, `database/internal/config/defaults.go`,
-`database/internal/gateway/gateway.go`, `database/internal/controller/dbinstance_controller.go`,
-`database/api/v1alpha1/dbinstance_types.go`, `database/config/samples/dbaas_v1alpha1_dbinstance.yaml`.
-:::

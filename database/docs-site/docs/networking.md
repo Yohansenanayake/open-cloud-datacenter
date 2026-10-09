@@ -1,6 +1,6 @@
 ---
 title: Networking
-sidebar_position: 8
+sidebar_position: 10
 ---
 
 # Networking
@@ -13,7 +13,7 @@ The VM has a single virtio NIC named `data-net`, attached in **bridge mode** to 
 
 - tenant client traffic (PostgreSQL on `spec.port`, default 5432),
 - first-boot egress (the VLAN must have outbound connectivity, because cloud-init needs it),
-- the Prometheus scrape of the exporter on port 9187 (see [Monitoring](/monitoring)).
+- the Prometheus scrape of the exporter on port 9187.
 
 The IP of this interface is what the operator publishes as `status.endpoint.address`.
 
@@ -23,40 +23,24 @@ The IP of this interface is what the operator publishes as `status.endpoint.addr
 | --- | --- |
 | An existing NAD, referenced as `namespace/name` in `spec.networkRef` (pattern `^name/name$`, for example `iaas-net/vm-subnet-001`) | Attaches the VM's `data-net` NIC to that NAD and records it in `status.resources.nadName` |
 | A VLAN with a route for clients to reach the VM and outbound access for first boot | Reads the guest IP from the VMI status and publishes it |
-| A DHCP server on the VLAN, **or** a `spec.staticNetwork` block | Writes cloud-init network config: DHCP by default, or the static address if `staticNetwork` is set |
+| A DHCP server on the VLAN | Writes cloud-init network config so the VM gets its address by DHCP |
 
 The controller **does not create** NADs, VLANs, subnets, DHCP, firewalls or load balancers. If `networkRef` is empty the instance fails preflight with reason `NetworkRefMissing`.
 
-`spec.networkRef`, `spec.staticNetwork` and `spec.port` are immutable after creation.
+`spec.networkRef` and `spec.port` are immutable after creation.
 
 ## IP addressing
 
-### DHCP (default)
+The VM gets its address by DHCP, so the VLAN needs a reachable DHCP server. cloud-init configures `enp1s0` with `dhcp4: true`.
 
 ```yaml
 spec:
   networkRef: iaas-net/vm-subnet-001
 ```
 
-cloud-init configures `enp1s0` with `dhcp4: true`.
+### Custom DNS server
 
-### Static IP
-
-Use this on a VLAN without a reachable DHCP server. At least one nameserver is required, because the VM must resolve package mirrors.
-
-```yaml
-spec:
-  networkRef: iaas-net/vm-subnet-001
-  staticNetwork:
-    address: 192.168.40.50/24
-    gateway: 192.168.40.1
-    nameservers: [192.168.40.2]
-    searchDomains: [example.internal]
-```
-
-### DNS on Kube-OVN VPC subnets
-
-`spec.dnsServerIP` pins the VM's resolver (KubeVirt `dnsPolicy: None` with that nameserver). It is intended for Kube-OVN VPC subnets where the launcher pod's cluster resolver is unreachable from the VM. Leave it empty on ordinary VLANs.
+`spec.dnsServerIP` pins the VM's resolver (KubeVirt `dnsPolicy: None` with that nameserver). Use it only when the cluster resolver is unreachable from the VM. Leave it empty on ordinary VLANs.
 
 ## The published endpoint
 
@@ -84,14 +68,3 @@ The operator binary can also run a small HTTP gateway over the `DBInstance` API 
 | `POST /dbinstances/{name}/start`, `/stop` | Set `spec.running` |
 
 Each request needs `Authorization: Bearer <token>`. The gateway builds a Kubernetes client with the caller's own token, so authentication, RBAC and audit are enforced by the Kubernetes API server as the caller, never as the operator's ServiceAccount. The listener is plain HTTP (no TLS in the gateway itself); put it behind your own TLS-terminating ingress if you expose it.
-
-:::info Verified against
-- `database/api/v1alpha1/dbinstance_types.go`
-- `database/internal/harvester/typed_client.go`
-- `database/internal/credentials/cloudinit.go`
-- `database/internal/ensure/preflight.go`
-- `database/internal/ensure/health.go`
-- `database/internal/gateway/gateway.go`
-- `database/internal/config/defaults.go`
-- `database/cmd/main.go`
-:::

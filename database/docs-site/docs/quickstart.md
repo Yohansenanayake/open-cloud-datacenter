@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-sidebar_position: 3
+sidebar_position: 2
 ---
 
 # Quickstart
@@ -36,14 +36,15 @@ spec:
   manageMasterUserPassword: true
   # networkRef points at an existing Harvester Multus NAD (namespace/name).
   networkRef: default/vm-net-100
-  backupRetentionPeriod: 7
   deletionProtection: true
   running: true
 ```
 
 :::note
-`manageMasterUserPassword` and `backupRetentionPeriod` are accepted but not acted on in v0.1.0: the password is
-always generated (unless you set `spec.credentials`) and no backups run. `deletionProtection: true` will block
+`manageMasterUserPassword` is accepted but not acted on in v0.1.0: the password is
+always generated (unless you set `spec.credentials`). The sample has no `spec.backup`, so no backups are taken, and
+that cannot be added later; to opt in, set `spec.backup` when you create the instance
+(see [Backup and restore](/backup-restore/overview)). `deletionProtection: true` will block
 deletion later; step 5 shows how to lift it.
 :::
 
@@ -136,11 +137,3 @@ The finalizer then deletes the VM, the tenant Secrets, the metrics objects and t
 data and OS disk PVCs are not deleted by the operator itself; check with `kubectl get pvc -n demo`. See
 [Lifecycle and deletion](/operations/lifecycle-and-deletion). If you used your own password Secret, delete it
 yourself.
-
-:::info Verified against
-`database/config/samples/dbaas_v1alpha1_dbinstance.yaml`, `database/README.md`,
-`database/api/v1alpha1/dbinstance_types.go` (short name, print columns, `deletionProtection`, `running`),
-`database/internal/resource/connection_secret.go`, `database/internal/credentials/resolver.go`,
-`database/internal/ensure/preflight.go`, `database/internal/ensure/vm.go`,
-`database/internal/controller/dbinstance_controller.go`, `database/internal/catalog/baked_images.go`.
-:::
