@@ -218,10 +218,10 @@ Removing everything, including every image, is a separate deliberate act — REA
 
 Once WSO2 registry access exists:
 
-1. Bump `Chart.yaml`'s `version`/`appVersion` and the image tag together (lockstep, Discussion #303).
+1. Bump `Chart.yaml`'s `version`/`appVersion` and the image tag together (lockstep, Discussion #303), and add the version's section to [CHANGELOG.md](CHANGELOG.md).
 2. `git tag registry/vX.Y.Z && git push origin registry/vX.Y.Z`
 3. Run steps 2–3 against `ghcr.io/wso2/...` with `VERSION=X.Y.Z`.
-4. Create a GitHub Release for the tag and attach the chart archive as a release asset: `gh release upload registry/vX.Y.Z registry-operator-X.Y.Z.tgz`.
+4. Create a GitHub Release for the tag, with the version's CHANGELOG section as its text, and attach the chart archive as a release asset: `gh release upload registry/vX.Y.Z registry-operator-X.Y.Z.tgz`.
 5. Record the image and chart digests in the release notes. For a digest-pinned install, set `manager.image.repository` to `<registry>/registry-operator@sha256:<digest>`.
 
 ## Compatibility
