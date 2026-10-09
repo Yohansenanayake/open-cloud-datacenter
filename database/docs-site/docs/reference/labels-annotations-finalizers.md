@@ -49,7 +49,7 @@ The ServiceMonitor also carries the labels from the `serviceMonitorLabels` setti
 
 | Secret | Namespace | Holds | Notes |
 | --- | --- | --- | --- |
-| `pg-<name>-credentials` | instance | `admin_user`, `admin_password` | Deleted with the instance. If it goes missing, `CredentialsLost` is reported. |
+| `pg-<name>-credentials` | instance | `admin_user`, `admin_password` | Deleted with the instance. |
 | `pg-<name>-connect` | instance | host, port, database, JDBC URL, `sslmode`, `ca.crt` | **No password.** See [Connecting](/connecting). |
 | `pg-<name>-cloudinit` | instance | First-boot data | The sensitive part is wiped once the database is ready. The Secret stays, because the VM has it mounted. |
 | `dbi-<uid>-internal` | operator | Internal replication and metrics passwords | Not for tenants |
@@ -59,7 +59,7 @@ These names are reserved. See [Credentials](/security/credentials).
 
 ## Other objects the operator creates
 
-All are in the instance's namespace and are deleted with it.
+All are in the instance's namespace.
 
 | Object | Name |
 | --- | --- |
@@ -70,3 +70,14 @@ All are in the instance's namespace and are deleted with it.
 | ServiceMonitor | `pg-<name>-monitor` |
 
 If one of these is deleted by hand, the operator puts it back on the next reconcile.
+
+**On deletion,** the operator deletes the VM, the metrics objects, the Secrets above and the VM's **data and OS disks**. It marks the VM's disks for removal through Harvester (the `harvesterhci.io/removedPersistentVolumeClaims` annotation), waits for the VM to go (`DeletionWaitingForVM`), then deletes any disk left behind. Backups you keep as manual snapshots are not touched.
+
+## Annotations the operator writes
+
+| Key | On | Purpose |
+| --- | --- | --- |
+| `dbaas.opencloud.wso2.com/crash-loop-halted-vmi-uid` | The VM | Marks which VM instance was halted for crash-looping. Removed on recovery. Internal. |
+| `harvesterhci.io/removedPersistentVolumeClaims` | The VM | Set during deletion so Harvester removes the VM's disks along with it |
+
+The `dbaas.opencloud.wso2.com/role: primary` label on the VM is informational. The operator doesn't read it.

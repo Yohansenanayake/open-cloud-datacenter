@@ -3,6 +3,6 @@
   "position": 12,
   "link": {
     "type": "generated-index",
-    "description": "Exhaustive reference for the DBInstance custom resource."
+    "description": "Every field, status, condition and reason for the DBInstance, DBSnapshot and DBRestore resources, plus labels, annotations, Secrets and samples."
   }
 }

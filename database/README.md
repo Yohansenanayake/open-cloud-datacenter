@@ -1,165 +1,213 @@
-# dbaas
+# DBaaS
 
-**A Kubernetes operator for managed PostgreSQL on Harvester HCI / KubeVirt.**
+**Managed PostgreSQL on Harvester, from a Kubernetes operator.**
 
-One `DBInstance` custom resource maps to one VM with persistent storage,
-SSL-only PostgreSQL, and tenant-facing credentials. `kubectl apply` to a working `psql` connection in
-about 3 minutes.
+Create a `DBInstance` and the operator gives you a PostgreSQL database in its own virtual machine: persistent storage, TLS-only access, generated credentials, backups and restores. Manage it with `kubectl` or from the Rancher UI.
 
-## Prerequisites
+> Early release (v0.1.0). API: `dbaas.opencloud.wso2.com/v1alpha1`.
 
-- A [**Harvester HCI**](https://github.com/harvester/harvester/tree/v1.7) cluster (tested on 1.7.1 / RKE2 v1.34.3)
-- A Multus **NetworkAttachmentDefinition** for the VM's data network already
-  created on the cluster — the controller only attaches to `spec.networkRef`,
-  it never creates networks.
-- [**Rancher Monitoring**](https://docs.harvesterhci.io/v1.7/monitoring/harvester-monitoring)
-  enabled on the cluster (it bundles the Prometheus Operator and the
-  `ServiceMonitor` CRD) — per-instance monitoring resources are created
-  unconditionally.
-- `kubectl`, and a `KUBECONFIG` pointed at the Harvester cluster.
-- To build from source: **Go 1.25+**, `make`, and `docker buildx` for
-  cross-building the manager image.
+![DBaaS architecture](docs-site/static/img/Architecture%20overview.svg)
 
-## Quickstart
+**Who is this for?**
+- **Platform administrators** install the operator and prepare Harvester. Start with [Install](#2-install-the-operator).
+- **Developers and tenants** create and use databases. Start with [Create a database](#3-create-a-database).
+
+## Get started
+
+### 1. Check the requirements
+
+- A **Harvester** cluster (tested on 1.7.1 with RKE2 v1.34.3), and `kubectl` with its kubeconfig.
+- An existing Multus **NetworkAttachmentDefinition** for the database VM's network. The operator never creates networks. The network needs outbound internet access for first boot.
+- The **database images** uploaded to Harvester and `Active`. Without them, new instances stop with `OSImageNotFound`. See [Prerequisites](docs-site/docs/installation/prerequisites.md).
+- **Rancher Monitoring**, or the Prometheus Operator CRDs, because each database gets a `ServiceMonitor`.
+
+### 2. Install the operator
+
+Install with the Helm chart as a Harvester Addon. The steps are in [`INSTALL.md`](./INSTALL.md) and [Helm and Harvester Addon install](docs-site/docs/installation/helm-addon.md).
+
+You know it worked when the Addon is `AddonDeploySuccessful`, the manager pod is `Running`, and a test database reaches `available`.
+
+### 3. Create a database
+
+Only three fields are required:
+
+```yaml
+apiVersion: dbaas.opencloud.wso2.com/v1alpha1
+kind: DBInstance
+metadata:
+  name: orders-db
+  namespace: default
+spec:
+  dbInstanceClass: db.t3.medium
+  allocatedStorage: 50
+  networkRef: default/vm-net-100   # namespace/name of your network
+  backup: {}                       # optional: turns on backups. Can't be added later
+```
 
 ```sh
-# From this directory, with kubectl + docker buildx pointed at your Harvester kubeconfig:
+kubectl apply -f orders-db.yaml
+kubectl wait --for=condition=Ready dbinstance/orders-db --timeout=20m
+```
+
+> **Decide on backups now.** `spec.backup` can only be set when the database is created.
+
+More samples are in [`config/samples/`](config/samples/) and [Samples](docs-site/docs/reference/samples.md).
+
+### 4. Connect
+
+The connection details are in two Secrets in the same namespace. The password is only in the credentials Secret.
+
+```sh
+NAME=orders-db; NS=default
+HOST=$(kubectl get secret pg-$NAME-connect -n $NS -o jsonpath='{.data.host}' | base64 -d)
+PORT=$(kubectl get secret pg-$NAME-connect -n $NS -o jsonpath='{.data.port}' | base64 -d)
+DB=$(kubectl get secret pg-$NAME-connect -n $NS -o jsonpath='{.data.dbname}' | base64 -d)
+kubectl get secret pg-$NAME-connect -n $NS -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+USER=$(kubectl get secret pg-$NAME-credentials -n $NS -o jsonpath='{.data.admin_user}' | base64 -d)
+export PGPASSWORD=$(kubectl get secret pg-$NAME-credentials -n $NS -o jsonpath='{.data.admin_password}' | base64 -d)
+
+psql "host=$HOST port=$PORT dbname=$DB user=$USER sslmode=verify-ca sslrootcert=ca.crt"
+```
+
+Your machine must be on, or routed to, the database's network. More in [Connecting from an application](docs-site/docs/connecting.md). Prefer a UI? The Rancher extension has a **Connection** tab with the same details.
+
+## Everyday tasks
+
+```sh
+# Resize: change the class or grow the storage (the database restarts)
+kubectl patch dbinstance orders-db --type merge -p '{"spec":{"dbInstanceClass":"db.m5.large"}}'
+kubectl patch dbinstance orders-db --type merge -p '{"spec":{"allocatedStorage":100}}'
+
+# Stop and start (data is kept)
+kubectl patch dbinstance orders-db --type merge -p '{"spec":{"running":false}}'
+kubectl patch dbinstance orders-db --type merge -p '{"spec":{"running":true}}'
+
+# Update the OS image (when status shows an update is available). Use a new value each time
+kubectl annotate dbinstance orders-db dbaas.opencloud.wso2.com/repave-trigger="$(date +%s)" --overwrite
+
+# Delete (turn deletion protection off first, if it's on)
+kubectl patch dbinstance orders-db --type merge -p '{"spec":{"deletionProtection":false}}'
+kubectl delete dbinstance orders-db
+```
+
+**Back up and restore.** A manual snapshot, then a restore into a *new* database:
+
+```yaml
+apiVersion: dbaas.opencloud.wso2.com/v1alpha1
+kind: DBSnapshot
+metadata:
+  name: orders-db-before-upgrade
+spec:
+  sourceInstanceRef:
+    name: orders-db
+---
+apiVersion: dbaas.opencloud.wso2.com/v1alpha1
+kind: DBRestore
+metadata:
+  name: orders-db-restore-1
+spec:
+  snapshotRef:
+    name: orders-db-before-upgrade   # must be Ready
+  targetInstanceName: orders-db-restored
+  dbInstanceClass: db.t3.medium
+  networkRef: default/vm-net-100
+  allocatedStorage: 50
+```
+
+Apply the snapshot first and wait until it is `Ready` before applying the restore.
+
+**Something wrong?** Start with:
+
+```sh
+kubectl get dbinstance orders-db -o jsonpath='{range .status.conditions[*]}{.type}={.status} ({.reason}): {.message}{"\n"}{end}'
+```
+
+Then see [Troubleshooting](docs-site/docs/troubleshooting.md).
+
+## What you get
+
+| | |
+| --- | --- |
+| **Provisioning** | A KubeVirt VM and a data volume (Longhorn by default). 12 instance classes, `db.t3.micro` to `db.r5.2xlarge`. PostgreSQL 15 to 18, depending on the database image. |
+| **Secure by default** | TLS-only with SCRAM-SHA-256, a private CA per database, an admin user that is not a superuser, and no VM password login unless allowed. |
+| **Connection details** | A generated admin password, and a password-free connection Secret with host, port, JDBC URL and CA certificate. |
+| **Resize, start, stop** | Edit the resource. Resizing restarts the database. |
+| **Health protection** | Readiness checked inside the VM. Degraded databases are reported, and a VM that keeps crashing is halted. |
+| **OS updates** | The operator detects newer database images and applies them on request. Data stays. |
+| **Backup and restore** | Manual and daily snapshots, retention, backup limits, and restore into a new database, even after the source is deleted. |
+| **Safe deletion** | Deletion protection. |
+| **Monitoring** | A per-instance metrics Service and `ServiceMonitor`. |
+| **Rancher UI** | Create, connect, resize, update, back up, restore and delete from Rancher. See [Rancher UI extension](docs-site/docs/rancher-ui-extension/). |
+| **RBAC-native** | Admin, editor and viewer roles for the three resources aggregate into Kubernetes' built-in roles. |
+
+## Limits
+
+- **No point-in-time recovery.** A restore returns the data as of the snapshot.
+- **No password rotation.** The operator always generates the admin password.
+- **No standby or replicas.** `multiAZ` is reserved and does nothing.
+- **Restore always makes a new database.** There is no in-place restore.
+- **Some settings are fixed at creation:** the network, port, database name, admin user, storage class, PostgreSQL version, and whether backups are on.
+- Ignored fields: `multiAZ`, `dbParameterGroupRef`, `tags`, `manageMasterUserPassword`, `masterUserPasswordRef`.
+
+See the [DBInstance spec](docs-site/docs/reference/dbinstance-spec.md) for every field.
+
+## Documentation
+
+The full docs are in [`docs-site/`](docs-site/). To read them locally: `cd docs-site && npm install && npm start`.
+
+| I want to... | Go to |
+| --- | --- |
+| Try it step by step | [Quickstart](docs-site/docs/quickstart.md) |
+| Install the operator | [Installation](docs-site/docs/installation/) |
+| Use the Rancher UI | [Rancher UI extension](docs-site/docs/rancher-ui-extension/) |
+| Connect an application | [Connecting](docs-site/docs/connecting.md) |
+| Resize, update, delete | [Operations](docs-site/docs/operations/) |
+| Back up and restore | [Backup and restore](docs-site/docs/backup-restore/) |
+| Understand credentials and TLS | [Security](docs-site/docs/security/) |
+| Configure the operator | [Configuration](docs-site/docs/configuration/) |
+| Fix a problem | [Troubleshooting](docs-site/docs/troubleshooting.md) |
+| Look up a field | [API reference](docs-site/docs/reference/) |
+
+## For contributors
+
+| Folder | Contents |
+| --- | --- |
+| `api/` | The `DBInstance`, `DBSnapshot` and `DBRestore` types |
+| `cmd/`, `internal/` | The operator: controllers, reconcile steps, Harvester client |
+| `charts/` | The Helm chart |
+| `config/` | Kustomize manifests and samples |
+| `deploy/` | The Harvester Addon manifest |
+| `images/` | Database image build files |
+| `test/` | End-to-end test material |
+| `docs-site/` | The documentation site |
+
+```sh
+make manifests generate fmt vet build   # regenerate the CRDs and DeepCopy, build the manager
+make test                               # envtest-backed unit tests
+make docker-buildx IMG=...              # cross-build linux/amd64 and push
+make install                            # apply the CRDs with the current kubeconfig
+make deploy IMG=...                     # apply the manager and RBAC
+make undeploy && make uninstall         # remove everything
+```
+
+**Development install (kustomize).** This is a developer path. Don't combine it with the Helm install on the same cluster.
+
+```sh
 make docker-buildx IMG=<registry>/<name>:<tag>
 KUBECONFIG=<harvester-kubeconfig> make install
 KUBECONFIG=<harvester-kubeconfig> make deploy IMG=<registry>/<name>:<tag>
-
-kubectl apply -f config/samples/dbaas_v1alpha1_dbinstance.yaml
-kubectl get dbi -A -w
 ```
 
-`make install` only installs or updates CRDs; it does not update the controller.
-To deploy a published controller image, pass it to `make deploy`:
+`make install` installs only the CRDs. `make deploy IMG=...` also records the image in `config/manager/kustomization.yaml`.
 
-```sh
-make deploy IMG=<registry>/<name>:<tag>
-kubectl rollout status deployment/dbaas-controller-manager -n dbaas-system
-```
-
-`make deploy IMG=...` also writes that image into
-`config/manager/kustomization.yaml`, which direct `kubectl apply -k` commands use.
-
-~3 minutes from `apply` to `phase: available` on a stock Ubuntu cloud image;
-actual time depends on image pull and first-boot package-install speed.
-
-The above is the internal/team install path (kustomize + `make deploy`). For
-installing via Helm and a Harvester `Addon` instead — the path a real
-Rancher/Harvester administrator would use — see [`INSTALL.md`](./INSTALL.md).
-
-## Operator configuration
-
-The operator loads its typed JSON configuration through
-[`nil-go/konf`](https://github.com/nil-go/konf). The default deployment does
-not require a ConfigMap: it starts with built-in defaults and the flags in the
-Deployment manifest.
-
-Configuration precedence, from lowest to highest, is:
-
-```text
-built-in defaults < configuration file < environment variables < explicit flags
-```
-
-Environment variables use the `DBAAS_` prefix and `__` between hierarchy
-segments, for example
-`DBAAS_CONTROLLER__MAX_CONCURRENT_RECONCILES=4`. Flags use canonical dotted
-paths, for example `--controller.maxConcurrentReconciles=4`.
-
-Configuration changes require an operator Pod restart or Deployment rollout;
-live reload and cloud-backed providers are not enabled in the first release.
-
-An optional Kustomize overlay creates a `dbaas-operator-config` ConfigMap,
-mounts its `config.json` key inside the controller Pod at
-`/etc/dbaas/config.json`. The operator automatically loads that fixed path
-when the file exists:
+To load settings from a config file, edit [`config/overlays/operator-config/operator_config.yaml`](config/overlays/operator-config/operator_config.yaml) and apply the overlay. The install namespace is set once, by `namespace` in `config/overlays/operator-config/kustomization.yaml`, and it must exist first.
 
 ```sh
 kubectl create namespace dbaas-system
 kubectl apply -k config/overlays/operator-config
 ```
 
-This overlay inherits the image from `config/manager/kustomization.yaml`.
-To update an installation using this overlay, change the image there and
-reapply the overlay.
-
-Edit
-[`config/overlays/operator-config/operator_config.yaml`](config/overlays/operator-config/operator_config.yaml)
-before applying the overlay. The regular `make deploy` path continues to use
-`config/default`, creates the standard `dbaas-system` namespace automatically,
-and does not create or mount this ConfigMap.
-
-The installation namespace is Kubernetes deployment metadata, so it is not
-part of `config.json`. It is defined once by `namespace` in
-`config/overlays/operator-config/kustomization.yaml`. For example, to install
-in `dbaas-system-v2`, change that one field, create the namespace, and apply
-the same overlay:
-
-```sh
-kubectl create namespace dbaas-system-v2
-kubectl apply -k config/overlays/operator-config
-```
-
-Kustomize assigns the selected namespace to every namespaced resource,
-including the ConfigMap, Deployment, ServiceAccount, Service, Roles, and
-RoleBindings. The Deployment injects its namespace into `POD_NAMESPACE`
-through the Downward API, and the operator uses that value for its
-controller-private Secrets. Reusable manifests do not create a fixed
-Namespace resource; the target namespace must exist before applying the
-configuration overlay. The separate `config/default` installation wrapper
-does include the standard `dbaas-system` Namespace for a one-command default
-installation.
-
-## What it provisions
-
-Each `DBInstance` (`dbaas.opencloud.wso2.com/v1alpha1`, namespaced) creates:
-
-| Resource | Details |
-| --- | --- |
-| VM (KubeVirt) | One data-net NIC bridged onto the Multus NAD in `spec.networkRef` (must already exist). DHCP by default, or `spec.staticNetwork` for VLANs without one. Address published as `status.endpoint.address`. |
-| PostgreSQL version | `spec.engineVersion` (immutable) is resolved against the target baked image's supported major versions; `bootstrap.sh` drops the OS-default cluster and creates one on the requested version instead. Defaults to that baked image's `DefaultEngineVersion` when unset. |
-| `pg-<name>-credentials` (tenant Secret) | `admin_user` / `admin_password` only. |
-| `pg-<name>-connect` (tenant Secret) | `host`, `port`, `dbname`, `jdbcUrl`, `sslmode`, `ca.crt` — no password material. |
-| TLS | Per-instance CA + server cert. Private key material lives in a controller-private Secret in the operator namespace, never exposed to tenants. `pg_hba.conf` enforces `hostssl … scram-sha-256` only; the master role gets `CREATEDB`/`CREATEROLE` but not `SUPERUSER`. |
-| Monitoring | Per-instance Prometheus `Service` + `ServiceMonitor` (exporter install is pending). |
-
-`dbName` and `masterUsername` are validated against PostgreSQL identifier
-rules (`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`) at apply time, so invalid names are
-rejected up front instead of failing later inside cloud-init.
-
-## How it works
-
-- **Bounded ensure-step reconciler** — every reconcile walks the same fixed,
-  ordered chain of steps, each re-observing real cluster/provider state , and stopping at the first step
-  that isn't satisfied. It's idempotent and crash-safe via
-  `status.resources`. Conditions are the *reported outcome* of a pass.
-
-- **REST gateway** — a thin HTTP layer over the CRD (list/create/get/modify/
-  delete/start/stop). Every request forwards the caller's bearer token, so
-  the K8s API server enforces the same authn/RBAC/audit path as `kubectl` —
-  there's no separate DBaaS login.
-- **RBAC-native access control** — the scaffolded `dbinstance-admin/editor/
-  viewer` ClusterRoles aggregate into the built-in `admin`/`edit`/`view`
-  roles, so a Rancher project role (or any binding to those) is all a tenant
-  needs.
-
-## Current limitations
-
-Read replicas and Multi-AZ standby provisioning are not implemented. Restore
-supports `Snapshot` mode only.
-
-## Build / test / develop
-
-```sh
-make manifests generate fmt vet build   # regenerate CRD + DeepCopy, build manager
-make test                               # envtest-backed unit tests
-make docker-buildx IMG=...              # cross-build linux/amd64, push
-make install                            # apply CRD using current kubeconfig
-make deploy IMG=...                     # apply manager + RBAC
-make undeploy && make uninstall         # tear it all down
-```
+Operator settings (a config file at `/etc/dbaas/config.json`, `DBAAS_` environment variables and flags) are described in [Operator configuration](docs-site/docs/configuration/operator-config.md). Changes need an operator restart.
 
 ---
 

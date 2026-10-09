@@ -38,7 +38,7 @@ The user name isn't in this Secret. Take it from `admin_user` in `pg-<name>-cred
 
 ## In the Rancher UI
 
-Open the database and choose the **Connection** tab. It shows the endpoint, JDBC URL, a `psql` command, the username and password, and a **Download ca.crt** button. See [Rancher UI extension](/rancher-ui-extension/create-and-connect#connect-to-a-database).
+Open the database and choose the **Connection** tab. It shows the endpoint, JDBC URL, a `psql` command, the username and password, and a **Download ca.crt** button. See [Rancher UI extension](/rancher-ui-extension/connect).
 
 ## Connect with psql
 

@@ -103,6 +103,8 @@ In the Harvester UI, go to **Images** and choose **Create**:
 3. **Source:** upload the `.qcow2` file (or give a URL if you host the file somewhere Harvester can reach).
 4. Create it and wait until the image shows as ready.
 
+Optionally, add the labels `dbaas.opencloud.wso2.com/baked-image: "true"` and `dbaas.opencloud.wso2.com/os-version: "22.04"` (your OS stream) to the image when you create it, so it appears on the [Rancher UI extension's](/rancher-ui-extension/database-images) **Database Images** page; the operator itself doesn't need them.
+
 `virtctl image-upload` is the command-line alternative; the name and namespace rules are the same.
 
 :::tip[Upload fails around 700 MB]

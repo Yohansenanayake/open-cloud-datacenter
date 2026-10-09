@@ -25,7 +25,8 @@ Use the namespace filter at the top to choose which namespaces (tenants) you see
 
 | Task | Page |
 | --- | --- |
-| Create a database and connect to it | [Create and connect](/rancher-ui-extension/create-and-connect) |
+| Create a database | [Create a database](/rancher-ui-extension/create) |
+| Connect to it | [Connect to a database](/rancher-ui-extension/connect) |
 | Resize, start, stop and delete | [Manage a database](/rancher-ui-extension/manage) |
 | Update the operating system (repave) | [Update the OS](/rancher-ui-extension/update-os) |
 | Back up and restore | [Backup and restore](/rancher-ui-extension/backup-and-restore) |
@@ -36,4 +37,4 @@ Use the namespace filter at the top to choose which namespaces (tenants) you see
 - **No password rotation**, and you can't choose your own password.
 - **No point-in-time restore.** A restore returns the data as of the snapshot.
 - **Restore onto VLAN networks only.**
-- **Some settings are fixed at creation** (see [Create and connect](/rancher-ui-extension/create-and-connect)) and can't be edited later.
+- **Some settings are fixed at creation** (see [Create a database](/rancher-ui-extension/create)) and can't be edited later.

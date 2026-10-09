@@ -1,6 +1,6 @@
 ---
 title: Manage a database
-sidebar_position: 3
+sidebar_position: 4
 ---
 
 # Resize, start, stop and delete

@@ -1,6 +1,6 @@
 ---
 title: Backup and restore
-sidebar_position: 5
+sidebar_position: 6
 ---
 
 # Back up and restore

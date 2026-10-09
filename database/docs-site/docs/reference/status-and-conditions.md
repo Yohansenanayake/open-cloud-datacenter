@@ -35,9 +35,9 @@ kubectl wait --for=condition=Ready dbinstance/dbinstance-sample --timeout=15m
 | `backup.nextScheduledSnapshotTime` | When the next automated snapshot is due. See [Automated backups](/backup-restore/automated-backups). |
 | `grafanaUrl`, `prometheusTarget` | The instance's dashboard and metrics address. |
 | `restartCount`, `recentUnplannedRestarts` | Unplanned VM restart counts. Three restarts in a row halt the VM (see `CrashLoopHalted`). |
-| `resources` | The names of the objects the operator created for this instance (VM, disks, Secrets, Service, ServiceMonitor). Used for cleanup. |
+| `resources` | The names of the objects the operator created for this instance: `vmName`, `dataVolumeName`, `osDiskPVCName`, `nadName`, `adminCredentialsSecretName`, `connectionSecretName`, `cloudInitSecretName`, `metricsServiceName`, `serviceMonitor`, `internalSecretRef`, `privateTLSSecretRef`. Used for cleanup. |
 
-`status.credentials` and `status.readReplicas` are not used for anything you need to act on.
+`status.readReplicas` is declared but never written.
 
 ## Phases
 
@@ -72,7 +72,7 @@ Each condition has `type`, `status`, `reason`, `message` and `lastTransitionTime
 | `MonitoringReady` | The metrics Service, Endpoints and ServiceMonitor exist. |
 | `Degraded` | A running database is unhealthy. Reported only. The operator never restarts it. |
 | `CrashLoopHalted` | The VM was halted after repeated crashes. |
-| `InterventionRequired` | An administrator must act (crash-loop halt, or lost credentials). |
+| `InterventionRequired` | An administrator must act. Today this means a crash-loop halt. |
 | `DeletionBlocked` | Deletion is blocked or in progress. |
 | `ResizeInProgress` / `RepaveInProgress` | A resize or repave is running. Absent when idle. |
 | `ImageDrift` | The VM's image differs from the current one. Reported only. |
@@ -83,18 +83,41 @@ Each condition has `type`, `status`, `reason`, `message` and `lastTransitionTime
 | --- | --- |
 | `InvalidClass` | The `dbInstanceClass` isn't in the class list. Use a listed one. |
 | `NetworkRefMissing` | `spec.networkRef` is empty. |
-| `VMPasswordNotAllowed` | `spec.vmPassword` is set but the platform forbids it. Remove it. See [Policy switches](/configuration/policy-switches). |
 | `ImmutableFieldChanged` | A fixed field was changed after creation. Revert it, or recreate the instance. |
 | `OSImageInvalid` | The OS image or engine version isn't available. See [Prerequisites](/installation/prerequisites). |
 | `OSImageNotFound` | The image doesn't exist in Harvester. |
 | `OSImageNotReady` | The image is still importing. It retries by itself. |
 
-### `CredentialsReady`: reasons when it's `False`
+### `CredentialsReady`
 
-| Reason | What to do |
-| --- | --- |
-| `CredentialsLost` | A required Secret is missing for an existing instance. `InterventionRequired` becomes `True`. See [Credentials](/security/credentials#if-something-is-lost). |
-| `CredentialsResolveFailed` | A temporary error. It retries. |
+`True` (`CredentialsProvisioned`) when the credentials and certificates exist. `CredentialsCreated` appears briefly right after they are generated. `False` with `CredentialsResolveFailed` is a temporary error and the operator retries. See [Credentials](/security/credentials).
+
+### `Accepted`
+
+Reports whether the current spec is valid, separately from the health of a running database. A rejected edit can leave `Ready=True`.
+
+| Status | Reason | Meaning |
+| --- | --- | --- |
+| `True` | `SpecAccepted` | The spec passed preflight and no storage change was refused |
+| `False` | the failing `PreflightReady` reason, or `UnsupportedShrink` | See the `PreflightReady` table above |
+| `Unknown` | `ValidationPending` | Validation hasn't finished for this generation |
+| `False` | `UnknownValidationFailure` | A failure with an unrecognised reason. Read the message. |
+
+### `VMReady` and `PowerStateReady`
+
+| Condition | Status and reason | Meaning |
+| --- | --- | --- |
+| `VMReady` | `True`, `VMPresent` | The VM exists |
+| `VMReady` | `False`, `VMCreated` | The VM was just created. Normal. |
+| `VMReady` | `False`, `VMCreateFailed` | Creating the VM failed. The message has the error. It retries. |
+| `PowerStateReady` | `True`, `Running` / `Stopped` | The VM matches `spec.running` |
+| `PowerStateReady` | `False`, `Starting` / `StartWaitingForTeardown` | Starting, or waiting for the previous VM instance to go away |
+| `PowerStateReady` | `False`, `Stopping` | Stopping |
+| `PowerStateReady` | `False`, `CrashLoopHalted` | Power management is suspended after a crash-loop halt |
+
+### `CrashLoopHalted` and `InterventionRequired`
+
+`CrashLoopHalted` is `True` (`CrashLoopDetected`) after 3 unplanned restarts, each within 10 minutes of the previous one. The VM is stopped. `InterventionRequired` is then `True` with the same message, and `False` (`NoInterventionRequired`) otherwise. Recovery steps are in [Health checks](/operations/health-checks) and [Troubleshooting](/troubleshooting).
 
 ### `DatabaseReady`: reasons when it's `False`
 
@@ -136,6 +159,7 @@ It clears when the database is healthy, stopped, resizing or halted. See [Health
 | --- | --- |
 | `DeletionProtected` | `spec.deletionProtection` is `true`. Set it to `false`. |
 | `DeletionWaitingForSnapshot` | A backup of this instance is still running. Deletion waits. |
+| `DeletionWaitingForVM` | The VM is still being removed. Its data and OS disks are deleted along with it. |
 | `TeardownFailed` / `OperatorSecretCleanupFailed` | A cleanup step failed. It retries. |
 | `DeletionProgressing` (`status=False`) | Cleanup is in progress. |
 
@@ -168,7 +192,6 @@ The operator raises Kubernetes events (`kubectl get events --field-selector invo
 
 | Type | Reason | Meaning |
 | --- | --- | --- |
-| Warning | `CredentialsLost` | A required credential Secret is missing. |
 | Warning | `PostgresUnreachable`, `VMRestarting`, `GuestAgentDisconnected` | The instance became degraded, or the cause changed. |
 | Warning | `CrashLoopDetected` | The VM was halted for crash-looping. |
 | Normal | `Recovered` | The instance recovered after a crash-loop halt. |
