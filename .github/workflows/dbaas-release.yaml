@@ -1,0 +1,329 @@
+name: dbaas-release
+
+# Release the DBaaS operator and its Rancher UI extension together from a
+# dbaas/vX.Y.Z tag on the operators branch. All artifacts share the version:
+#
+#   operator image   ghcr.io/<owner>/dbaas-operator:X.Y.Z
+#   Helm chart       oci://ghcr.io/<owner>/charts/dbaas-operator  (version X.Y.Z)
+#   UI extension     ghcr.io/<owner>/ui-extension-database-ui:X.Y.Z  (Extension Catalog Image)
+#
+# and creates a DRAFT GitHub release with the chart, a ready-to-apply Harvester
+# Addon manifest, a release manifest (digests) and checksums. A maintainer
+# installs from the draft, then publishes it.
+#
+# Before tagging, the release PR must set the version in:
+#   database/charts/chart/Chart.yaml (version and appVersion)
+#   database-ui/package.json and database-ui/pkg/database-ui/package.json
+# and add the release notes: database/release-notes/X.Y.Z.md
+#
+# <owner> is the repository owner, so a fork rehearses the whole release
+# against its own ghcr.io namespace.
+
+on:
+  push:
+    tags:
+      - 'dbaas/v*'
+
+permissions: {}
+
+concurrency:
+  group: dbaas-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Check versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      owner: ${{ steps.version.outputs.owner }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag, versions and release notes
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+
+          version="${TAG#dbaas/v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || fail "Tag $TAG is not dbaas/vX.Y.Z"
+
+          git branch -r --contains "$GITHUB_SHA" | grep -qx '  origin/operators' \
+            || fail "$TAG is not on the operators branch"
+
+          chart_version=$(yq '.version' database/charts/chart/Chart.yaml)
+          chart_app=$(yq '.appVersion' database/charts/chart/Chart.yaml)
+          ui_root=$(jq -r .version database-ui/package.json)
+          ui_pkg=$(jq -r .version database-ui/pkg/database-ui/package.json)
+          for pair in "Chart.yaml version:$chart_version" "Chart.yaml appVersion:$chart_app" \
+                      "database-ui/package.json:$ui_root" "database-ui/pkg/database-ui/package.json:$ui_pkg"; do
+            [[ "${pair##*:}" == "$version" ]] || fail "$TAG does not match ${pair%:*} (${pair##*:})"
+          done
+
+          notes="database/release-notes/$version.md"
+          [[ -s "$notes" ]] || fail "Missing release notes: $notes"
+          ! grep -n 'TODO' "$notes" || fail "$notes still contains TODO"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+  test-operator:
+    name: Operator tests
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: database/go.mod
+          cache-dependency-path: database/go.sum
+
+      - name: Unit tests
+        run: cd database && make test
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
+
+      - name: Lint Helm chart
+        run: helm lint database/charts/chart
+
+  test-ui:
+    name: UI tests
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: database-ui
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: database-ui/.nvmrc
+          cache: yarn
+          cache-dependency-path: database-ui/yarn.lock
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Unit tests
+        run: yarn test:ci
+
+      - name: Build extension
+        run: yarn build-pkg database-ui
+
+  publish:
+    name: Publish artifacts and draft release
+    needs: [prepare, test-operator, test-ui]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the draft release
+      packages: write   # push to ghcr.io
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      REGISTRY: ghcr.io/${{ needs.prepare.outputs.owner }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set artifact names
+        run: |
+          {
+            echo "OPERATOR_IMAGE=$REGISTRY/dbaas-operator"
+            echo "CHART_REPO=oci://$REGISTRY/charts"
+            echo "UI_IMAGE=$REGISTRY/ui-extension-database-ui"
+          } >> "$GITHUB_ENV"
+          mkdir -p dist
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
+
+      - name: Log in to ghcr.io (Helm)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+
+      # Published versions are immutable: a mistake means a new version, not a re-push
+      - name: Refuse to overwrite a published version
+        run: |
+          taken=""
+          docker manifest inspect "$OPERATOR_IMAGE:$VERSION" > /dev/null 2>&1 && taken+=" $OPERATOR_IMAGE:$VERSION"
+          docker manifest inspect "$UI_IMAGE:$VERSION" > /dev/null 2>&1 && taken+=" $UI_IMAGE:$VERSION"
+          helm show chart "$CHART_REPO/dbaas-operator" --version "$VERSION" > /dev/null 2>&1 && taken+=" $CHART_REPO/dbaas-operator:$VERSION"
+          if [[ -n "$taken" ]]; then
+            echo "::error::Already published:$taken. Bump the version instead of re-releasing it."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and push the operator image
+        id: operator
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./database
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.OPERATOR_IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.title=dbaas-operator
+
+      # values.yaml leaves the image tag empty, so it follows appVersion
+      - name: Package and push the chart
+        id: chart
+        run: |
+          yq -i '.manager.image.repository = strenv(OPERATOR_IMAGE)' database/charts/chart/values.yaml
+          helm package database/charts/chart --destination dist
+          out=$(helm push "dist/dbaas-operator-$VERSION.tgz" "$CHART_REPO" 2>&1)
+          echo "$out"
+          digest=$(grep -o 'sha256:[0-9a-f]\{64\}' <<< "$out" | tail -1)
+          [[ -n "$digest" ]] || { echo "::error::No digest in helm push output"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: database-ui/.nvmrc
+          cache: yarn
+          cache-dependency-path: database-ui/yarn.lock
+
+      # Rancher's publish script builds the catalog image (Helm index, chart and
+      # bundle behind nginx). It does not stop on errors, so the push is checked.
+      - name: Build and push the UI extension image
+        id: ui
+        working-directory: database-ui
+        env:
+          OWNER: ${{ needs.prepare.outputs.owner }}
+        run: |
+          yarn install --frozen-lockfile
+          yarn publish-pkgs -c -p -r ghcr.io -o "$OWNER"
+          digest=$(docker buildx imagetools inspect "$UI_IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          [[ "$digest" == sha256:* ]] || { echo "::error::$UI_IMAGE:$VERSION was not pushed"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Write the Addon manifest, release manifest and checksums
+        env:
+          OPERATOR_DIGEST: ${{ steps.operator.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          UI_DIGEST: ${{ steps.ui.outputs.digest }}
+        run: |
+          # Harvester Addon: the repo template with the registry and version filled in
+          {
+            echo "# DBaaS operator $VERSION as a Harvester Addon. Apply on the Harvester cluster:"
+            echo "#   kubectl apply -f dbaas-operator-addon.yaml"
+            awk 'header && /^#/ { next } { header = 0; print }' header=1 \
+              database/deploy/harvester-addon/dbaas-operator/dbaas-operator.yaml \
+              | sed -e "s|<registry>|$REGISTRY|g" -e "s|<version>|$VERSION|g"
+          } > dist/dbaas-operator-addon.yaml
+          if grep -n '<registry>\|<version>' dist/dbaas-operator-addon.yaml; then
+            echo "::error::Unfilled placeholder in the Addon manifest"; exit 1
+          fi
+          yq 'true' dist/dbaas-operator-addon.yaml > /dev/null
+
+          crd_api=$(yq '.spec.group + "/" + (.spec.versions[] | select(.served) | .name)' \
+            database/config/crd/bases/dbaas.opencloud.wso2.com_dbinstances.yaml | head -1)
+          rancher_version=$(jq -r '.rancher.annotations["catalog.cattle.io/rancher-version"]' database-ui/pkg/database-ui/package.json)
+          cat > dist/dbaas-release-manifest.yaml <<EOF
+          release: $TAG
+          version: $VERSION
+          commit: $GITHUB_SHA
+          crdApiVersion: $crd_api
+          artifacts:
+            operatorImage: $OPERATOR_IMAGE:$VERSION@$OPERATOR_DIGEST
+            chart: $CHART_REPO/dbaas-operator:$VERSION@$CHART_DIGEST
+            uiExtensionImage: $UI_IMAGE:$VERSION@$UI_DIGEST
+          requires:
+            rancher: "$rancher_version"
+          EOF
+          yq 'true' dist/dbaas-release-manifest.yaml > /dev/null
+
+          (cd dist && sha256sum ./*.tgz ./*.yaml | sed 's|\./||' > SHA256SUMS)
+          cat dist/dbaas-release-manifest.yaml dist/SHA256SUMS
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATOR_DIGEST: ${{ steps.operator.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          UI_DIGEST: ${{ steps.ui.outputs.digest }}
+        run: |
+          {
+            cat "database/release-notes/$VERSION.md"
+            echo
+            echo "## Artifacts"
+            echo
+            echo "| Artifact | Reference | Digest |"
+            echo "|---|---|---|"
+            echo "| Operator image | \`$OPERATOR_IMAGE:$VERSION\` | \`$OPERATOR_DIGEST\` |"
+            echo "| Helm chart | \`$CHART_REPO/dbaas-operator\` version \`$VERSION\` | \`$CHART_DIGEST\` |"
+            echo "| UI extension (Extension Catalog Image) | \`$UI_IMAGE:$VERSION\` | \`$UI_DIGEST\` |"
+            echo
+            echo "Attached: the chart, \`dbaas-operator-addon.yaml\` (Harvester Addon), \`dbaas-release-manifest.yaml\` and \`SHA256SUMS\`."
+          } > dist/release-notes.md
+
+          prerelease=""
+          [[ "$VERSION" == *-* ]] && prerelease="--prerelease"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag $prerelease \
+            --title "DBaaS $VERSION" --notes-file dist/release-notes.md \
+            "dist/dbaas-operator-$VERSION.tgz" dist/dbaas-operator-addon.yaml \
+            dist/dbaas-release-manifest.yaml dist/SHA256SUMS
+
+      - name: Summary
+        run: |
+          {
+            echo "### DBaaS $VERSION: draft release created"
+            echo
+            echo "- \`$OPERATOR_IMAGE:$VERSION\`"
+            echo "- \`$CHART_REPO/dbaas-operator\` \`$VERSION\`"
+            echo "- \`$UI_IMAGE:$VERSION\`"
+            echo
+            echo "Install from the draft, verify, then publish it."
+          } >> "$GITHUB_STEP_SUMMARY"
