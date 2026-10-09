@@ -33,7 +33,7 @@ spec:
 
 - `repo: ""` must be present: the Addon schema requires the key, but `helm repo add` does not understand `oci://`, so it is left empty and the pull happens through `chart`.
 - The `experimental` label is what allows the Addon object to be deleted later.
-- Replace `REGISTRY` and `X.Y.Z` with your chart location and version. The chart in the repository is `0.1.0-experiment.2`.
+- Replace `REGISTRY` and `X.Y.Z` with your chart location and version. The chart in the repository is `0.1.0`. Each GitHub release also attaches this manifest with both already filled in (`dbaas-operator-addon.yaml`).
 
 Verify:
 

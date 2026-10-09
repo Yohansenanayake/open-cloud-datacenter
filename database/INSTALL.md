@@ -155,9 +155,9 @@ Not `Available`? `kubectl describe dbinstance dbaas-test-01 -n default` — the 
 
 ## Optional: operator metrics (Prometheus)
 
-Both monitoring settings are **off** by default, and the defaults work on any Harvester cluster.
+The `ServiceMonitor` CRD (`kubectl get crd servicemonitors.monitoring.coreos.com`), from Harvester's `rancher-monitoring` add-on, is a prerequisite either way: the operator creates a `ServiceMonitor` for every database (PostgreSQL metrics) and watches them. The two chart settings below are **off** by default and only affect the operator's own metrics.
 
-- **`prometheus.enable`** (default `false`) creates a `ServiceMonitor` for the operator's own controller metrics (reconciles, errors, work queues) — not PostgreSQL metrics. Enable it only when the cluster has the Prometheus operator's `ServiceMonitor` CRD, which Harvester's `rancher-monitoring` add-on provides (`kubectl get crd servicemonitors.monitoring.coreos.com`). Without the CRD the Addon install fails. Set it in the Addon manifest (step 8):
+- **`prometheus.enable`** (default `false`) adds a `ServiceMonitor` for the operator's own controller metrics (reconciles, errors, work queues). Enable it if you want those collected. Set it in the Addon manifest (step 8):
   ```yaml
     valuesContent: |-
       prometheus:
