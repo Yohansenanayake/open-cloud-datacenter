@@ -41,13 +41,7 @@ By default the VM has **no password login, and no SSH keys are installed**. Tena
 
 `spec.vmPassword` is the exception. It enables console and SSH password login for the VM's OS user. It is meant for **development and debugging only**, and can't be changed after creation.
 
-A platform administrator can forbid it with `security.rejectVMPassword`. Then a **new** instance that sets `vmPassword` is rejected with `VMPasswordNotAllowed`, and no VM is created. See [Policy switches](/configuration/policy-switches).
-
-```yaml
-# rejected when security.rejectVMPassword is true
-spec:
-  vmPassword: "dev-only-password"
-```
+Anyone who can create a `DBInstance` can set it, so leave it empty in production.
 
 Without `vmPassword`, the only ways into the VM are Harvester's own console and tools, which are outside the operator.
 

@@ -57,7 +57,6 @@ spec:
       args:
         - --operator.leaderElection.enabled=true
         - --observability.metrics.bindAddress=:8443
-        - --security.rejectVMPassword=true
 ```
 
 :::warning[Lists replace, they do not merge]

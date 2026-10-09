@@ -49,11 +49,11 @@ kubectl patch dbinstance mydb --type merge -p '{"spec":{"deletionProtection":fal
 
 The pending deletion then continues.
 
-**What gets deleted:** the VM, the metrics objects, and the credentials, connection and cloud-init Secrets, plus the internal Secrets in the operator namespace. A password Secret you supplied yourself (`spec.credentials`) is never changed or deleted.
+**What gets deleted:** the VM, the metrics objects, the credentials, connection and cloud-init Secrets, the internal Secrets in the operator namespace, and the VM's **data and OS disks**.
 
-**Check your disks after deleting.** The operator deletes the VM but does not explicitly delete its data and OS disks. Whether they are removed depends on Harvester and the StorageClass reclaim policy.
-- Run `kubectl get pvc` after a delete and clean up leftovers by hand.
-- To keep the data for sure, use a StorageClass with reclaim policy `Retain`.
+**Disks.** The operator marks the VM's disks for removal through Harvester, waits for the VM to be removed (`DeletionWaitingForVM`), then deletes any disk left behind.
+- Run `kubectl get pvc` after a delete to confirm nothing is left.
+- Whether the underlying volume is erased depends on the StorageClass reclaim policy. To keep the data, take a snapshot first, or use a StorageClass with reclaim policy `Retain`.
 - A new `DBInstance` with the same name gets new disks and never reattaches an old one.
 
 **Backups and deletion**

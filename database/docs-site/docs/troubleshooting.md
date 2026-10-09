@@ -56,7 +56,6 @@ kubectl get dbinstance NAME -n NS -o jsonpath='{.status.conditions[?(@.type=="Pr
 | --- | --- | --- |
 | `InvalidClass` | `dbInstanceClass` isn't in the class list | Use a listed class. See [DBInstance spec](/reference/dbinstance-spec). |
 | `NetworkRefMissing` | `networkRef` is empty | Set it to `namespace/name` of an existing network (`kubectl get network-attachment-definitions -A`). A wrong name passes this check and fails later, when the VM boots. |
-| `VMPasswordNotAllowed` | The platform forbids `vmPassword` | Remove `spec.vmPassword` and recreate the instance. See [Policy switches](/configuration/policy-switches). |
 | `ImmutableFieldChanged` | You changed a fixed field after creation (`networkRef`, `dbName`, `masterUsername`, `engineVersion`, `port`, `storageType`, `vmPassword`) | Revert it, or recreate the instance. |
 | `OSImageInvalid` | The OS stream isn't available, or the engine version isn't in the image | Use a supported `engineVersion`, or set `databaseDefaults.osVersion` to a validated stream (`22.04` or `24.04`). |
 | `OSImageNotFound` | The database image doesn't exist in Harvester | Upload it with the exact name and wait for it to become Active. See [Images and repave](/operations/images-and-repave). Then edit the spec or restart the operator. |
@@ -119,17 +118,6 @@ kubectl get events -n NS --field-selector reason=VMRestarting
 2. Start the VM yourself: `virtctl start pg-NAME -n NS` or use the Harvester UI.
 3. When the VM is running and healthy, the operator clears the halt on its own.
 
-## Credentials are lost (`CredentialsLost`)
-
-A required Secret (`pg-NAME-credentials`, or `dbi-UID-internal` or `dbi-UID-tls` in the operator namespace) is missing for a database that already exists. The operator won't regenerate it, because a new password wouldn't match. The database keeps running, and `InterventionRequired` is `True`.
-
-```sh
-kubectl get dbinstance NAME -n NS -o jsonpath='{.status.conditions[?(@.type=="CredentialsReady")].message}{"\n"}'
-kubectl -n dbaas-system get secrets -l dbaas.opencloud.wso2.com/dbinstance-uid=$(kubectl get dbinstance NAME -n NS -o jsonpath='{.metadata.uid}')
-```
-
-If `pg-NAME-credentials` is missing and you know the password, recreate it with keys `admin_user` and `admin_password`. Otherwise restore the Secret from a cluster backup. See [Credentials](/security/credentials#if-something-is-lost).
-
 ## Resize, power and repave
 
 **Resize** is a cold resize: the VM stops, changes, and starts again. See [Resize and power](/operations/resize-and-power).
@@ -182,11 +170,12 @@ kubectl get dbinstance NAME -n NS -o jsonpath='{.status.conditions[?(@.type=="De
 | `DeletionProtected` | Turn protection off: `kubectl patch dbinstance NAME -n NS --type merge -p '{"spec":{"deletionProtection":false}}'` |
 | `DeletionProgressing` | Cleanup is running. Wait. |
 | `DeletionWaitingForSnapshot` | A backup of this instance is still running. Wait, or delete that `DBSnapshot` (`kubectl get dbsnap -n NS`). |
-| `TeardownFailed` | Deleting the VM, monitoring objects or Secrets failed. It retries. Read the message, then `kubectl get vm,secret -n NS`. |
+| `DeletionWaitingForVM` | The VM is still being removed. Its data and OS disks are deleted along with it. Wait. |
+| `TeardownFailed` | Deleting the VM, disks, monitoring objects or Secrets failed. It retries. Read the message, then `kubectl get vm,pvc,secret -n NS`. |
 | `OperatorSecretCleanupFailed` | Deleting the operator-namespace Secrets failed. Check the operator's permissions. |
 
-:::warning
-**Check your disks after deleting.** The operator deletes the VM but doesn't delete the data and OS disks itself. Run `kubectl get pvc -n NS` and clean up leftovers. See [Lifecycle and deletion](/operations/lifecycle-and-deletion).
+:::tip
+The operator deletes the VM's data and OS disks along with the VM. To confirm nothing is left, run `kubectl get pvc -n NS`. Whether the underlying volume is erased depends on the StorageClass reclaim policy. See [Lifecycle and deletion](/operations/lifecycle-and-deletion).
 :::
 
 Removing the finalizer by hand skips cleanup and can leave the VM, disks and operator-namespace Secrets behind. Use it only as a last resort.

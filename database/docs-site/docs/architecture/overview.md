@@ -78,10 +78,8 @@ The controller is registered with `For(DBInstance)` plus:
 | `VirtualMachineInstance` | `Watches()` mapped by the `dbaas.opencloud.wso2.com/instance` label | VMIs are owned by the VM, not the `DBInstance`, so they are mapped by label. A predicate only passes create/delete, UID change, phase change, `Ready` or `AgentConnected` flips, and interface IP changes. |
 
 Steady state is event driven: a pass in which every step is satisfied writes nothing and requeues nothing. Timed
-requeues are used only while waiting (for example 10 s for an image still importing, 5 s while credentials are
-observed, 30 s while a user password Secret is missing). `maxConcurrentReconciles` defaults to 1.
-
-Secrets the user may fix (your own password Secret) are not watched, which is why the credentials step polls.
+requeues are used only while waiting (for example 10 s for an image still importing, and 5 s while credentials are
+observed). `maxConcurrentReconciles` defaults to 1.
 
 ## Finalizer and ownership
 

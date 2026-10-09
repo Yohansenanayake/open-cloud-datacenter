@@ -46,8 +46,7 @@ Every setting has a key such as `controller.maxConcurrentReconciles`. You can se
 ```json
 {
   "operator": { "leaderElection": { "enabled": true } },
-  "databaseDefaults": { "osVersion": "24.04", "storageClass": "longhorn" },
-  "security": { "rejectVMPassword": true }
+  "databaseDefaults": { "osVersion": "24.04", "storageClass": "longhorn" }
 }
 ```
 
@@ -61,7 +60,6 @@ Every setting has a key such as `controller.maxConcurrentReconciles`. You can se
 | `databaseDefaults.storageClass` | `longhorn` | Use a different storage class for database disks |
 | `controller.maxConcurrentReconciles` | `1` | Process more `DBInstance`s in parallel (raise for many tenants) |
 | `backup.maxConcurrent` | `4` | Limit how many backups run at once |
-| `security.rejectVMPassword` | `false` | Block password login to new database VMs |
 | `observability.monitoring.serviceMonitorLabels` | `{release: prometheus}` | Match your Prometheus `ServiceMonitor` selector |
 | `observability.grafana.baseURL` | `https://grafana.monitoring.svc` | Point per-instance Grafana links at your Grafana |
 | `logging.level` | `info` | Turn on `debug` logs when troubleshooting |
@@ -155,12 +153,6 @@ Applied when a `DBInstance` leaves the field out.
 | `logging.level` | `info` | `debug`, `info`, `warn`, `error`, `panic` |
 | `logging.stacktraceLevel` | `error` | same as `level` |
 | `logging.timeEncoding` | `rfc3339` | `epoch`, `millis`, `nano`, `iso8601`, `rfc3339`, `rfc3339nano` |
-
-### Security
-
-| Key | Default | Notes |
-| --- | --- | --- |
-| `security.rejectVMPassword` | `false` | Reject VM password login for new instances. See [Policy switches](/configuration/policy-switches). |
 
 ### Instance classes
 

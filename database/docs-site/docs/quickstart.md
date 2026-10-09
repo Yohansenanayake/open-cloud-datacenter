@@ -131,7 +131,6 @@ kubectl patch dbi dbinstance-sample -n demo --type merge -p '{"spec":{"deletionP
 kubectl delete dbi dbinstance-sample -n demo
 ```
 
-The finalizer then deletes the VM, the tenant Secrets, the metrics objects and the operator-namespace Secrets. The
-data and OS disk PVCs are not deleted by the operator itself; check with `kubectl get pvc -n demo`. See
-[Lifecycle and deletion](/operations/lifecycle-and-deletion). If you used your own password Secret, delete it
-yourself.
+The finalizer then deletes the VM, the tenant Secrets, the metrics objects, the operator-namespace Secrets and the
+VM's data and OS disks. To confirm nothing is left, run `kubectl get pvc -n demo`. See
+[Lifecycle and deletion](/operations/lifecycle-and-deletion).

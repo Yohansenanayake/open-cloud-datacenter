@@ -75,10 +75,10 @@ Fields that can be observed from the live cluster (VM name, disk names) are re-r
 ## Garbage collection and deletion
 
 1. The finalizer `dbaas.opencloud.wso2.com/cleanup` runs `TeardownAll`, which explicitly deletes the
-   `ServiceMonitor`, `Endpoints`, metrics `Service`, `VirtualMachine`, and the three tenant Secrets, then removes the
-   operator-namespace Secrets, then releases the finalizer.
+   `ServiceMonitor`, `Endpoints`, metrics `Service`, `VirtualMachine`, and the three tenant Secrets. It then removes the
+   VM's disks, removes the operator-namespace Secrets, and releases the finalizer.
 2. Controller owner references on same-namespace children let Kubernetes garbage collection remove anything left over.
-3. Objects you supplied are never deleted: the NAD, the Harvester image, and a password Secret referenced by
-   `spec.credentials.passwordSource`.
-4. The data and OS disk PVCs are not deleted by the operator. Check `kubectl get pvc -n NS` after deletion; this
-   behaviour is not verified in the code.
+3. Objects you supplied are never deleted: the NAD and the Harvester image.
+4. The data and OS disks are deleted along with the VM. The operator marks them for removal through Harvester, waits for
+   the VM to go (`DeletionWaitingForVM`), then deletes any disk left behind. Whether the underlying volume is erased
+   depends on the StorageClass reclaim policy.

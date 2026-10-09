@@ -85,7 +85,6 @@ manager:
   args:
     - --operator.leaderElection.enabled=true
     - --observability.metrics.bindAddress=:8443
-    - --security.rejectVMPassword=true
   envOverrides:
     DBAAS_LOGGING__LEVEL: debug
 prometheus:

@@ -22,7 +22,7 @@ kubectl get secret pg-orders-db-credentials -n tenant-acme -o jsonpath='{.data.a
 
 - **There is no password rotation.** The operator can't change the password of a running database. If you change it inside PostgreSQL (`ALTER ROLE`), update `admin_password` in `pg-<name>-credentials` yourself so the record stays correct.
 - **A repave keeps the password.**
-- **The operator never regenerates lost secrets.** A new password wouldn't match the running database. See "If something is lost" below.
+- **Credentials are generated once and reused.** Keep these Secrets and back them up. A replacement wouldn't match the running database.
 
 ## Secrets created for each instance
 
@@ -48,17 +48,16 @@ The status never contains the password.
 | `CredentialsReady` | Meaning |
 | --- | --- |
 | `True` | All good |
-| `False`, `CredentialsLost` | A required Secret is missing for an instance that already exists. See below. |
 | `False`, `CredentialsResolveFailed` | A temporary error. It retries. |
 
 See [Status and conditions](/reference/status-and-conditions).
 
-## If something is lost
+## If you lose a password or Secret
 
 | Situation | What to do |
 | --- | --- |
 | Forgot the password, instance is fine | Read `pg-<name>-credentials` |
-| `pg-<name>-credentials` is missing (`CredentialsLost`) | If you know the password, recreate the Secret with keys `admin_user` and `admin_password`. The operator continues on its own. Otherwise restore from a backup. |
+| `pg-<name>-credentials` was deleted | Restore it from a backup, or recreate it with keys `admin_user` and `admin_password` holding the password the database really uses |
 | `dbi-<uid>-internal` or `dbi-<uid>-tls` is missing | A platform admin must restore it from a cluster backup. |
 
 If no copy of the password exists, it can't be recovered. It can only be reset inside PostgreSQL, which needs a shell on the VM. That is possible only when the instance was created with `spec.vmPassword` (see [TLS and access](/security/tls-and-access)). There is no operator-driven password reset.

@@ -64,8 +64,7 @@ available yet:
   the instance is created: `spec.backup` cannot be added later.
 - Custom PostgreSQL parameter groups and resource tags.
 - Choosing your own master password. The operator always generates it.
-- Changing the password of a running database. The operator reports a changed source Secret but never alters the
-  database.
+- Changing the password of a running database. The operator never alters it.
 - Creating networks. The operator only attaches to an existing Multus `NetworkAttachmentDefinition`.
 - A single-namespace install: the manager watches `DBInstance`s cluster-wide.
 

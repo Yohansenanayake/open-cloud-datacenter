@@ -58,11 +58,8 @@ Only Harvester 1.7.1 has been exercised. Other versions are untested and unsuppo
 
 **Credentials and security**
 
-- Generated master password stored in `pg-NAME-credentials`, or a user-supplied password through `spec.credentials` with validation (length, encoding, reserved usernames, no line breaks).
-- Recorded password source and reporting of later changes (`PasswordSourceChanged`).
-- Refusal to regenerate durable credentials of a provisioned instance (`CredentialsLost`, `InterventionRequired`).
+- Generated master password stored in `pg-NAME-credentials`.
 - Password verification inside the VM during bootstrap, and redaction of the cloud-init payload once the database is up.
-- `security.rejectVMPassword` policy to refuse VM password login for new instances. See [Policy switches](/configuration/policy-switches).
 - Immutable-field protection through CEL rules and an operator check.
 
 **Operations and installation**
@@ -87,6 +84,5 @@ Only Harvester 1.7.1 has been exercised. Other versions are untested and unsuppo
 - The image catalog is compiled into the operator binary.
 - The NetworkAttachmentDefinition named by `networkRef` is not validated.
 - Single-namespace installs are not supported.
-- Whether data and OS disk PVCs are removed on instance deletion is not verified by the operator. Check after deleting.
 
 See [Troubleshooting](/troubleshooting) for problems you may hit.

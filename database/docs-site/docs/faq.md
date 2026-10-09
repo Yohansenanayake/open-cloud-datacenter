@@ -94,7 +94,7 @@ No. A restore returns the database as of the snapshot. Continuous WAL archiving 
 
 ### What survives if I delete the source instance?
 
-Manual snapshots do, and can still be restored. Automated snapshots are owned by their instance and are garbage-collected with it. See [Lifecycle and deletion](/operations/lifecycle-and-deletion#deletion-and-backups).
+Manual snapshots do, and can still be restored. Automated snapshots are owned by their instance and are garbage-collected with it. See [Lifecycle and deletion](/operations/lifecycle-and-deletion).
 
 ### Is there high availability or read replicas?
 
@@ -102,7 +102,7 @@ No. There is one VM per instance, with no standby or replicas. If the VM fails t
 
 ### What happens to my data when I delete a DBInstance?
 
-The VM, monitoring objects and the Secrets the operator created are deleted. Your own password Secret is never deleted. The operator does not delete the data and OS disk PVCs itself, and the code does not verify whether Harvester removes them with the VM, so check with `kubectl get pvc`. Set `spec.deletionProtection: true` to make deletion block until you turn it off. See [Lifecycle and deletion](/operations/lifecycle-and-deletion).
+The VM, the monitoring objects, the Secrets the operator created and the VM's data and OS disks are deleted. Automated snapshots are deleted with the instance. Manual snapshots are kept. Whether the underlying storage volume is erased depends on the StorageClass reclaim policy (use `Retain` to keep it). Set `spec.deletionProtection: true` to make deletion block until you turn it off. See [Lifecycle and deletion](/operations/lifecycle-and-deletion).
 
 ## Credentials and security
 
@@ -110,13 +110,13 @@ The VM, monitoring objects and the Secrets the operator created are deleted. You
 
 By default the operator generates it and stores it in the Secret `pg-NAME-credentials` in the instance namespace, keys `admin_user` and `admin_password`. You can't choose it yourself. See [Credentials](/security/credentials).
 
-### Can I change the password later by editing my Secret?
+### Can I change the password later?
 
-No. The password is read once at creation. A later change to your Secret does not change the database; the operator emits a `PasswordSourceChanged` warning and sets `status.credentials.sourceChanged`. Changing a password on a running database is not supported in v0.1.0.
+No. The operator generates the password once, and changing the password of a running database is not supported in v0.1.0. If you change it inside PostgreSQL yourself, update `admin_password` in `pg-NAME-credentials` so the record stays correct.
 
 ### I deleted a credential Secret. What now?
 
-If the database is already provisioned the operator will not regenerate it, because a new value would not match the running database. The instance shows `CredentialsReady=False` with reason `CredentialsLost` and `InterventionRequired=True`. See the recovery steps in [Troubleshooting](/troubleshooting).
+Don't delete these Secrets. The operator generates them once, and a replacement wouldn't match the running database. Restore `pg-NAME-credentials` from a backup, or recreate it with keys `admin_user` and `admin_password` holding the password the database really uses. The two `dbi-` Secrets in the operator namespace must be restored from a cluster backup. See [Credentials](/security/credentials).
 
 ### Is the connection encrypted?
 
@@ -124,7 +124,7 @@ The operator generates a per-instance CA and server certificate and the connecti
 
 ### Should I allow `vmPassword`?
 
-Only for development. `spec.vmPassword` gives console and SSH password login to the VM. Production installs should set `security.rejectVMPassword=true`, which rejects it for new instances. See [Policy switches](/configuration/policy-switches). The trade-off is that a hardened install has no way to log in to the VM through the operator.
+Only for development. `spec.vmPassword` gives console and SSH password login to the VM, and anyone who can create a `DBInstance` can set it. Leave it empty in production. Without it the VM has no password login and no SSH keys, so there is no way to log in to the VM through the operator. Do all administration as the master user over SQL.
 
 ## Operations
 
