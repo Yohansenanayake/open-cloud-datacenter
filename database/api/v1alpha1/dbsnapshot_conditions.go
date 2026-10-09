@@ -33,7 +33,7 @@ const (
 	ReasonSnapshotSourceDeleting       ConditionReason = "SourceDeleting"
 	ReasonSnapshotHoldWaiting          ConditionReason = "SnapshotHoldWaiting"
 	// ReasonSnapshotBackupQueued: admitted, waiting for a backup slot (the
-	// cluster-wide cap on backups in flight, design Phase 10).
+	// cluster-wide cap on backups in flight).
 	ReasonSnapshotBackupQueued ConditionReason = "BackupQueued"
 	// ReasonSnapshotBackupTimedOut: the backup didn't finish within
 	// backup.timeout of its creation; it was deleted and its slot freed.

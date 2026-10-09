@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # repave-e2e.sh — stage-based e2e test runner for DBaaS OS repave + teardown.
-# See P003-final-plan.md §10.4 for the test matrix (T1..T11, E1..E4) this
-# script implements. Rewritten against the current bounded-reconcile
-# architecture (internal/ensure step chain) — field/condition/reason names
-# here differ substantially from an earlier, monolithic-controller draft of
-# this script; see "Renamed/changed since M1" below before editing.
+# Exercises OS image replacement, recovery, concurrency, and teardown.
+# See test/README.md for setup and stage descriptions.
 #
 # Usage:
 #   NS=tenant-acme ID=test-img-deletion YAML=./test.yaml ./repave-e2e.sh stage1
@@ -39,41 +36,6 @@
 # stage7 (T10, concurrent repave / no PVC collision): needs a second
 # instance — set ID2/YAML2 (defaults: YAML2=$YAML with ID2 substituted for
 # metadata.name if YAML2 unset). Independent of $ID/stage1-3's state.
-#
-# Renamed/changed since an earlier (M1) draft of this script — if you're
-# diffing against that version, every one of these is intentional, not a
-# regression:
-#   .status.provisioningPhase        -> .status.phase (and values are
-#                                        lowercase: "available", not
-#                                        "Available" — see StatusAvailable
-#                                        etc. in dbinstance_types.go)
-#   "Failed" phase                   -> does not exist; StatusFailed is
-#                                        declared but never actually set by
-#                                        DerivePhaseSummary. A rejected spec
-#                                        (Terminal preflight) surfaces as
-#                                        "incompatible-parameters"
-#                                        (StatusIncompatibleParameters) via
-#                                        ConditionAccepted=False, not "failed".
-#   .status.appliedSpec.imageRevision -> .status.currentImageRevision
-#                                        (top-level field, decision #15 —
-#                                        moved out of AppliedSpec on purpose)
-#   condition type "OSUpdateAvailable"/
-#   condition type "PGVersionEOL"    -> merged into ONE condition type
-#                                        "ImageDrift", distinguished by
-#                                        .reason ("OSUpdateAvailable" /
-#                                        "EngineVersionEOL") — decision #9
-#   reason "RepaveBlockedPGVersionEOL" -> "RepaveBlockedEOL"
-#   reason "UnsupportedEngineVersion" (on new-instance rejection)
-#                                     -> "OSImageInvalid" on PreflightReady
-#   (nothing observable when repave is blocked)
-#                                     -> RepaveInProgress condition now goes
-#                                        False/<reason> on a blocked repave
-#                                        (a gap found and fixed while writing
-#                                        this script — see repave.go; before
-#                                        this fix, Result.Reason/Message from
-#                                        a blocked repave were silently
-#                                        dropped, since reconcileInstance only
-#                                        reads ControllerResult/Err)
 #
 # Env:
 #   NS       instance namespace                  (required)
@@ -334,7 +296,6 @@ spec:
   engineVersion: "${engine}"
   dbName: eoltest
   masterUsername: dbadmin
-  manageMasterUserPassword: true
   networkRef: ${netref}
   running: true
 YAML
@@ -386,7 +347,7 @@ stage1() {
     # bootstrap.
     db_wait_ready || die "baseline instance never accepted a master login"
     echo
-    # No apt-get should have run at boot for a baked image (§9/decision #18) —
+    # No apt-get should have run at boot for a baked image —
     # this script has no VM console access to grep cloud-init logs directly;
     # spot-check via `virtctl console` manually if you want to confirm that
     # part. What IS scriptable: the running server's actual major version.
@@ -415,7 +376,7 @@ stage1() {
     && pass "'-o wide' header includes IMAGEDRIFTREASON" || fail "'-o wide' header missing IMAGEDRIFTREASON column"
   # ConditionImageDrift is always written (repave.go: "Always written, never
   # removed"), so 'describe' shows it at baseline too, same as once drift
-  # exists — unlike M1's two condition types, there's no absent-until-drifted
+  # exists; there is no absent-until-drifted
   # state to wait for.
   kubectl describe dbinstance "$ID" -n "$NS" 2>/dev/null | grep -q "ImageDrift" \
     && pass "'kubectl describe' shows the ImageDrift condition at baseline" || fail "'kubectl describe' output missing ImageDrift"
@@ -677,7 +638,7 @@ stage4() {
   local id_default="${ID}-eol-default" result_default phase_default
   result_default=$(provision_probe "$id_default" "")
   phase_default="${result_default%%|*}"
-  [ "$phase_default" = "available" ] && pass "unset engineVersion provisions fine (defaults to highest supported, e.g. 18) — this is a deliberate deviation from M1, which hard-rejected an unset value" \
+  [ "$phase_default" = "available" ] && pass "unset engineVersion provisions with the catalog default" \
     || fail "unset engineVersion did not reach available (phase=$phase_default): ${result_default#*|}"
   if [ "$phase_default" = "available" ] && [ "${SKIP_DB:-0}" != "1" ]; then
     ID="$id_default" # temporarily redirect db_exec/server_major_version at the probe instance
@@ -731,7 +692,6 @@ spec:
   allocatedStorage: ${storage}
   dbName: badconfigtest
   masterUsername: dbadmin
-  manageMasterUserPassword: true
   networkRef: ${netref}
   running: true
 YAML

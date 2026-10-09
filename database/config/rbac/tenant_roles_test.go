@@ -14,11 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package rbac holds only this test: it guards the tenant-facing
-// ClusterRoles in this directory. Tenants (Rancher project roles) get
-// access to DBaaS kinds only through roles aggregated into the built-in
-// admin/edit/view ClusterRoles, so a CRD without them is invisible to
-// tenants (yohan-docs/known-gaps/tenant-rbac-missing-for-snapshots-and-restores.md).
+// Package rbac tests tenant ClusterRoles aggregated into the built-in
+// admin, edit, and view roles for all DBaaS resource kinds.
 package rbac
 
 import (
@@ -128,7 +125,7 @@ func TestEveryCRDHasAggregatedTenantRoles(t *testing.T) {
 }
 
 // Tenant roles never reach the hold and slot Leases that coordinate
-// backups, restores and repave (feature spec §6), nor anything outside the
+// backups, restores and repave, nor anything outside the
 // DBaaS API group.
 func TestTenantRolesGrantNothingOutsideTheDBaaSGroup(t *testing.T) {
 	paths, err := filepath.Glob("*_role.yaml")

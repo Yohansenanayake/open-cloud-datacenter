@@ -14,21 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package gateway exposes a thin HTTP REST layer over the DBInstance CRD.
-//
-// Every mutating request goes through the Kubernetes API server using the
-// caller's own credentials, not the manager's ServiceAccount: the caller
-// provides an `Authorization: Bearer <token>` header (typically a K8s
-// ServiceAccount token or an OIDC token the cluster accepts) and the gateway
-// builds a per-request controller-runtime client signed with that token.
-//
-// The K8s API server therefore enforces authentication, authorization (RBAC)
-// and audit on the caller's identity, exactly as if the caller had issued
-// the request via kubectl. The gateway never elevates beyond what the caller
-// is RBAC-authorized to do.
-//
-// Mutating requests return 202 Accepted; the controller advances the work
-// asynchronously and callers poll GET /dbinstances/{name} for status.
+// Package gateway exposes HTTP access to DBInstance resources. Requests use
+// the caller's bearer token so Kubernetes enforces the caller's RBAC and audit
+// identity. The gateway does not use the manager ServiceAccount for requests.
+// Mutating requests return 202 Accepted; clients poll instance status while
+// the controller reconciles asynchronously.
 package gateway
 
 import (

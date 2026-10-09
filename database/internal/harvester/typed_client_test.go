@@ -23,9 +23,8 @@ import (
 	kvfake "kubevirt.io/client-go/kubevirt/fake"
 )
 
-// mgmtNetInterface is the legacy dynamic-client's dial-probe NIC name
-// (removed in PR9 along with DialVMListener) — kept here only so the tests
-// below can assert it never appears on a TypedClient-built VM.
+// mgmtNetInterface names the removed management NIC. Tests verify that
+// new VMs contain only the supported data-network interface.
 const mgmtNetInterface = "mgmt-net"
 
 func testVMCreateParams() VMCreateParams {
@@ -465,10 +464,8 @@ func TestResolveVMImageDisplayNameReturnsEmptyOnNotFound(t *testing.T) {
 	}
 }
 
-// CreatePostgresVM no longer generates credentials/cloud-init (PR8 — that
-// moved to internal/credentials + internal/resource; the reuse-on-reentry
-// invariant is now tested there). It only builds the VM against an
-// already-provisioned cloud-init Secret name.
+// CreatePostgresVM uses the supplied cloud-init Secret. Credential creation
+// and reuse are tested in the credentials and resource packages.
 func TestTypedCreatePostgresVMUsesSuppliedCloudInitSecret(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(testTypedVMImage())
@@ -509,7 +506,6 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	client := newTestTypedClient(testTypedVMImage())
 	client.MgmtLogicalSwitch = "ovn-default"
 	params := testVMCreateParams()
-	params.DNSServerIP = "10.96.0.10/32"
 
 	vmName, err := client.CreatePostgresVM(ctx, params)
 	if err != nil {
@@ -524,8 +520,8 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if vm.Spec.Template.ObjectMeta.Annotations["ovn.kubernetes.io/logical_switch"] != "ovn-default" {
 		t.Fatalf("logical switch annotation = %q, want ovn-default", vm.Spec.Template.ObjectMeta.Annotations["ovn.kubernetes.io/logical_switch"])
 	}
-	if vm.Spec.Template.Spec.DNSPolicy != corev1.DNSNone {
-		t.Fatalf("dnsPolicy = %q, want None", vm.Spec.Template.Spec.DNSPolicy)
+	if vm.Spec.Template.Spec.DNSPolicy != "" {
+		t.Fatalf("dnsPolicy = %q, want unset for KubeVirt defaulting", vm.Spec.Template.Spec.DNSPolicy)
 	}
 	if vm.Spec.Template.Spec.Domain.Memory != nil && vm.Spec.Template.Spec.Domain.Memory.Guest != nil {
 		t.Fatalf("memory.guest is set before Harvester admission: %s", vm.Spec.Template.Spec.Domain.Memory.Guest.String())
@@ -534,8 +530,8 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if got := memoryLimit.String(); got != "4Gi" {
 		t.Fatalf("memory limit = %q, want 4Gi", got)
 	}
-	if got := vm.Spec.Template.Spec.DNSConfig.Nameservers; len(got) != 1 || got[0] != "10.96.0.10" {
-		t.Fatalf("nameservers = %v, want [10.96.0.10]", got)
+	if got := vm.Spec.Template.Spec.DNSConfig; got != nil {
+		t.Fatalf("dnsConfig = %+v, want nil for KubeVirt defaulting", got)
 	}
 	if got := len(vm.Spec.DataVolumeTemplates); got != 0 {
 		t.Fatalf("dataVolumeTemplates = %d, want 0 for Harvester-native volumeClaimTemplates path", got)

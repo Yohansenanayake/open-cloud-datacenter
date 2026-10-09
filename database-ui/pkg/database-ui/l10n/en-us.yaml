@@ -1,0 +1,346 @@
+product:
+  dbaas: DBaaS
+  dbaasManager: DBaaS
+
+typeLabel:
+  dbaas.opencloud.wso2.com.dbinstance: |-
+    {count, plural,
+      one { Database Instance }
+      other { Database Instances }
+    }
+  dbaas.opencloud.wso2.com.dbsnapshot: |-
+    {count, plural,
+      one { Snapshot }
+      other { Snapshots }
+    }
+  dbaas.opencloud.wso2.com.dbrestore: |-
+    {count, plural,
+      one { Restore }
+      other { Restores }
+    }
+
+dbaas:
+  images:
+    title: Database Images
+    upload: Upload Image
+    info: Database instances are created from these images. The operator only uses images in its configured namespace whose display name matches a version it knows.
+    forbidden: You do not have access to Harvester VM images on this cluster.
+    duplicate: 'Two or more images in {key} have the same name. If this is the image namespace of the operator, new database instances will fail. Delete the extra image.'
+    none: No database images on this cluster yet.
+    detail:
+      title: Database Image
+      notFound: 'Image {id} was not found. It may have been deleted.'
+      resourceName: Resource Name
+      fileName: Uploaded File
+      virtualSize: Virtual Size
+      description: Description
+      storage: Storage
+      replicas: Number of Replicas
+      staleReplicaTimeout: Stale Replica Timeout
+      migratable: Migratable
+      nodeSelector: Node Selector
+      diskSelector: Disk Selector
+      backend: Backend
+      labels: Labels
+      annotations: Annotations
+    delete: 'Delete {name}'
+    tableHeaders:
+      displayName: Display Name
+      osVersion: OS Version
+      size: Size
+      storageClass: Storage Class
+    state:
+      importing: Importing
+      uploading: Uploading
+      ready: Ready
+      failed: Failed
+    form:
+      title: Upload Database Image
+      info: Upload to the image namespace of the operator, and use the exact version name as the display name. You can type a name that is not in the list.
+      displayNameTooltip: The operator finds its image by this name, so it must match exactly.
+      namespaceTooltip: Defaults to the namespace that already holds database images.
+      nameTaken: 'An image named {name} already exists in {namespace}.'
+      source: Source
+      sourceUrl: Download from URL
+      sourceFile: Upload a file
+      url: Image URL
+      checksum: Checksum (SHA-512, optional)
+      checksumTooltip: When set, Harvester verifies the downloaded image against it.
+      uploading: Uploading the file. Keep this tab open until it finishes.
+      uploadAction: Upload
+      createAction: Create
+      working: Working...
+  restore:
+    stage:
+      Preparing: Preparing
+      RestoringVolume: Restoring Volume
+      StartingDatabase: Starting Database
+      Succeeded: Succeeded
+      Failed: Failed
+      Cancelling: Cancelling
+    actions:
+      restoreNew: Restore to New Instance
+      goToInstance: Go to Instance
+      retry: Retry
+    notCreated: not created yet
+    tableHeaders:
+      snapshot: Snapshot
+      target: New Instance
+    list:
+      noRows: There are no restores in the selected namespaces.
+    form:
+      snapshotSection: Snapshot
+      snapshotOption: '{id} · from {source} · {date}'
+      noSnapshots: There are no Ready snapshots to restore from.
+      inheritedHelp: The new instance inherits these from the snapshot. They cannot be changed.
+      instanceSection: New Instance
+      targetName: Instance Name
+      namespaceTooltip: A restore creates the new instance in the namespace of the snapshot.
+      storageTooltip: At least the size of the snapshot. It can be increased later but never reduced.
+      backupEnabled: Allow backups for the new instance
+      credentialsInfo: The new instance gets its own admin password (see its Connection tab). Database roles you created are restored as they were. The source instance and the snapshot are not changed.
+    validation:
+      targetExists: 'An instance named {name} already exists in this namespace.'
+    view:
+      timesOut: 'Times out {when} if it has not finished.'
+      restored: Restored Database
+    delete:
+      cancelWarning: 'This restore is still running. Deleting it cancels the restore and deletes the unfinished instance {target}.'
+      recordOnly: 'This only removes the restore record. Instance {target} is not affected.'
+      recordOnlyMany: This only removes the finished restore records. Their instances are not affected.
+    restoredFrom:
+      prefix: Restored from snapshot
+      ofInstance: of instance
+      byRestore: by restore
+  time:
+    inMinutes: '{count, plural, one {in about # minute} other {in about # minutes}}'
+    inHours: '{count, plural, one {in about # hour} other {in about # hours}}'
+    inDays: '{count, plural, one {in about # day} other {in about # days}}'
+  snapshot:
+    actions:
+      take: Take Snapshot
+    blocked:
+      noPermission: You do not have permission to create snapshots in this namespace.
+      backupDisabled: Backups were not enabled when this instance was created.
+      deleting: The instance is being deleted.
+      notAvailable: Snapshots can only be taken while the instance is Available.
+    dialog:
+      title: Take Snapshot
+      description: 'Take a manual snapshot of {instance}. Manual snapshots are kept until you delete them, even after the instance is deleted.'
+      name: Snapshot Name
+      take: Take Snapshot
+      taking: Taking...
+      successTitle: Snapshot started
+      successMessage: 'Snapshot {name} was created. It appears in the Snapshots list while the backup runs.'
+    create:
+      source: Database Instance
+      noEligible: No instance can be snapshotted right now. An instance needs backups enabled (chosen when it is created) and must be Available.
+      info: Manual snapshots are kept until you delete them, even after the instance is deleted. Automated snapshots follow the retention setting of their instance.
+    validation:
+      tooLong: 'Must be at most {max} characters.'
+      automatedName: Cannot end with -auto- followed by a date. That pattern is reserved for automated snapshots.
+    tableHeaders:
+      source: Source Instance
+      origin: Origin
+      size: Volume Size
+      progress: Progress
+      completed: Completed
+    origin:
+      label: Filter by origin
+      all: All origins
+      manual: Manual
+      automated: Automated
+    list:
+      noRows: There are no snapshots in the selected namespaces.
+    detail:
+      started: Started
+      contents: Backed-up Database
+    backups:
+      disabled: Backups were not enabled when this instance was created, and they cannot be turned on later. To back up this data, restore it into a new instance with backups enabled, or create a new instance.
+      nextScheduled: Next Automated Snapshot
+      snapshots: Snapshots
+      none: No snapshots have been taken of this instance yet.
+      forbidden: You do not have access to snapshots in this namespace.
+    sourceDeleted: deleted
+    completed: Completed
+    delete:
+      warning: Deleting a snapshot permanently removes its backup data, so you can no longer restore from it. If a restore from this instance is running, the deletion waits until it finishes.
+      warningAutomated: Deleting an automated snapshot permanently removes its backup data. Older automated snapshots are also removed by the retention setting of their instance. If a restore from this instance is running, the deletion waits until it finishes.
+  manager:
+    clusters:
+      label: Clusters
+      title: DBaaS Clusters
+      description: Harvester clusters where you can manage databases.
+      none: No clusters with DBaaS are available to you.
+      manage: Manage
+      retry: Retry
+      actions: 'Actions for {name}'
+      tableHeaders:
+        harvesterVersion: Harvester Version
+        kubernetesVersion: Kubernetes Version
+        apiVersion: DBaaS API Version
+      unavailable: Rancher reports this cluster as not connected, so DBaaS could not be checked.
+      error: 'Could not check this cluster for DBaaS: {message}'
+      status:
+        available: Available
+        unavailable: Unavailable
+        error: Error
+  instance:
+    actions:
+      start: Start
+      stop: Stop
+      connection: Connection Details
+      enableDeletionProtection: Turn On Deletion Protection
+      disableDeletionProtection: Turn Off Deletion Protection
+    stop:
+      title: '{count, plural, one {Stop database instance?} other {Stop # database instances?}}'
+      attempting: You are about to stop
+      warning: The database VM shuts down and clients cannot connect until you start it again. Storage and data are kept, and automated snapshots are skipped while it is stopped.
+      protip: Tip - hold Shift while clicking Stop to skip this confirmation.
+      stopping: Stopping...
+    delete:
+      protected: '{name} has deletion protection on. To delete it, first choose Turn Off Deletion Protection in its action menu.'
+      protectedMany: '{names} have deletion protection on. Turn it off in their action menus first, or deselect them.'
+      protectedHint: Turn off deletion protection to let the deletion finish. A deletion that has started cannot be cancelled.
+      warning: This permanently deletes the database, its data and its credentials. This cannot be undone.
+      warningWithBackups: This permanently deletes the database, its data, its credentials and its automated snapshots. Manual snapshots are kept. This cannot be undone.
+      snapshotTip: To keep a copy, take a snapshot first.
+      snapshotTipMany: To keep copies, take a snapshot of each instance first.
+      deletingBanner: This database instance is being deleted.
+      blockedBanner: 'Deletion cannot finish: {message}'
+    events:
+      resource: Resource
+      date: Date
+      none: There are no events for this database instance.
+      forbidden: You do not have access to Events in this namespace.
+      source:
+        instance: Database Instance
+        vm: VM
+        pod: Pod
+        disk: Disk
+    connection:
+      notReady: Connection details appear once the database has an endpoint.
+      secretNotReady: The operator has not created this Secret yet.
+      connectionForbidden: You do not have access to the connection Secret, so only the endpoint from the instance status is shown.
+      passwordForbidden: You do not have access to the credentials Secret in this namespace.
+      loadError: Could not load the connection details.
+      retry: Retry
+      endpoint: Endpoint
+      host: Host
+      port: Port
+      dbName: Database
+      sslMode: SSL Mode
+      jdbcUrl: JDBC URL
+      psql: psql
+      credentials: Admin Credentials
+      username: Username
+      password: Password
+      show: Show
+      hide: Hide
+      copy: Copy
+      copied: Copied
+      caCert: CA Certificate
+      caCertDescription: Clients that verify the server certificate (SSL mode verify-ca or verify-full) need this CA certificate.
+      downloadCa: Download ca.crt
+    form:
+      tabs:
+        connection: Connection
+        basics: Basics
+        database: Database
+        network: Network
+        backup: Backup
+        advanced: Advanced
+        events: Events
+      instanceClass: Instance Class
+      instanceClassTooltip: Sets the CPU and memory of the database VM. You can also type a class name that your operator configuration defines.
+      classOption: '{name} ({cpu} vCPU, {memory} GiB, {connections} connections)'
+      engineVersion: PostgreSQL Version
+      engineVersionTooltip: Cannot be changed after the instance is created.
+      engineDefault: Operator default
+      engineOption: 'PostgreSQL {version}'
+      allocatedStorage: Storage
+      allocatedStorageTooltip: Size of the data volume. It can be increased later but never reduced.
+      storageClass: Storage Class
+      storageClassTooltip: Cannot be changed after the instance is created.
+      storageClassDefault: Operator default
+      dbName: Database Name
+      dbNameTooltip: Initial database. Lowercase letters, digits and underscores, starting with a letter or underscore. Cannot be changed after the instance is created.
+      dbNamePlaceholder: 'Defaults to {name}'
+      masterUsername: Admin Username
+      masterUsernameTooltip: Lowercase letters, digits and underscores. The names postgres and postgres_exporter, and names starting with pg_, are reserved. Cannot be changed after the instance is created.
+      port: Port
+      defaultPlaceholder: 'Defaults to {value}'
+      credentialsInfo: The operator generates the admin password and stores it in a Secret in the same namespace as the instance. See the Connection tab once the instance is available.
+      network: Network
+      networkTooltip: Existing Harvester network the database VM attaches to. Cannot be changed after the instance is created.
+      networkPlaceholder: namespace/name
+      vlanOnly: Only VLAN networks are offered. Overlay (Kube-OVN) networks are not supported yet.
+      networkInfo: The network must give the VM internet access during provisioning so it can install packages.
+      backupEnabled: Allow backups for this instance
+      backupEnabledDescription: Needed for any snapshot, manual or automated. You can only choose this when the instance is created.
+      automatedBackupEnabled: Automated daily snapshots
+      automatedBackupDescription: You can turn this on or off at any time. Manual snapshots work either way.
+      backupWindow: Backup Window (UTC)
+      backupWindowTooltip: 'Time range for the daily snapshot, e.g. 02:00-03:00.'
+      retainCount: Snapshots to Keep
+      retainCountTooltip: Number of the newest automated snapshots to keep. Older ones are deleted.
+      deletionProtection: Deletion protection
+      deletionProtectionDescription: While enabled, the operator refuses to delete this instance.
+      resizeWarning: Changing the instance class or storage size stops and restarts the database, so it will be briefly unavailable.
+    validation:
+      required: Required
+      nameTooLong: 'Must be at most {max} characters, because the operator adds a prefix and suffix to name the objects it creates.'
+      dnsLabel: Must contain only lowercase letters, digits and hyphens, and start and end with a letter or digit.
+      storageMin: 'Must be a whole number of at least {min} GiB.'
+      pgIdentifier: Must start with a lowercase letter or underscore and contain only lowercase letters, digits and underscores (max 63).
+      reservedDBName: 'Cannot be a built-in PostgreSQL database ({names}).'
+      reservedUsername: Cannot be postgres or postgres_exporter, or start with pg_.
+      port: Must be a whole number between 1 and 65535.
+      backupWindow: 'Must be a UTC time range like 02:00-03:00.'
+      retainCount: Must be a whole number of at least 1.
+    list:
+      noRows: There are no database instances in the selected namespaces.
+    state:
+      detail: Show state details
+      pendingChanges: Spec changes have not been applied by the operator yet.
+    image:
+      title: OS Image
+      revision: Image Revision
+      statusLabel: Status
+      details: Details
+      since: Since
+      apply: Apply OS Update
+      retry: Retry
+      summary:
+        osUpdate: 'Update from {current} to {target}.'
+        eol: 'The new image {target} supports PostgreSQL {supported}, but not {version}.'
+        upToDate: 'Running the current image {current}.'
+      status:
+        upToDate: Up to date
+        osUpdate: OS update available
+        eol: PostgreSQL version not supported
+        unknown: Unknown
+        requested: Update requested
+        updating: Updating
+      blocked:
+        noPermission: You do not have permission to update this instance.
+        noUpdate: There is no OS update to apply.
+        notAvailable: The instance must be Available (running and healthy) to apply an OS update.
+      banner:
+        osUpdate: An OS update is available for this database. Applying it restarts the database for a few minutes. Your data is kept.
+        eol: 'The newer OS image no longer supports PostgreSQL {version}, so this instance cannot be updated. Create a new instance with a supported PostgreSQL version and move your data to it, for example with pg_dump and pg_restore. Restoring a snapshot does not help, because a restore keeps the same PostgreSQL version.'
+        requested: OS update requested. Waiting for the operator to start it.
+        updating: 'Applying the OS update. {message}'
+        refused: 'The OS update was not applied: {message}'
+        unknown: 'The image status of this instance could not be checked: {message}'
+      dialog:
+        title: 'Apply OS update to {name}?'
+        downtime: The database restarts on the new image and will be unavailable for a few minutes. Your data is kept.
+        snapshotTip: We recommend taking a snapshot first.
+        applying: Applying...
+    tableHeaders:
+      image: Image
+      engine: Engine
+      class: Class
+      storage: Storage
+      endpoint: Endpoint

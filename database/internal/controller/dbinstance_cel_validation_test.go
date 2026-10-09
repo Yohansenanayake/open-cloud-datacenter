@@ -32,7 +32,7 @@ import (
 	dbaasv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// The x-kubernetes-validations transition rules (PR9) are enforced by the API
+// The x-kubernetes-validations transition rules are enforced by the API
 // server itself, so — unlike the rest of this package's fake-client-backed
 // unit tests — these specs run against the real envtest API server
 // (k8sClient from suite_test.go); a fake client never evaluates CEL.

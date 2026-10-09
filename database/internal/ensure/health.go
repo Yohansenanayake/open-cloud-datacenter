@@ -41,7 +41,7 @@ const (
 	// keeps the loop write-free.
 	crashLoopParkRequeue = 30 * time.Second
 
-	// Crash-loop detection for unplanned restarts (KI-006 Problem A). Under
+	// Crash-loop detection for unplanned restarts. Under
 	// RunStrategyAlways KubeVirt recreates the VMI on every guest exit, so a
 	// crash-looping VM "recovers" forever on its own. A chain of unplanned
 	// restarts (VMI UID changes), each within crashLoopWindow of the previous,
@@ -57,22 +57,13 @@ func newHealthStep(deps Dependencies) Step { return &healthStep{Dependencies: de
 
 func (*healthStep) Name() string { return "health" }
 
-// ensureDatabaseHealth is both the provisioning readiness gate and the
-// steady-state liveness monitor, all from one VMI observation per pass:
+// Run checks readiness and liveness from one VMI observation. Parked
+// instances are probed every 30 seconds for administrator-initiated recovery.
+// The crash-loop guard runs before readiness checks and may halt the VM.
 //
-//  1. while parked under CrashLoopHalted it re-probes every 30s and
-//     auto-recovers when an administrator brings the VM back healthy out-of-band;
-//  2. otherwise, the crash-loop guard runs FIRST — a gate can never starve it;
-//  3. while catching up (observedGeneration != generation) it GATES: booting /
-//     probe-not-passing → Pending;
-//  4. once caught up, a probe blip is REPORT-ONLY: Degraded is set with
-//     attribution, phase turns "degraded", and the step returns Satisfied so the
-//     pass finishes and Ready is re-derived (never left stale-True).
-//
-// Liveness is report-only by design: the KubeVirt readiness probe (pg_isready via
-// the guest agent, already debounced by its FailureThreshold) is authoritative,
-// and the controller never restarts on readiness failure — the only
-// controller-initiated halt is the crash-loop guard.
+// During provisioning or an update, failed readiness returns Pending. Once
+// the generation is reconciled, it reports Degraded without restarting the
+// VM and returns Satisfied so aggregate readiness can be updated.
 func (r *healthStep) Run(ctx context.Context, inst *dbaasv1.DBInstance) Result {
 	// Desired stopped: there is nothing to gate on
 	if !inst.Spec.WantRunning() {

@@ -120,14 +120,9 @@ type ClientInterface interface {
 	// NotFound is success.
 	DeleteVMBackup(ctx context.Context, ns, name string) error
 
-	// CreateRestorePVC creates a PVC that restores data from an existing
-	// VolumeSnapshot — the same same-namespace mechanism Harvester's own
-	// restore controller uses internally, without going through
-	// VirtualMachineRestore (which manages a whole VM's identity/lifecycle,
-	// not just its data — see yohan-docs/backups/harvester-vm-backup/).
-	// AlreadyExists is swallowed, so a PVC already under pvcName is NOT
-	// proof it's the one requested — callers must verify it via GetPVC
-	// (labels, spec.dataSource). Does not wait for binding.
+	// CreateRestorePVC restores a PVC from a VolumeSnapshot in the same namespace.
+	// It does not wait for binding. AlreadyExists is treated as success; callers
+	// must verify the existing PVC labels and dataSource with GetPVC.
 	CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, labels map[string]string) error
 
 	// GetPVC returns the live PVC (NotFound as an error). Creating a restore
@@ -190,7 +185,7 @@ var (
 
 // VMCreateParams bundles everything needed to create a PostgreSQL VM. Fields
 // used only for credential/cloud-init generation (DBName, MaxConnections,
-// backup/S3, VMPassword, StaticNetwork) live in internal/credentials'
+// backup, VMPassword, StaticNetwork) live in internal/credentials'
 // BootstrapParams instead — the provider only builds VM shape and consumes an
 // already-provisioned cloud-init Secret. Port and MasterUser stay: the VMI
 // readiness probe embeds them directly (see buildPostgresVM).
@@ -210,12 +205,6 @@ type VMCreateParams struct {
 	// CloudInitSecretName is the pre-created ephemeral Secret (userdata +
 	// networkdata) this VM's cloudInitNoCloud volume references.
 	CloudInitSecretName string
-	// DNSServerIP, when non-empty, pins the VM's resolver via KubeVirt
-	// dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
-	// subnets to defeat the virt-launcher internal-DHCP DNS race (it would
-	// otherwise inject unreachable cluster DNS, breaking apt during
-	// cloud-init). Supplied by the control plane (per-VPC CoreDNS address).
-	DNSServerIP string
 	// Owner, when non-nil, is stamped as the controller owner reference on the
 	// VM this call creates, so Owns() watches fire and GC backs up the
 	// finalizer teardown.

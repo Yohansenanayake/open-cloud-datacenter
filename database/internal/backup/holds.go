@@ -14,18 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package backup holds the coordination primitives for DBaaS backup and
-// restore, described in yohan-docs/backups/harvester-vm-backup/. There is no
-// custom coordination CRD: a snapshot hold is a plain coordination.k8s.io/v1
-// Lease per source instance, a restore hold is a Lease per restore attempt,
-// and the deletion gate is the target object's own deletionTimestamp — never
-// a separate flag.
+// Package backup coordinates snapshots and restores with Kubernetes Leases.
+// Snapshot holds are per source instance; restore holds are per attempt.
+// DeletionTimestamp prevents new operations during deletion.
 //
-// These Leases are existence/holder markers only, not full leader-election
-// objects: no renewal loop, no time-based expiry, no stealing a stale lease.
-// A hold is released only by an explicit Release call from the holder that
-// acquired it (or by the deletion-cleanup path that follows a failed/
-// cancelled attempt) — never by elapsed time.
+// Holds have no renewal or expiry. Only the holder or deletion cleanup releases
+// them; elapsed time never permits another operation to take the hold.
 package backup
 
 import (
@@ -91,19 +85,10 @@ type AcquireResult struct {
 	HolderIdentity string
 }
 
-// Acquire creates the named Lease with holderIdentity if absent. If it
-// already exists and is held by holderIdentity, it is treated as already
-// acquired; if another holder owns it, Acquire reports that holder and
-// leaves the Lease alone.
-//
-// owner is required and is set as the Lease's only owner reference. Each
-// hold has exactly one natural owner (the source instance for snapshot holds,
-// the DBRestore for restore holds), so an unowned hold is not valid. Acquire
-// rejects a nil owner instead of creating one, because the owner reference is a
-// safety net: it does not replace waiting on the hold before deleting the
-// owner, but it prevents orphaned holds from persisting forever; the
-// Kubernetes garbage collector removes them after the owner is gone. Holds are
-// event-driven, not time-based: they never expire on elapsed time.
+// Acquire creates an owned Lease or returns its current holder. It never
+// replaces another holder. The required owner reference permits garbage
+// collection after owner deletion, but callers must still wait for holds
+// before deleting owners. Holds do not expire.
 func (h Holds) Acquire(ctx context.Context, namespace, name, holderIdentity string, owner *metav1.OwnerReference, extraLabels map[string]string) (AcquireResult, error) {
 	if err := h.check(); err != nil {
 		return AcquireResult{}, err

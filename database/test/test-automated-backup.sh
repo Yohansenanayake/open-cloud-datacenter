@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# E2E test for automated snapshot scheduling (Phase 5): provisions a
+# E2E test for automated snapshot scheduling: provisions a
 # DBInstance with backup enabled, forces its schedule due immediately
 # (waiting for the real daily window isn't practical here), and verifies the
 # automated DBSnapshot gets created and completes.
 #
-# Then (Phase 7; skip with SKIP_DELETE_CHECK=1, which keeps the instance):
+# Deletion check (skip with SKIP_DELETE_CHECK=1 to keep the instance):
 # the automated snapshot is owned by its instance's UID, so deleting the
 # instance garbage-collects it — and its Harvester backup — along with the
 # instance's own disks.
@@ -260,7 +260,7 @@ report() {
   log "PASS: automated scheduling created DBSnapshot/$EXPECTED_SNAPSHOT_NAME and its backup completed"
 }
 
-# ---- Phase 7: deleting the instance takes its automated snapshot and disks ----
+# ---- Deleting the instance removes its automated snapshot and disks ----
 
 instance_disks() { # PVCs named for the instance: pg-<name>-<uid salt>-...
   kc get pvc -o name 2>/dev/null | sed 's|^persistentvolumeclaim/||' | grep -E "^pg-${INSTANCE_NAME}-" || true

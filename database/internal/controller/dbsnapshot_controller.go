@@ -42,29 +42,14 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
-// DBSnapshotReconciler reconciles DBSnapshot CRDs — manual snapshot creation
-// (spec §3.1/§6, design §4/§7). Automated scheduling (a later phase) only
-// adds a new caller creating these objects, not new logic here.
+// DBSnapshotReconciler creates and tracks manual and automated backups.
+// Creation validates the source, waits for a dispatcher-granted backup slot,
+// acquires a hold, and checks live source state before starting the backup.
 //
-// Not a formal ensure.Step/Runner pipeline — that pattern is DBInstance-
-// specific today. reconcileCreate instead composes plain stages in the same
-// spirit: startBackup (admit, wait for a backup slot, take the hold, confirm
-// the source live, create the backup), then trackBackup.
-//
-// APIReader is an uncached reader for the hold Leases: this reconciler's
-// "is any restore still reading this source?" check is what lets it delete a
-// backend backup, and must not be answered from a stale cache.
-//
-// DatabaseDefaults resolves the source's defaulted settings when its
-// status.appliedSpec doesn't record them (see sourceMetadataFrom).
-//
-// Backup concurrency (design Phase 10): a snapshot starts its backup only
-// while it holds a backup slot, granted by BackupDispatcher; slots are
-// Leases in SlotNamespace (the operator namespace). Wake is the channel the
-// dispatcher signals a granted snapshot on. An empty SlotNamespace
-// disables the queue — only unit tests construct the reconciler that way;
-// SetupWithManager refuses it. Backup.Timeout bounds one backup; Now is the
-// clock, overridable in tests.
+// APIReader provides uncached Lease reads for deletion safety. DatabaseDefaults
+// resolves source settings absent from AppliedSpec. SlotNamespace is required
+// outside unit tests; Wake receives dispatcher notifications. Backup.Timeout
+// bounds execution, and Now supplies the clock.
 type DBSnapshotReconciler struct {
 	client.Client
 	APIReader        client.Reader
@@ -256,10 +241,10 @@ func (r *DBSnapshotReconciler) startBackup(ctx context.Context, snap *dbaasv1.DB
 	return true, ctrl.Result{}, nil
 }
 
-// admitSnapshot checks §2.1/§3.1 admission against the (cached) source.
+// admitSnapshot validates backup capability and readiness of the cached source.
 // admitted=false: return (res, err) as-is — the snapshot was rejected.
 func (r *DBSnapshotReconciler) admitSnapshot(ctx context.Context, snap *dbaasv1.DBSnapshot, source *dbaasv1.DBInstance) (admitted bool, res ctrl.Result, err error) {
-	// §2.1: no spec.backup means no backup capability at all, and presence
+	// no spec.backup means no backup capability at all, and presence
 	// is immutable — this will never resolve on its own.
 	if source.Spec.Backup == nil {
 		res, err = r.rejectSnapshot(ctx, snap, dbaasv1.ReasonSnapshotSourceBackupDisabled,
@@ -275,8 +260,7 @@ func (r *DBSnapshotReconciler) admitSnapshot(ctx context.Context, snap *dbaasv1.
 		return false, res, err
 	}
 
-	// §3.1: a not-ready source won't resolve on its own, so reject rather
-	// than retry — only lease contention (acquireHold) is worth waiting on.
+	// Snapshot requests require an available source at admission.
 	if source.Status.Phase != dbaasv1.StatusAvailable {
 		res, err = r.rejectSnapshot(ctx, snap, dbaasv1.ReasonSnapshotSourceNotReady,
 			fmt.Sprintf("source DBInstance is %q, not available", source.Status.Phase))

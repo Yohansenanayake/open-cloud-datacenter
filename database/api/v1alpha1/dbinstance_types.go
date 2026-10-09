@@ -28,25 +28,10 @@ import (
 const MaxInstanceNameLength = 52
 
 // DBInstanceSpec defines the desired state of a managed PostgreSQL database.
-//
-// Field support status (v1alpha1):
-//   - implemented mutable post-create: dbInstanceClass, allocatedStorage,
-//     running, deletionProtection
-//   - implemented immutable post-create (modify is refused): networkRef,
-//     dbName, masterUsername, port, storageType, staticNetwork,
-//     vmPassword, engineVersion
-//   - NOT IMPLEMENTED: manageMasterUserPassword, masterUserPasswordRef,
-//     multiAZ, dbParameterGroupRef, tags. These fields exist in the schema
-//     for forward compatibility but the reconciler does not apply them.
-//     See ARCHITECTURE.md for the roadmap. Backup capability is tracked
-//     separately under spec.backup once implemented — see
-//     yohan-docs/backups/harvester-vm-backup/.
-//
-// Of the immutable fields, only networkRef, engineVersion, staticNetwork, and
-// vmPassword carry a CEL "self == oldSelf" rule: the other four (dbName,
-// masterUsername, port, storageType) are compared post-defaulting in
-// immutableDrift(), so a raw CEL rule on them would be stricter than that
-// check — see immutableDrift's doc comment.
+// Class, storage, power state, deletion protection, and backup settings can be
+// updated. Backup presence and database identity, network, engine version,
+// storage class, and VM password are fixed after creation. Admission and
+// preflight checks enforce these restrictions.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.backup) == has(oldSelf.backup)",message="backup cannot be added or removed after creation"
 // +kubebuilder:validation:XValidation:rule="has(self.restoredFrom) == has(oldSelf.restoredFrom)",message="restoredFrom cannot be added or removed after creation"
@@ -68,14 +53,10 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engineVersion is immutable after creation"
 	EngineVersion string `json:"engineVersion,omitempty"`
 
-	// DBName is the initial database to create. Default: DefaultDBName of
-	// the instance name (e.g. "orders-db" becomes "orders_db").
-	// A lowercase PostgreSQL identifier that never needs quoting — lowercase
-	// letters, digits, and underscores, starting with a letter or underscore,
-	// at most 63 characters (RDS's rule): uppercase, hyphens, or "$" would
-	// force every tenant SQL statement naming it to quote it forever. The
-	// built-in databases are reserved. Immutable after first reconcile;
-	// modify is refused.
+	// DBName is the initial database name. Defaults to DefaultDBName of the
+	// instance name, normalized to a valid, non-reserved PostgreSQL identifier.
+	// Explicit values must be lowercase identifiers of at most 63 characters.
+	// Immutable after first reconciliation.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
@@ -89,31 +70,15 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int `json:"port,omitempty"`
 
-	// MasterUsername for the admin user. Default "dbadmin" (operator config).
-	// Same identifier rule as DBName. Roles PostgreSQL or DBaaS manage are
-	// reserved: "postgres", "postgres_exporter", and anything starting with
-	// "pg_" (which PostgreSQL itself refuses — rejected here rather than
-	// failing later inside cloud-init). Immutable after first reconcile.
+	// MasterUsername is the database administrator role. Defaults to the
+	// operator-configured user (dbadmin by default). It follows the DBName
+	// identifier rules and cannot be postgres, postgres_exporter, or start
+	// with pg_. Immutable after first reconciliation.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
 	// +kubebuilder:validation:XValidation:rule="!(self in ['postgres', 'postgres_exporter']) && !self.startsWith('pg_')",message="masterUsername must not be a reserved role (postgres, postgres_exporter, or a pg_ prefix)"
 	MasterUsername string `json:"masterUsername,omitempty"`
-
-	// ManageMasterUserPassword: if true, auto-generate the admin password
-	// and store it in the credentials Secret; if false, read it from
-	// MasterUserPasswordRef.
-	// NOT YET IMPLEMENTED: the controller always generates a random password
-	// regardless of this field's value, and never reads
-	// MasterUserPasswordRef. The fields are reserved.
-	// +optional
-	ManageMasterUserPassword bool `json:"manageMasterUserPassword,omitempty"`
-
-	// MasterUserPasswordRef points to a K8s Secret containing the
-	// user-supplied admin password.
-	// NOT YET IMPLEMENTED — see ManageMasterUserPassword.
-	// +optional
-	MasterUserPasswordRef *SecretKeyRef `json:"masterUserPasswordRef,omitempty"`
 
 	// AllocatedStorage in GiB.
 	// Mutable but grow-only: changing this on an Available instance resizes the
@@ -131,17 +96,6 @@ type DBInstanceSpec struct {
 	// bound PVC).
 	// +optional
 	StorageType string `json:"storageType,omitempty"`
-
-	// MultiAZ enables Patroni HA with a standby VM.
-	// NOT YET IMPLEMENTED — no standby is created.
-	// +optional
-	MultiAZ bool `json:"multiAZ,omitempty"`
-
-	// DBParameterGroupRef references a DBParameterGroup by name.
-	// NOT YET IMPLEMENTED — the DBParameterGroup CRD does not exist in this
-	// module.
-	// +optional
-	DBParameterGroupRef string `json:"dbParameterGroupRef,omitempty"`
 
 	// DeletionProtection prevents accidental deletion. While true, the
 	// finalizer refuses to tear the instance down.
@@ -177,17 +131,6 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="staticNetwork is immutable after creation"
 	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
 
-	// DNSServerIP, when set, pins the VM's resolver via KubeVirt
-	// dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
-	// subnets: KubeVirt's bridge-mode virt-launcher runs an internal DHCP
-	// server that otherwise copies the launcher pod's cluster resolv.conf
-	// (unreachable cluster DNS) into the VM, so the VM can't resolve the apt
-	// archive and cloud-init's package install fails. The control plane
-	// (dc-api) supplies the per-VPC CoreDNS address here. Empty leaves
-	// KubeVirt's default DNS behaviour (correct for cluster-routable VLANs).
-	// +optional
-	DNSServerIP string `json:"dnsServerIP,omitempty"`
-
 	// VMPassword sets the default console/SSH password for the VM user
 	// (ubuntu). For development and debugging only — leave empty in
 	// production. Immutable after first reconcile.
@@ -195,38 +138,21 @@ type DBInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="vmPassword is immutable after creation"
 	VMPassword string `json:"vmPassword,omitempty"`
 
-	// Tags are user-defined labels.
-	// NOT YET IMPLEMENTED — not propagated to child resources or dashboards.
-	// +optional
-	Tags map[string]string `json:"tags,omitempty"`
-
-	// Backup opts the instance into backup capability: automated daily
-	// snapshots (configurable below) and named manual snapshots via
-	// DBSnapshot. Its presence is immutable after creation — see the
-	// XValidation rule on DBInstanceSpec above — but its contents remain
-	// editable. Omit this field entirely for no backup capability at all;
-	// manual snapshot requests against such an instance are rejected.
-	// See yohan-docs/backups/harvester-vm-backup/.
+	// Backup enables manual snapshots, WAL archiving, and configurable
+	// automated snapshots. It cannot be added or removed after creation, but
+	// its contents can be updated. Omission disables backup capability.
 	// +optional
 	Backup *BackupSpec `json:"backup,omitempty"`
 
-	// RestoredFrom identifies the DBRestore that created this instance, if
-	// any. Set only by DBRestoreReconciler. Immutable afterward: a terminally failed
-	// restore is retried by creating a new DBRestore (and a new DBInstance).
-	// Its presence is immutable too (the rule on DBInstanceSpec): the field
-	// rule below only runs when both old and new objects have it, and adding
-	// or removing it would change the instance's disk names.
+	// RestoredFrom identifies the restore that created this instance. Set by
+	// the restore controller; its value and presence are immutable.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="restoredFrom is immutable after creation"
 	RestoredFrom *RestoredFromRef `json:"restoredFrom,omitempty"`
 }
 
-// RestoredFromRef identifies the DBRestore that created a DBInstance — see
-// DBInstanceSpec.RestoredFrom — and what it restored from. The snapshot and
-// source fields are durable provenance: set in the same Create() and
-// immutable, they keep answering "where did this database come from?" after
-// the DBRestore (a one-time request), the DBSnapshot and the source are all
-// gone.
+// RestoredFromRef records restore identity and source provenance. Its values
+// remain available after the restore, snapshot, or source instance is deleted.
 type RestoredFromRef struct {
 	// DBRestoreName is the name of the owning DBRestore, in the same
 	// namespace — for display and lookup only.
@@ -295,12 +221,6 @@ type AutomatedBackupSpec struct {
 	PreferredWindowUTC string `json:"preferredWindowUTC,omitempty"`
 }
 
-// SecretKeyRef points to a single key within a K8s Secret.
-type SecretKeyRef struct {
-	Name string `json:"name"`
-	Key  string `json:"key"`
-}
-
 // NetworkConfig is a static IPv4 configuration for the database VM's data
 // NIC. When set on DBInstanceSpec.StaticNetwork, these values are written
 // into cloud-init's netplan in place of `dhcp4: true`.
@@ -330,11 +250,8 @@ type NetworkConfig struct {
 
 // DBInstanceStatus defines the observed state of a DBInstance.
 type DBInstanceStatus struct {
-	// Phase matches RDS DBInstanceStatus strings for API compatibility.
-	// It is always derived from Conditions by DerivePhaseSummary and must
-	// never be maintained as an independent controller state machine — a
-	// projection retained solely for RDS compatibility, not a second
-	// source of truth alongside Conditions.
+	// Phase summarizes Conditions using RDS-compatible status strings.
+	// DerivePhaseSummary computes it; it is not independent controller state.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -360,10 +277,6 @@ type DBInstanceStatus struct {
 	// +optional
 	PrometheusTarget string `json:"prometheusTarget,omitempty"`
 
-	// ReadReplicas tracks child replica identifiers.
-	// +optional
-	ReadReplicas []string `json:"readReplicas,omitempty"`
-
 	// Message is a human-readable description of the current state.
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -372,11 +285,9 @@ type DBInstanceStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// AppliedSpec is the snapshot of immutable-after-create spec fields
-	// captured at first successful reconcile. The reconciler refuses to
-	// advance ObservedGeneration when any of these fields differ from the
-	// current spec, because the implementation cannot carry the change
-	// through to the running database. Used for honest modify semantics.
+	// AppliedSpec records immutable settings at successful provisioning.
+	// Changes to those settings block reconciliation and prevent advancement
+	// of ObservedGeneration.
 	// +optional
 	AppliedSpec *AppliedSpec `json:"appliedSpec,omitempty"`
 
@@ -388,11 +299,9 @@ type DBInstanceStatus struct {
 	// +optional
 	CurrentImageRevision string `json:"currentImageRevision,omitempty"`
 
-	// LastAppliedRepaveTrigger records the value of AnnotationRepaveTrigger
-	// that was last processed (accepted, rejected, or applied) — mirrors
-	// Flux's ReconcileRequestAnnotation/LastHandledReconcileAt pattern. The
-	// annotation itself is never modified by the controller; a repave is
-	// dispatched only when its current value differs from this field.
+	// LastAppliedRepaveTrigger records the last accepted, rejected, or applied
+	// repave trigger. The controller processes a trigger only when its value
+	// differs from this field; it does not modify the annotation.
 	// +optional
 	LastAppliedRepaveTrigger string `json:"lastAppliedRepaveTrigger,omitempty"`
 
@@ -425,16 +334,11 @@ type DBInstanceStatus struct {
 	Backup *BackupStatus `json:"backup,omitempty"`
 }
 
-// BackupStatus is the observed state of automated snapshot scheduling
-// (yohan-docs/backups/harvester-vm-backup/ §3.2).
+// BackupStatus records automated snapshot scheduling state.
 type BackupStatus struct {
-	// NextScheduledSnapshotTime is the next future UTC instant an automated
-	// snapshot is due. Always strictly in the future when set: recomputed
-	// from scratch (never carried forward as a stale past value) whenever
-	// automated snapshots are (re-)enabled or preferredWindowUTC changes,
-	// and after every fired attempt — satisfying the future-only, no-catch-up
-	// rule regardless of how long reconciliation was unavailable. Nil while
-	// automated.enabled is false.
+	// NextScheduledSnapshotTime is the next future UTC snapshot time. It is
+	// recomputed when scheduling is enabled, its window changes, or an attempt
+	// fires. Missed runs are not replayed. Nil while automated backups are disabled.
 	// +optional
 	NextScheduledSnapshotTime *metav1.Time `json:"nextScheduledSnapshotTime,omitempty"`
 }
@@ -486,12 +390,9 @@ type ResourceRefs struct {
 	// string-prefix matching.
 	// +optional
 	OSDiskPVCName string `json:"osDiskPVCName,omitempty"`
-	// PendingDeleteOSDiskPVCName is set by repave the moment SwapVMOSDisk
-	// succeeds, before DeletePVC is attempted, and cleared only once DeletePVC
-	// actually succeeds. Recorded durably so a reconcile interrupted between
-	// those two calls (anything short of a hard process kill) can retry the
-	// delete directly next pass, instead of relying on SwapVMOSDisk's
-	// idempotent no-op to (incorrectly) imply there's nothing left to clean up.
+	// PendingDeleteOSDiskPVCName records the old OS disk after a successful
+	// swap. It is cleared after deletion succeeds, allowing interrupted
+	// cleanup to resume on the next reconciliation.
 	// +optional
 	PendingDeleteOSDiskPVCName string `json:"pendingDeleteOSDiskPVCName,omitempty"`
 	// +optional

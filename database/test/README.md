@@ -41,7 +41,6 @@ spec:
   engineVersion: "16"
   dbName: repavetest
   masterUsername: dbadmin
-  manageMasterUserPassword: true
   networkRef: default/vm-network
   backupRetentionPeriod: 0
   deletionProtection: false # stage3 deletes this instance as part of its teardown check

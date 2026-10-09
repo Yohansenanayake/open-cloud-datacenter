@@ -3,9 +3,11 @@
 > **Owner:** DBaaS operator maintainers · **Last updated:** 2026-09-28 · **Status:** experimental (repo-registered Addon)
 > **Related:** [Discussion #303](https://github.com/wso2/open-cloud-datacenter/discussions/303) (release-process RFC — scope, GHCR namespace, versioning policy) · `database/charts/chart/` (chart source) · `.github/workflows/database-test-chart.yaml` (CI)
 >
-> Found something here wrong, stale, or missing? Raise it on [Discussion #303](https://github.com/wso2/open-cloud-datacenter/discussions/303) rather than silently working around it.
+> Report installation issues in [Discussion #303](https://github.com/wso2/open-cloud-datacenter/discussions/303).
 
-This is the Helm + Harvester `Addon` install path — what a real Rancher/Harvester administrator would use. [`README.md`](./README.md)'s Quickstart covers the older kustomize-based internal/team path instead; the two are independent, don't co-install both over the same resources.
+This guide covers installation with Helm and a Harvester `Addon`. The
+[README Quickstart](./README.md) covers Kustomize. Choose one installation
+method per deployment to avoid managing the same resources twice.
 
 ## Prerequisites
 
@@ -15,15 +17,16 @@ Beyond README.md's base prerequisites (Harvester cluster, NAD, `kubectl`):
 2. **Helm 3.8+** and **Docker**, authenticated against your target registry (`docker login ghcr.io ...`; Helm 4 reuses Docker's cached OCI credentials automatically).
 3. Write access to whatever GHCR namespace you're publishing under.
 
-## Testing without WSO2 registry access
+## Testing with a custom registry
 
-Until write access to the real `ghcr.io/wso2/...` namespace exists (the one open item in [Discussion #303](https://github.com/wso2/open-cloud-datacenter/discussions/303)'s "Clarifications requested"), every committed default (chart `values.yaml`, the Addon example manifest) stays generic/placeholder. Test against your own personal GHCR via overrides, never by editing those defaults:
+Use registry overrides for test deployments. Keep personal registry locations
+out of committed chart defaults and Addon manifests:
 
 - **Chart:** `helm upgrade --install dbaas-operator database/charts/chart --set manager.image.repository=ghcr.io/<you>/dbaas-operator --set manager.image.tag=<tag>`
 - **Kustomize (`make deploy`):** `make deploy IMG=ghcr.io/<you>/dbaas-controller:<tag>` — mutates `config/manager/kustomization.yaml`; revert after: `git checkout -- config/manager/kustomization.yaml`.
 - **Addon manifest:** copy `deploy/harvester-addon/dbaas-operator/dbaas-operator.yaml` to `dbaas-operator.local.yaml` (gitignored) and fill in your own values there. Never edit the committed one.
 
-If a review needs your personal artifacts as evidence before real registry access exists, cite digests/commit — as Discussion #303's "What's already proven" does — rather than committing the personal reference.
+Record image digests and source commits when sharing test results.
 
 ---
 
@@ -35,7 +38,7 @@ kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts
 ```
 
 - Lands at `database/charts/chart/` (the plugin appends its own `chart/` under `--output-dir`).
-- This resets `config/manager/kustomization.yaml`'s image to the generic `controller:latest` (its internal `make build-installer` call) — harmless: that file is deliberately never a source of truth for a real image, matching README's own Quickstart, which always passes `IMG=` explicitly on every command. Don't commit a real registry value into it; there's nothing to protect from a regen.
+- Generation resets the Kustomize image to `controller:latest` through `make build-installer`. Pass `IMG=` explicitly when building or deploying, and keep personal registry values out of the committed configuration.
 - Only `Chart.yaml`, `values.yaml`, `NOTES.txt`, `_helpers.tpl`, `.helmignore`, and the test-chart workflow survive a re-run without `--force` — every other template regenerates from current `config/`, wiping any hand-fix (like step 2's RBAC fix) that isn't in this preserved list.
 - The chart must include all three APIs (`DBInstance`, `DBSnapshot`, and `DBRestore`), their current schemas, and the generated manager permissions. After regeneration, run `helm lint charts/chart` and `go test ./test/chart/...` from `database/` to check that the rendered CRDs and RBAC match `config/`.
 
@@ -139,7 +142,6 @@ spec:
   allocatedStorage: 5
   dbName: testdb
   masterUsername: dbadmin
-  manageMasterUserPassword: true
   networkRef: <namespace>/<nad-name>
   running: true
 ```

@@ -62,10 +62,9 @@ spec:
             type: object
           spec:
             description: |-
-              DBSnapshotSpec requests a durable backup of a DBInstance, taken through
-              Harvester (see yohan-docs/backups/harvester-vm-backup/). Creating a
-              DBSnapshot always requests a manual snapshot; the controller creates
-              automated ones itself and records that origin in status.
+              DBSnapshotSpec requests a durable Harvester backup of a DBInstance.
+              User-created snapshots are manual; the scheduler creates automated snapshots
+              and records their origin in status.
             properties:
               sourceInstanceRef:
                 description: |-
@@ -160,13 +159,9 @@ spec:
                 x-kubernetes-list-type: map
               dataVolumeSnapshotName:
                 description: |-
-                  DataVolumeSnapshotName is the VolumeSnapshot object backing the
-                  PostgreSQL data volume specifically (a VirtualMachineBackup covers
-                  every disk on the VM), captured once the backup becomes Ready. Restore
-                  creates its PVC with this as spec.dataSource — recorded here, not
-                  re-derived at restore time, because re-deriving it needs the source's
-                  data volume name (to pick the right disk out of several), which is
-                  only available while the source instance still exists.
+                  DataVolumeSnapshotName identifies the PostgreSQL data-volume snapshot
+                  within the VM backup. Captured when the backup is ready, it becomes the
+                  restore PVC data source without requiring a live source instance.
                 type: string
               observedGeneration:
                 description: ObservedGeneration tracks which spec version has been
@@ -182,9 +177,7 @@ spec:
               phase:
                 description: |-
                   Phase summarizes the Ready condition for display: Queued, InProgress,
-                  Ready, Failed or Deleting. Output only — written together with the
-                  condition, so it can't disagree with it; reconcile logic reads
-                  conditions, never this.
+                  Ready, Failed, or Deleting. Reconciliation uses conditions directly.
                 type: string
               progress:
                 description: |-
@@ -196,14 +189,9 @@ spec:
                 type: integer
               source:
                 description: |-
-                  Source records the restore-relevant subset of the source DBInstance's
-                  spec/status (design §3.4), captured once at admission — the only
-                  point the source is guaranteed to still exist and be Available. Never
-                  modified afterward, even if the source's own mutable fields (e.g.
-                  allocatedStorage) later change: this must reflect what was actually
-                  backed up, not the source's current state. Snapshot-mode restore
-                  (design §3) reads exclusively from here, never the live source, so it
-                  keeps working after the source is deleted.
+                  Source records the database settings at snapshot admission and is not
+                  updated afterward. Restore uses this metadata instead of the live source,
+                  so later source changes or deletion do not affect the recorded settings.
                 properties:
                   allocatedStorage:
                     description: |-
@@ -254,12 +242,9 @@ spec:
                     type: object
                   dbInstanceClass:
                     description: |-
-                      DBInstanceClass, NetworkRef and Backup are the source's settings at
-                      snapshot time, recorded as hints only: a UI can suggest them for a
-                      restore even after the source is gone. A restore never inherits them —
-                      DBRestore.spec still requires its own class and network, and backup
-                      is opt-in for the target. (The source's static IP is deliberately not
-                      recorded: suggesting it invites an address conflict.)
+                      DBInstanceClass, NetworkRef and Backup record source settings as UI
+                      hints. Restore requires its own class and network; backup is opt-in.
+                      The source's static IP is omitted to avoid address reuse.
                     type: string
                   dbName:
                     type: string

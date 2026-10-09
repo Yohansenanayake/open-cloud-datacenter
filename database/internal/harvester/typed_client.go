@@ -552,17 +552,6 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 		FailureThreshold: 12,
 	}
 
-	// on Kube-OVN/VPC networking, the default DNS inherited through KubeVirt/launcher behavior can be wrong for VM bootstrapping.
-	// If DNS is wrong, cloud-init may fail during apt install postgresql.. This block forces the VM path to use the intended per-VPC DNS server.
-	if p.DNSServerIP != "" { // Only set when Kube-OVN/VPC is used
-		dnsIP := p.DNSServerIP
-		if i := strings.Index(dnsIP, "/"); i > 0 {
-			dnsIP = dnsIP[:i]
-		}
-		vm.Spec.Template.Spec.DNSPolicy = corev1.DNSNone // to opt out of inheriting cluster DNS in Kube-OVN setup
-		vm.Spec.Template.Spec.DNSConfig = &corev1.PodDNSConfig{Nameservers: []string{dnsIP}}
-	}
-
 	return vm, nil
 }
 
@@ -864,9 +853,8 @@ func (c *TypedClient) DeletePVCWithUID(ctx context.Context, ns, name string, uid
 	}))
 }
 
-// CreateVMBackup requests a durable Harvester backup of sourceVMName. Always
-// spec.type: Backup — Snapshot is local-only and must never be used for this
-// design (yohan-docs/backups/harvester-vm-backup/).
+// CreateVMBackup requests a durable Harvester backup of sourceVMName.
+// It uses type Backup; type Snapshot provides only local snapshots.
 func (c *TypedClient) CreateVMBackup(ctx context.Context, ns, name, sourceVMName string, owner *metav1.OwnerReference) error {
 
 	_, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Get(ctx, name, metav1.GetOptions{})

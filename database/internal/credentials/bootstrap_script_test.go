@@ -39,6 +39,11 @@ const sandboxPGVer = "17"
 // "<name> <args>" to $SANDBOX/calls; behavior is steered by env vars.
 var stubs = map[string]string{
 	"systemctl": `echo "systemctl $*" >> "$SANDBOX/calls"
+if [ "$1" = "enable" ] && [ "$2" = "postgresql.service" ]; then
+  [ ! -f "$SANDBOX/var/lib/dbaas/bootstrap-complete" ] || exit 1
+  if [ "${SYSTEMCTL_ENABLE_FAIL:-0}" = "1" ]; then exit 1; fi
+  touch "$SANDBOX/postgres-enabled"
+fi
 if [ "$1" = "restart" ] && [ "${2#postgresql}" != "$2" ]; then
   conf="$SANDBOX/etc/postgresql/` + sandboxPGVer + `/main"
   pidfile=absent; [ -f "$SANDBOX/var/lib/postgresql/` + sandboxPGVer + `/main/postmaster.pid" ] && pidfile=present
@@ -278,6 +283,9 @@ func TestBootstrapRestoreFailsClosed(t *testing.T) {
 			if run.exists("var/lib/dbaas/bootstrap-complete") {
 				t.Fatal("a failed restore must never report ready")
 			}
+			if run.exists("postgres-enabled") {
+				t.Fatal("a failed restore must not enable PostgreSQL startup on boot")
+			}
 			if strings.Contains(run.calls, "mkfs.ext4") || strings.Contains(run.calls, "cp ") {
 				t.Fatal("a failed restore must never format or overwrite the disk")
 			}
@@ -350,6 +358,61 @@ func TestBootstrapOrdinaryInstanceUnchanged(t *testing.T) {
 	}
 	if !run.exists("var/lib/dbaas/bootstrap-complete") {
 		t.Fatal("readiness marker must be written")
+	}
+}
+
+// Every successful bootstrap path must survive a later VM reboot, including
+// repave, which replaces the OS disk and therefore loses prior enablement.
+func TestBootstrapEnablesPostgresForSubsequentBoots(t *testing.T) {
+	for name, tc := range map[string]struct {
+		restoreID string
+		disk      sandboxDisk
+	}{
+		"fresh instance": {"", sandboxDisk{attached: true}},
+		"repave":         {"", restoredDisk},
+		"restore":        {"restore-uid-1", restoredDisk},
+		"repave restored instance": {"restore-uid-1", sandboxDisk{
+			attached: true, filesystem: true, pgVersion: sandboxPGVer, marker: "restore-uid-1",
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := runBootstrap(t, tc.restoreID, tc.disk)
+			if run.err != nil {
+				t.Fatalf("bootstrap failed: %v", run.err)
+			}
+			if !run.exists("postgres-enabled") || !run.exists("var/lib/dbaas/bootstrap-complete") {
+				t.Fatal("successful bootstrap must enable PostgreSQL before reporting ready")
+			}
+			enabled := strings.Index(run.calls, "systemctl enable postgresql.service\n")
+			if enabled < strings.LastIndex(run.calls, "psql ") || enabled < strings.LastIndex(run.calls, "pg_isready up") {
+				t.Fatal("enablement must follow database initialization and the final readiness check")
+			}
+			if tc.disk.pgVersion != "" && (strings.Contains(run.calls, "mkfs.ext4") || strings.Contains(run.calls, "cp ")) {
+				t.Fatal("repave and restore must preserve the existing data disk")
+			}
+			if tc.disk.marker != "" && strings.Contains(run.calls, "ALTER ROLE") {
+				t.Fatal("repave must not repeat completed restore credential changes")
+			}
+		})
+	}
+}
+
+func TestBootstrapEnableFailureDoesNotReportReady(t *testing.T) {
+	for _, restoreID := range []string{"", "restore-uid-1"} {
+		t.Run("restoreID="+restoreID, func(t *testing.T) {
+			run := runBootstrap(t, restoreID, restoredDisk, "SYSTEMCTL_ENABLE_FAIL=1")
+			if run.err == nil || run.exists("var/lib/dbaas/bootstrap-complete") || run.exists("postgres-enabled") {
+				t.Fatal("failed boot enablement must fail bootstrap without reporting ready")
+			}
+			if restoreID != "" {
+				if !strings.Contains(run.read(t, "var/lib/dbaas/restore-failed"), "could not enable PostgreSQL startup on boot") {
+					t.Fatal("restore failure must identify the enablement error")
+				}
+				if !strings.Contains(run.calls[strings.Index(run.calls, "systemctl enable postgresql.service"):], "systemctl stop postgresql@* postgresql") {
+					t.Fatal("restore must stop PostgreSQL when enablement fails")
+				}
+			}
+		})
 	}
 }
 

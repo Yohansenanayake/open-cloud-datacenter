@@ -217,24 +217,12 @@ type Grant struct {
 	Holder SlotHolder
 }
 
-// PlanGrants decides which waiting snapshots get a slot now, given the
-// slots already granted. Pure, so the whole queue policy is testable on
-// its own:
-//
-//   - Global cap: at most maxConcurrent slots in total. Granted slots count
-//     whatever their index, so lowering the cap lets the excess drain.
-//   - Per-namespace share: at most perNamespace slots per namespace.
-//   - Fair order: oldest first (creation time, then namespace/name). A
-//     candidate whose namespace has used its share is skipped, not waited
-//     behind, so one tenant's backlog never holds back another tenant.
-//   - Eligibility: a candidate eligible rejects (e.g. its instance is
-//     mid-repave) is skipped the same way, so it doesn't take a slot it
-//     can't use. eligible is called only for candidates that would
-//     otherwise be granted — at most one per free slot plus each one
-//     skipped — so a long queue costs no more checks than the free slots
-//     do. nil means every candidate is eligible.
-//
-// New grants take the lowest free indices below maxConcurrent.
+// PlanGrants assigns the lowest free slot indices within global and per-namespace
+// limits. Existing grants above a lowered global limit are allowed to drain.
+// Candidates are ordered by creation time, then namespace/name. Namespaces at
+// their limit and ineligible candidates are skipped so other tenants can proceed.
+// The optional eligibility check runs only for candidates otherwise able to
+// receive a slot; nil accepts all candidates.
 func PlanGrants(waiting []Candidate, granted []Slot, maxConcurrent, perNamespace int, eligible func(Candidate) bool) []Grant {
 	used := map[int]bool{}
 	perNS := map[string]int{}

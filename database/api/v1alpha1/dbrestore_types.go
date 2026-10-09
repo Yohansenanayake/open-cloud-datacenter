@@ -22,10 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// DBRestoreSpec requests restoring a DBSnapshot into a new DBInstance
-// (design §3/§6). A one-time operation request, not a durable resource —
-// closer to a Job than to a DBInstance — so the whole spec is immutable:
-// nothing in it means anything to change mid-flight.
+// DBRestoreSpec restores a ready DBSnapshot into a new DBInstance.
+// The spec is immutable; retry a failed operation with a new DBRestore.
 //
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable after creation"
 type DBRestoreSpec struct {
@@ -36,20 +34,15 @@ type DBRestoreSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.name != ''",message="snapshotRef.name must not be empty"
 	SnapshotRef corev1.LocalObjectReference `json:"snapshotRef"`
 
-	// Mode selects the recovery mechanism. Snapshot (default) uses only the
-	// snapshot's own captured local data and works after the source
-	// instance is deleted. AvailableWAL is reserved for a future stage.
+	// Mode selects the recovery mechanism. Only Snapshot is supported.
+	// It uses the snapshot data and works after the source instance is deleted.
 	// +optional
 	// +kubebuilder:default=Snapshot
 	// +kubebuilder:validation:Enum=Snapshot
 	Mode string `json:"mode,omitempty"`
 
-	// TargetInstanceName is the name of the DBInstance this restore
-	// creates. Deliberately independent of this object's own name: a retry
-	// after a failed attempt creates a new DBRestore object and can still
-	// target the same instance name. Held to DBInstance's own name rule
-	// (MaxInstanceNameLength, DNS-label alphabet), so a restore can't be
-	// accepted only to fail when it creates its target.
+	// TargetInstanceName names the new DBInstance. It must be a DNS label
+	// of at most 52 characters and may differ from the DBRestore name.
 	// +required
 	// +kubebuilder:validation:MaxLength=52
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -61,8 +54,8 @@ type DBRestoreSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	DBInstanceClass string `json:"dbInstanceClass"`
 
-	// NetworkRef is the target instance's network — user-specified, never
-	// inherited from the source (design §2.4).
+	// NetworkRef is the target instance's network, supplied by the caller.
+	// It is not inherited from the source.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	NetworkRef string `json:"networkRef"`
@@ -72,9 +65,8 @@ type DBRestoreSpec struct {
 	// +optional
 	StaticNetwork *NetworkConfig `json:"staticNetwork,omitempty"`
 
-	// AllocatedStorage must be at least the snapshot's recorded data-volume
-	// size (§2.4) — smaller is rejected, larger is accepted and passed
-	// through to the restore PVC's request.
+	// AllocatedStorage is the target data-volume size in GiB. It must be
+	// at least the snapshot's recorded size; larger values expand the restore PVC.
 	// +required
 	// +kubebuilder:validation:Minimum=1
 	AllocatedStorage int `json:"allocatedStorage"`
@@ -95,16 +87,14 @@ const (
 	// DBRestoreSpec.Mode values.
 	RestoreModeSnapshot = "Snapshot"
 
-	// LabelDBRestoreUID marks the restore PVC with the UID of the DBRestore
-	// that created it. The PVC deliberately has no owner reference (it
-	// outlives its DBRestore), so this label is how every later pass
-	// re-verifies that a PVC under the expected name is really ours.
+	// LabelDBRestoreUID identifies the restore that created a PVC. The PVC
+	// outlives the DBRestore, so ownership is verified through this label
+	// instead of an owner reference.
 	LabelDBRestoreUID = "dbaas.opencloud.wso2.com/restore-uid"
 )
 
-// ResolvedRestoreFields is the §2.4 field-inheritance outcome — always
-// silently inherited from the snapshot (never a DBRestore.spec field),
-// captured once and exposed here for observability.
+// ResolvedRestoreFields records the database settings inherited from the
+// snapshot at admission. These settings cannot be overridden in DBRestoreSpec.
 type ResolvedRestoreFields struct {
 	// +optional
 	DBName string `json:"dbName,omitempty"`
@@ -120,12 +110,9 @@ type ResolvedRestoreFields struct {
 
 // DBRestoreStatus is the observed state of a DBRestore.
 type DBRestoreStatus struct {
-	// Stage is the controller-observed restore progress (§5.1), recomputed
-	// from live cluster state every pass. Non-terminal values are output
-	// only — reconcile logic never branches on them. Succeeded/Failed mark
-	// the end of this one-time operation (like a Job's completion) and stop
-	// further convergence, but never by themselves justify a destructive
-	// action: deletion re-checks the target's live readiness too.
+	// Stage reports progress observed from live cluster state. Succeeded and
+	// Failed end reconciliation. Deletion also checks live target readiness
+	// to protect a database that became ready before its status was recorded.
 	// +optional
 	Stage string `json:"stage,omitempty"`
 
@@ -138,17 +125,13 @@ type DBRestoreStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// SnapshotUID is the UID of the DBSnapshot spec.snapshotRef resolved to,
-	// captured once at admission so a later rename or recreation of the
-	// same-named snapshot can never silently redirect an in-progress
-	// restore.
+	// SnapshotUID records the snapshot identity at admission, preventing
+	// a recreated snapshot with the same name from redirecting the restore.
 	// +optional
 	SnapshotUID string `json:"snapshotUID,omitempty"`
 
-	// SourceInstanceUID mirrors the snapshot's own status.source.instanceUID
-	// — never a live lookup of the source DBInstance, which is what lets
-	// this be captured (and the restore-hold Lease labeled with it) even
-	// after the source is deleted.
+	// SourceInstanceUID is copied from the snapshot's source metadata. It
+	// identifies the source for restore holds even after the source is deleted.
 	// +optional
 	SourceInstanceUID types.UID `json:"sourceInstanceUID,omitempty"`
 
@@ -166,19 +149,14 @@ type DBRestoreStatus struct {
 	// +optional
 	Resolved *ResolvedRestoreFields `json:"resolved,omitempty"`
 
-	// TargetInstanceUID is the UID of the DBInstance this restore created,
-	// recorded once and never cleared — not even after that instance is
-	// gone. It only ever restricts what the controller does: once set, a
-	// missing target means "lost", never "not created yet", so it is never
-	// recreated. Liveness and readiness are always re-observed from the
-	// cluster, never inferred from this field.
+	// TargetInstanceUID records the created database identity and is never
+	// cleared. If that instance disappears, the restore fails instead of
+	// recreating it. Readiness is checked from live state.
 	// +optional
 	TargetInstanceUID types.UID `json:"targetInstanceUID,omitempty"`
 
-	// Deadline is when this restore times out: its creation time plus the
-	// operator's restore.timeout. Shown for visibility only — the
-	// controller recomputes it every pass from metadata.creationTimestamp
-	// and never reads it back.
+	// Deadline is the creation time plus the operator's restore timeout.
+	// It is informational; the controller recomputes it on each pass.
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
@@ -205,9 +183,7 @@ const (
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// DBRestore represents one restore operation: a snapshot plus target-instance
-// parameters in, a new DBInstance out. Namespaced. A one-time operation
-// request — see the package doc comment on DBRestoreSpec.
+// DBRestore is a namespaced request to restore a snapshot into a new DBInstance.
 type DBRestore struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

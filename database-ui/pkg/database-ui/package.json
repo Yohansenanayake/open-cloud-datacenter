@@ -1,0 +1,36 @@
+{
+  "name": "database-ui",
+  "description": "Database as a Service for Harvester: self-service managed databases on dedicated virtual machines, provisioned and operated from Rancher",
+  "version": "0.1.0",
+  "private": false,
+  "icon": "https://raw.githubusercontent.com/wso2/open-cloud-datacenter/operators/database-ui/pkg/database-ui/assets/icon.svg",
+  "homepage": "https://github.com/wso2/open-cloud-datacenter",
+  "keywords": [
+    "dbaas",
+    "database",
+    "postgresql",
+    "harvester"
+  ],
+  "rancher": {
+    "annotations": {
+      "catalog.cattle.io/certified": "third-party",
+      "catalog.cattle.io/display-name": "DBaaS",
+      "catalog.cattle.io/rancher-version": ">= 2.15.0",
+      "catalog.cattle.io/ui-extensions-version": ">= 3.0.0 < 4.0.0"
+    }
+  },
+  "scripts": {},
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@vue/cli-plugin-babel": "5.0.9",
+    "@vue/cli-service": "5.0.8",
+    "@vue/cli-plugin-typescript": "5.0.9"
+  },
+  "browserslist": [
+    "> 1%",
+    "last 2 versions",
+    "not dead"
+  ]
+}

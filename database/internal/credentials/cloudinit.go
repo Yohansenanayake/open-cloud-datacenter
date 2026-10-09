@@ -71,21 +71,11 @@ func BuildCloudInit(p BootstrapParams, m *Material) (userdata, networkdata strin
 	return buildUserData(p, m), BuildNetworkData(p)
 }
 
-// BuildNetworkData returns the cloud-init network-config v2 YAML for the
-// VM's single NIC. KubeVirt's cloudInitNoCloud datasource reads it from
-// the Secret key `networkdata` and applies it at the `init-local`
-// stage — before systemd-networkd starts — so each NIC has its IP,
-// gateway and DNS before any module tries to talk to the network.
-// (A write_files netplan stanza is too late: it lands during the
-// `config` stage, after `apt update` has already failed for lack of
-// routing.)
-//
-// Single interface:
-//   - enp1s0 (data-net): tenant client traffic and first-boot egress
-//     for apt installs. DHCP unless StaticNetwork is set, in which
-//     case the supplied address / gateway / DNS are written as static
-//     config. The data VLAN must have internet connectivity for
-//     cloud-init package installation to succeed.
+// BuildNetworkData returns cloud-init network-config v2 for the data NIC.
+// The networkdata Secret key configures enp1s0 before network-dependent
+// bootstrap steps; a write_files netplan entry would be applied too late.
+// DHCP is the default. StaticNetwork supplies address, gateway, and DNS.
+// The network must provide egress for any bootstrap package installation.
 func BuildNetworkData(p BootstrapParams) string {
 	if p.StaticNetwork == nil {
 		return `version: 2
@@ -462,6 +452,16 @@ ssh_pwauth: true
         restart_postgres "${PG_START_TIMEOUT_SECONDS:-300}" "after opening remote access"
         echo "${RESTORE_ID}" > "${RESTORE_MARKER}"
       fi
+
+      # The baked image leaves PostgreSQL disabled so first boot and repave
+      # can prepare the data disk before starting the selected cluster.
+      # Once initialization (including any restore) succeeds, enable the
+      # umbrella unit for subsequent boots. Its generator starts the selected
+      # cluster with start.conf=auto. Do not use --now: the cluster is already
+      # running, and its explicit restart/readiness checks above remain the
+      # authority for this bootstrap.
+      systemctl enable postgresql.service \
+        || bootstrap_fail "could not enable PostgreSQL startup on boot"
 
       # Bootstrap-completion marker, checked by the KubeVirt readiness probe
       # (internal/harvester/typed_client.go). pg_isready alone answers "is a
