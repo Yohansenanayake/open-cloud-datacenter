@@ -153,6 +153,19 @@ Not `Available`? `kubectl describe dbinstance dbaas-test-01 -n default` — the 
 
 **Definition of done:** `Addon` status `AddonDeploySuccessful` **+** manager pod `Running` with the expected image **+** a test `DBInstance` reaching `Available`. All three — a healthy `Addon` status alone doesn't prove a database can provision.
 
+## Optional: operator metrics (Prometheus)
+
+Both monitoring settings are **off** by default, and the defaults work on any Harvester cluster.
+
+- **`prometheus.enable`** (default `false`) creates a `ServiceMonitor` for the operator's own controller metrics (reconciles, errors, work queues) — not PostgreSQL metrics. Enable it only when the cluster has the Prometheus operator's `ServiceMonitor` CRD, which Harvester's `rancher-monitoring` add-on provides (`kubectl get crd servicemonitors.monitoring.coreos.com`). Without the CRD the Addon install fails. Set it in the Addon manifest (step 8):
+  ```yaml
+    valuesContent: |-
+      prometheus:
+        enable: true
+  ```
+  Then check the target appears under Prometheus → Targets. Metrics are served over HTTPS with a self-signed certificate (the `ServiceMonitor` skips verification) and need an authorized token: if scrapes return 403, bind the chart's `metrics-reader` ClusterRole to Prometheus's service account.
+- **`certManager.enable`** (default `false`) — leave it off. The operator has no webhooks and the chart has no `Certificate`/`Issuer` templates, so enabling it only points the `ServiceMonitor` at a `metrics-server-cert` Secret that nothing creates. It becomes relevant if the chart later adds certificates, for example a conversion webhook when the API moves beyond `v1alpha1`.
+
 ## Upgrading an already-installed Addon
 
 A version bump does **not** need disable/re-enable — Harvester's controller reacts to a `spec.version` change with a real `helm upgrade --install` in place, leaving CRDs and existing `DBInstance`s untouched.
@@ -175,15 +188,21 @@ kubectl delete addon dbaas-operator -n dbaas-system
 ```
 `values.yaml`'s default `crd.keep: true` (`helm.sh/resource-policy: keep`) retains the `DBInstance`, `DBSnapshot`, and `DBRestore` CRDs and their resources when uninstalling. It has no effect on normal `helm upgrade` schema changes, which still apply in place. Keep this setting enabled to preserve existing instances, snapshots, and restores.
 
-## Publishing a real release
+## Publishing a release
 
-Once WSO2 registry access exists:
+Releases are built by `.github/workflows/dbaas-release.yaml` from a `dbaas/vX.Y.Z` tag on `operators`. The operator and the Rancher UI extension (`database-ui/`) are released together at the same version.
 
-1. Bump `Chart.yaml`'s `version`/`appVersion` and the image tag together (`0.1.x` lockstep policy, Discussion #303 §"Versioning").
-2. `git tag database/vX.Y.Z && git push origin database/vX.Y.Z`
-3. Run steps 3–5 against `ghcr.io/wso2/...`.
-4. Create a GitHub Release for that tag; attach the `.tgz` and (if generated) `dist/install.yaml` as **release assets** — `gh release upload database/vX.Y.Z dbaas-operator-<X.Y.Z>.tgz dist/install.yaml`. Neither is ever committed (same pattern cert-manager uses for `cert-manager.yaml`).
-5. Reference the exact digests in the release notes, as Discussion #303's "Reproducibility record" does.
+1. In a release PR, set the version in `Chart.yaml` (`version` and `appVersion`), `database-ui/package.json` and `database-ui/pkg/database-ui/package.json`, and add `database/release-notes/X.Y.Z.md`.
+2. After it merges, a maintainer pushes the tag: `git tag dbaas/vX.Y.Z && git push upstream dbaas/vX.Y.Z`.
+3. The workflow checks the versions, runs the operator and UI tests, then publishes to `ghcr.io/<owner>`:
+   - `dbaas-operator:X.Y.Z` (operator image);
+   - `charts/dbaas-operator` version `X.Y.Z` (Helm chart, OCI);
+   - `ui-extension-database-ui:X.Y.Z` (Extension Catalog Image).
+
+   It then creates a **draft** GitHub release with the chart, a filled-in Addon manifest (`dbaas-operator-addon.yaml`), a release manifest with digests (`dbaas-release-manifest.yaml`) and `SHA256SUMS`.
+4. Install from the draft and verify it, then publish the release.
+
+Published versions are never overwritten: the workflow stops if any artifact already exists. Fix a bad release with a new version. A fork runs the same workflow against its own `ghcr.io/<fork owner>` namespace, which is how to rehearse a release.
 
 ## Known gotchas
 

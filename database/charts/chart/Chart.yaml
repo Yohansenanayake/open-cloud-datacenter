@@ -3,8 +3,8 @@ name: dbaas-operator
 description: DBaaS operator for provisioning PostgreSQL on Harvester/KubeVirt via the DBInstance CRD
 type: application
 
-version: 0.1.0-experiment.1
-appVersion: "0.1.0-experiment.1"
+version: 0.1.0
+appVersion: "0.1.0"
 
 keywords:
   - kubernetes
