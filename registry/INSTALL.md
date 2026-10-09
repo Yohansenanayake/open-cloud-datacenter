@@ -255,16 +255,16 @@ GHCR packages default to **Private**, and the Addon's install Job and the kubele
 
 ### Publishing a release
 
-Releases are built by [`registry-release.yaml`](../.github/workflows/registry-release.yaml) from a `registry/vX.Y.Z` tag on `operators`. The operator and the Rancher UI extension (`registry-ui/`) are released together at the same version.
+Releases are built by [`raas-release.yaml`](../.github/workflows/raas-release.yaml) from a `raas/vX.Y.Z` tag on `operators`. The operator and the Rancher UI extension (`registry-ui/`) are released together at the same version.
 
 1. In a release PR, set the version in `Chart.yaml` (`version` and `appVersion`), `registry-ui/package.json` and `registry-ui/pkg/registry-ui/package.json`, add `registry/release-notes/X.Y.Z.md`, and add the version's row to "Compatibility" above.
-2. After it merges, a maintainer pushes the tag: `git tag registry/vX.Y.Z && git push upstream registry/vX.Y.Z`.
+2. After it merges, a maintainer pushes the tag: `git tag raas/vX.Y.Z && git push upstream raas/vX.Y.Z`.
 3. The workflow checks the versions, runs the operator and UI tests, then publishes to `ghcr.io/<owner>`:
    - `registry-operator:X.Y.Z` (operator image);
    - `charts/registry-operator` version `X.Y.Z` (Helm chart, OCI);
    - `ui-extension-registry-ui:X.Y.Z` (Extension Catalog Image).
 
-   It then creates a **draft** GitHub release with the chart, an Addon manifest with the chart filled in (`registry-operator-addon.yaml`), a release manifest with digests (`registry-release-manifest.yaml`) and `SHA256SUMS`.
+   It then creates a **draft** GitHub release with the chart, an Addon manifest with the chart filled in (`registry-operator-addon.yaml`), a release manifest with digests (`raas-release-manifest.yaml`) and `SHA256SUMS`.
 4. First release only: make the three packages public — GitHub → **Packages** → package → **Package settings** → **Change visibility**.
 5. Install from the draft and verify it, then publish the release.
 

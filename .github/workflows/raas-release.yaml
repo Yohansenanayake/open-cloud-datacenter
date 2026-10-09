@@ -1,7 +1,7 @@
-name: registry-release
+name: raas-release
 
 # Release the registry operator and its Rancher UI extension together from a
-# registry/vX.Y.Z tag on the operators branch. All artifacts share the version:
+# raas/vX.Y.Z tag on the operators branch. All artifacts share the version:
 #
 #   operator image   ghcr.io/<owner>/registry-operator:X.Y.Z
 #   Helm chart       oci://ghcr.io/<owner>/charts/registry-operator  (version X.Y.Z)
@@ -25,12 +25,12 @@ name: registry-release
 on:
   push:
     tags:
-      - 'registry/v*'
+      - 'raas/v*'
 
 permissions: {}
 
 concurrency:
-  group: registry-release
+  group: raas-release
   cancel-in-progress: false
 
 defaults:
@@ -61,8 +61,8 @@ jobs:
         run: |
           fail() { echo "::error::$*"; exit 1; }
 
-          version="${TAG#registry/v}"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || fail "Tag $TAG is not registry/vX.Y.Z"
+          version="${TAG#raas/v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || fail "Tag $TAG is not raas/vX.Y.Z"
 
           git branch -r --contains "$GITHUB_SHA" | grep -qx '  origin/operators' \
             || fail "$TAG is not on the operators branch"
@@ -340,7 +340,7 @@ jobs:
           crd_api=$(yq '.spec.group + "/" + (.spec.versions[] | select(.served) | .name)' \
             registry/config/crd/bases/registry.opencloud.wso2.com_registries.yaml | head -1)
           rancher_version=$(jq -r '.rancher.annotations["catalog.cattle.io/rancher-version"]' registry-ui/pkg/registry-ui/package.json)
-          cat > dist/registry-release-manifest.yaml <<EOF
+          cat > dist/raas-release-manifest.yaml <<EOF
           release: $TAG
           version: $VERSION
           commit: $GITHUB_SHA
@@ -352,10 +352,10 @@ jobs:
           requires:
             rancher: "$rancher_version"
           EOF
-          yq 'true' dist/registry-release-manifest.yaml > /dev/null
+          yq 'true' dist/raas-release-manifest.yaml > /dev/null
 
           (cd dist && sha256sum ./*.tgz ./*.yaml | sed 's|\./||' > SHA256SUMS)
-          cat dist/registry-release-manifest.yaml dist/SHA256SUMS
+          cat dist/raas-release-manifest.yaml dist/SHA256SUMS
 
       - name: Create the draft release
         env:
@@ -375,20 +375,20 @@ jobs:
             echo "| Helm chart | \`$CHART_REPO/registry-operator\` version \`$VERSION\` | \`$CHART_DIGEST\` |"
             echo "| UI extension (Extension Catalog Image) | \`$UI_IMAGE:$VERSION\` | \`$UI_DIGEST\` |"
             echo
-            echo "Attached: the chart, \`registry-operator-addon.yaml\` (Harvester Addon), \`registry-release-manifest.yaml\` and \`SHA256SUMS\`."
+            echo "Attached: the chart, \`registry-operator-addon.yaml\` (Harvester Addon), \`raas-release-manifest.yaml\` and \`SHA256SUMS\`."
           } > dist/release-notes.md
 
           prerelease=()
           [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag "${prerelease[@]}" \
-            --title "Registry $VERSION" --notes-file dist/release-notes.md \
+            --title "RaaS $VERSION" --notes-file dist/release-notes.md \
             "dist/registry-operator-$VERSION.tgz" dist/registry-operator-addon.yaml \
-            dist/registry-release-manifest.yaml dist/SHA256SUMS
+            dist/raas-release-manifest.yaml dist/SHA256SUMS
 
       - name: Summary
         run: |
           {
-            echo "### Registry $VERSION: draft release created"
+            echo "### RaaS $VERSION: draft release created"
             echo
             echo "- \`$OPERATOR_IMAGE:$VERSION\`"
             echo "- \`$CHART_REPO/registry-operator\` \`$VERSION\`"

@@ -62,7 +62,7 @@ Developer load URL: `http://127.0.0.1:4500/registry-ui-0.1.0/registry-ui-0.1.0.u
 ## Release
 
 The extension is released together with the registry operator, at the same version, by
-`.github/workflows/registry-release.yaml` from a `registry/vX.Y.Z` tag: set `version` in
+`.github/workflows/raas-release.yaml` from a `raas/vX.Y.Z` tag: set `version` in
 `registry-ui/package.json` and `pkg/registry-ui/package.json` to match the chart, then see
 `registry/INSTALL.md`, "Publishing a release". The release publishes the Extension Catalog Image
 `ghcr.io/<owner>/ui-extension-registry-ui:<version>`; import it in Rancher under **Extensions → ⋮ →

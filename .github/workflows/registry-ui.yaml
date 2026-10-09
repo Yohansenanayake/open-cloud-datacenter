@@ -1,7 +1,7 @@
 name: registry-ui
 
 # Lint, test and build the registry operator's Rancher UI extension (registry-ui/).
-# Releases are published by registry-release.yaml, together with the operator.
+# Releases are published by raas-release.yaml, together with the operator.
 
 on:
   pull_request:
