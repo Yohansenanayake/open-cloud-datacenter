@@ -1,0 +1,71 @@
+product:
+  registries: Registries
+  registryManager: Registries
+
+typeLabel:
+  registry.opencloud.wso2.com.registry: |-
+    {count, plural,
+      one { Registry }
+      other { Registries }
+    }
+
+registryUi:
+  manager:
+    clusters:
+      label: Clusters
+      title: Registry Clusters
+      description: Harvester clusters where you can manage container registries.
+      none: No clusters with the registry operator are available to you.
+      manage: Manage
+      retry: Retry
+      actions: Actions for {name}
+      tableHeaders:
+        harvesterVersion: Harvester Version
+        kubernetesVersion: Kubernetes Version
+        apiVersion: Registry API Version
+      unavailable: Rancher reports this cluster as not connected, so it could not be checked.
+      error: 'Could not check this cluster for the registry operator: {message}'
+      status:
+        available: Available
+        unavailable: Unavailable
+        error: Error
+  overview:
+    title: Overview
+    subtitle: Every registry this operator manages, and the operator’s own health.
+    operator: Operator
+    harbor: Harbor
+    addon: Harvester Addon
+    pod: Operator pod
+    ready: Ready
+    notReady: Not ready
+    notInstalled: Not found
+    total: Registries
+    readyCount: Ready
+    attention: Need attention
+    committed: Quota committed
+    byPlan: By plan
+    needsAttention: Registries that are not Ready
+    allReady: All registries are Ready.
+    none: No registries yet.
+  headers:
+    plan: Plan
+    quota: Quota
+    project: Harbor project
+    url: Registry URL
+  detail:
+    summary: Summary
+    connect: Connect
+    phase: Phase
+    message: Message
+    project: Harbor project
+    projectId: Harbor project ID
+    url: Registry URL
+    quota: Storage quota
+    pullSecret: Pull credential (Secret)
+    pushSecret: Push credential (Secret)
+    readCreds: Show a credential’s username and password
+    push: Push an image
+    copy: Use it on another cluster
+  edit:
+    plan: Plan
+    planHelp: Storage quota inside Harbor. Can be changed later.
