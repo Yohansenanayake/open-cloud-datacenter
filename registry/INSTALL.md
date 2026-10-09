@@ -255,7 +255,7 @@ GHCR packages default to **Private**, and the Addon's install Job and the kubele
 
 ### Publishing a release
 
-A tag publishes the release through [`registry-release.yaml`](../.github/workflows/registry-release.yaml); the steps above are for testing a build by hand.
+A tag publishes the release through [`registry-release.yaml`](../.github/workflows/registry-release.yaml). The build and push steps above are for testing in a registry of your own; never push a release version to `ghcr.io/wso2` by hand, or the workflow refuses it. If a release run fails part-way, re-run it for the same tag: it reuses what it already pushed from that commit.
 
 1. In a PR: bump `Chart.yaml`'s `version` and `appVersion` together — they move in lockstep — add the version's section to [CHANGELOG.md](CHANGELOG.md), and add its row to "Compatibility" above. Merge it.
 2. A maintainer tags the merged commit: `git tag registry/vX.Y.Z <commit> && git push <wso2 remote> registry/vX.Y.Z`.

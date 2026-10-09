@@ -83,7 +83,8 @@ jobs:
           persist-credentials: false
 
       # The image tag comes from registry-ui/package.json and the bundle name
-      # from pkg/registry-ui/package.json; both must match the release tag.
+      # from pkg/registry-ui/package.json; both, and a CHANGELOG section, must
+      # match the release tag. Checked before anything is published.
       - name: Check versions
         id: version
         env:
@@ -95,6 +96,11 @@ jobs:
           pkg=$(jq -r .version pkg/registry-ui/package.json)
           if ! [[ "$version" == "$root" && "$version" == "$pkg" ]]; then
             echo "::error::Tag $TAG does not match package.json ($root) and pkg/registry-ui/package.json ($pkg)"
+            exit 1
+          fi
+          awk -v h="## $version" '$0 == h || index($0, h " ") == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::registry-ui/CHANGELOG.md has no section for $version"
             exit 1
           fi
           owner=$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
@@ -111,14 +117,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Rancher's script only refuses to overwrite images in the rancher org
+      # A published release is never replaced; Rancher's script only refuses to
+      # overwrite images in the rancher org. A rerun of this run reuses the image
+      # its earlier attempt pushed, so a failure after the push can be finished.
       - name: Refuse to overwrite a published version
+        id: existing
         env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
           IMAGE: ${{ steps.version.outputs.image }}
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
-          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
-            echo "::error::$IMAGE already exists. Bump the version instead of re-releasing it."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Bump the version instead of re-releasing it."
             exit 1
+          fi
+          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+            if (( ATTEMPT == 1 )); then
+              echo "::error::$IMAGE already exists. Bump the version instead of re-releasing it."
+              exit 1
+            fi
+            echo "Reusing $IMAGE, pushed by attempt $(( ATTEMPT - 1 )) of this run."
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup Helm
@@ -138,6 +158,7 @@ jobs:
         run: yarn install --frozen-lockfile --ignore-scripts
 
       - name: Build and push the catalog image
+        if: steps.existing.outputs.reuse != 'true'
         env:
           OWNER: ${{ steps.version.outputs.owner }}
         run: yarn publish-pkgs -c -p -r "$REGISTRY" -o "$OWNER"
@@ -148,8 +169,8 @@ jobs:
           IMAGE: ${{ steps.version.outputs.image }}
         run: docker manifest inspect "$IMAGE" > /dev/null
 
-      # The version's CHANGELOG section is the release text; 0.x versions are
-      # previews, so they are marked as pre-releases.
+      # The version's CHANGELOG section, checked earlier, is the release text;
+      # 0.x versions are previews, so they are marked as pre-releases.
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -157,12 +178,8 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           IMAGE: ${{ steps.version.outputs.image }}
         run: |
-          awk -v v="$VERSION" 'index($0, "## " v) == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
-          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
-            echo "::error::registry-ui/CHANGELOG.md has no section for $VERSION"
-            exit 1
-          fi
-          digest=$(docker buildx imagetools inspect "$IMAGE" | awk '/^Digest:/ {print $2; exit}')
+          digest=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" == sha256:* ]] || { echo "::error::No digest for $IMAGE"; exit 1; }
           {
             echo "| Artifact | Reference | Digest |"
             echo "| --- | --- | --- |"

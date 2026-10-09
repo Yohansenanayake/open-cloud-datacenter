@@ -6,6 +6,8 @@ name: registry-release
 # and a GitHub Release with the version's CHANGELOG section as its text, the
 # image and chart digests, and the chart archive attached.
 #
+# A failed release is finished by re-running the workflow for the same tag.
+#
 # Release: bump version and appVersion in registry/charts/chart/Chart.yaml, add
 # the version's section to registry/CHANGELOG.md, merge, then push the tag
 # registry/v<version> (for example registry/v0.1.0). After the first release,
@@ -53,7 +55,7 @@ jobs:
             echo "::error::Tag $TAG does not match Chart.yaml (version $chart, appVersion $app)"
             exit 1
           fi
-          awk -v v="$version" 'index($0, "## " v) == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          awk -v h="## $version" '$0 == h || index($0, h " ") == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
             echo "::error::CHANGELOG.md has no section for $version"
             exit 1
@@ -83,19 +85,17 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin
 
-      # A published version is never replaced: users and digests depend on it.
-      - name: Refuse to overwrite a published version
+      # A published release is never replaced: users and digests depend on it.
+      # The GitHub Release is created last, so it marks a finished release. An
+      # image or chart an earlier, failed run pushed is reused only when it was
+      # built from this commit, so a rerun can finish the release.
+      - name: Refuse to overwrite a published release
         env:
-          IMAGE: ${{ steps.version.outputs.image }}
-          CHARTS: ${{ steps.version.outputs.charts }}
-          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
-            echo "::error::$IMAGE already exists. Bump the version instead of re-releasing it."
-            exit 1
-          fi
-          if helm show chart "$CHARTS/registry-operator" --version "$VERSION" > /dev/null 2>&1; then
-            echo "::error::Chart $VERSION already exists. Bump the version instead of re-releasing it."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Bump the version instead of re-releasing it."
             exit 1
           fi
 
@@ -105,22 +105,49 @@ jobs:
           IMAGE: ${{ steps.version.outputs.image }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker build --build-arg VERSION="$VERSION" -t "$IMAGE" .
-          docker push "$IMAGE" | tee "$RUNNER_TEMP/push.log"
-          digest=$(grep -o 'digest: sha256:[0-9a-f]*' "$RUNNER_TEMP/push.log" | cut -d' ' -f2)
-          [[ -n "$digest" ]] || { echo "::error::No digest in the push output"; exit 1; }
+          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+            docker pull -q "$IMAGE"
+            revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")
+            if [[ "$revision" != "$GITHUB_SHA" ]]; then
+              echo "::error::$IMAGE already exists from another commit. Bump the version instead of re-releasing it."
+              exit 1
+            fi
+            echo "Reusing $IMAGE, already pushed from this commit."
+          else
+            docker build --build-arg VERSION="$VERSION" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "$IMAGE" .
+            docker push "$IMAGE"
+          fi
+          digest=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" == sha256:* ]] || { echo "::error::No digest for $IMAGE"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The attached archive is always the one in the registry.
       - name: Package and push the chart
         id: chart
         env:
           CHARTS: ${{ steps.version.outputs.charts }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          helm package charts/chart --version "$VERSION" --app-version "$VERSION"
-          helm push "registry-operator-$VERSION.tgz" "$CHARTS" 2>&1 | tee "$RUNNER_TEMP/chart.log"
+          archive="registry-operator-$VERSION.tgz"
+          helm package charts/chart --version "$VERSION" --app-version "$VERSION" -d "$RUNNER_TEMP/built"
+          if helm show chart "$CHARTS/registry-operator" --version "$VERSION" > /dev/null 2>&1; then
+            helm pull "$CHARTS/registry-operator" --version "$VERSION" -d "$RUNNER_TEMP/published" 2>&1 | tee "$RUNNER_TEMP/chart.log"
+            mkdir -p "$RUNNER_TEMP/built-x" "$RUNNER_TEMP/published-x"
+            tar -xzf "$RUNNER_TEMP/built/$archive" -C "$RUNNER_TEMP/built-x"
+            tar -xzf "$RUNNER_TEMP/published/$archive" -C "$RUNNER_TEMP/published-x"
+            if ! diff -r "$RUNNER_TEMP/built-x" "$RUNNER_TEMP/published-x" > /dev/null; then
+              echo "::error::Chart $VERSION already exists with different contents. Bump the version instead of re-releasing it."
+              exit 1
+            fi
+            echo "Reusing chart $VERSION, identical to this commit's."
+            cp "$RUNNER_TEMP/published/$archive" "$archive"
+          else
+            cp "$RUNNER_TEMP/built/$archive" "$archive"
+            helm push "$archive" "$CHARTS" 2>&1 | tee "$RUNNER_TEMP/chart.log"
+          fi
           digest=$(grep -o 'sha256:[0-9a-f]*' "$RUNNER_TEMP/chart.log" | head -1)
-          [[ -n "$digest" ]] || { echo "::error::No digest in the helm push output"; exit 1; }
+          [[ -n "$digest" ]] || { echo "::error::No chart digest in the helm output"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       # 0.x versions are previews, so they are marked as pre-releases.
