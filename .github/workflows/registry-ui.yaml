@@ -98,7 +98,9 @@ jobs:
             echo "::error::Tag $TAG does not match package.json ($root) and pkg/registry-ui/package.json ($pkg)"
             exit 1
           fi
-          awk -v h="## $version" '$0 == h || index($0, h " ") == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          # Relative links resolve against the repository, not the release page.
+          awk -v h="## $version" '$0 == h || index($0, h " ") == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md \
+            | sed -E "s#\]\(([^):]+)\)#](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/registry-ui/\1)#g" > "$RUNNER_TEMP/notes.md"
           if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
             echo "::error::registry-ui/CHANGELOG.md has no section for $version"
             exit 1

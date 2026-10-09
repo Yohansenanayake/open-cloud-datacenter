@@ -55,7 +55,9 @@ jobs:
             echo "::error::Tag $TAG does not match Chart.yaml (version $chart, appVersion $app)"
             exit 1
           fi
-          awk -v h="## $version" '$0 == h || index($0, h " ") == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          # Relative links resolve against the repository, not the release page.
+          awk -v h="## $version" '$0 == h || index($0, h " ") == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md \
+            | sed -E "s#\]\(([^):]+)\)#](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/registry/\1)#g" > "$RUNNER_TEMP/notes.md"
           if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
             echo "::error::CHANGELOG.md has no section for $version"
             exit 1
@@ -166,9 +168,6 @@ jobs:
             echo "| --- | --- | --- |"
             echo "| Image | \`$IMAGE\` | \`$IMAGE_DIGEST\` |"
             echo "| Chart | \`$CHARTS/registry-operator\`, version \`$VERSION\` | \`$CHART_DIGEST\` |"
-            echo
-            echo "Install: see [registry/INSTALL.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/registry/INSTALL.md)."
-            echo
             cat "$RUNNER_TEMP/notes.md"
           } > "$RUNNER_TEMP/release.md"
           prerelease=()
