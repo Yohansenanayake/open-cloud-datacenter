@@ -552,3 +552,36 @@ func TestStatusError_NamesTheCallAndTheResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestRobotAccess(t *testing.T) {
+	has := func(access []map[string]string, resource, action string) bool {
+		for _, a := range access {
+			if a["resource"] == resource && a["action"] == action {
+				return true
+			}
+		}
+		return false
+	}
+
+	pull := AccessPull.harborAccess()
+	for _, want := range [][2]string{{"repository", "pull"}, {"artifact", "read"}} {
+		if !has(pull, want[0], want[1]) {
+			t.Errorf("pull access lacks %s:%s", want[0], want[1])
+		}
+	}
+	for _, deny := range [][2]string{{"repository", "push"}, {"repository", "delete"}, {"artifact", "delete"}, {"tag", "delete"}} {
+		if has(pull, deny[0], deny[1]) {
+			t.Errorf("pull access must not grant %s:%s", deny[0], deny[1])
+		}
+	}
+
+	push := AccessPush.harborAccess()
+	for _, want := range [][2]string{
+		{"repository", "pull"}, {"repository", "push"}, {"tag", "create"},
+		{"repository", "delete"}, {"artifact", "delete"}, {"tag", "delete"},
+	} {
+		if !has(push, want[0], want[1]) {
+			t.Errorf("push access lacks %s:%s", want[0], want[1])
+		}
+	}
+}

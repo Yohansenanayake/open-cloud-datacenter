@@ -1,0 +1,46 @@
+# Example Addon manifest — replace every <placeholder> before applying.
+# See registry/INSTALL.md for the full walkthrough, including the network
+# attachment this expects in registry-system when there is no route to Harbor.
+# For your own environment, copy this to registry-operator.local.yaml
+# (gitignored) and fill in the values there — the filled-in file holds a
+# password, so never commit it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry-system
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: Addon
+metadata:
+  name: registry-operator
+  namespace: registry-system
+  labels:
+    addon.harvesterhci.io/experimental: "true"
+spec:
+  enabled: true
+  # Harvester's Addon CRD requires the `repo` key, but the install job only runs
+  # `helm repo add` when it is non-empty — and that does not understand oci://.
+  # An explicit empty string satisfies the schema; the pull goes through `chart`.
+  repo: ""
+  chart: oci://ghcr.io/wso2/charts/registry-operator
+  version: 0.1.0
+  valuesContent: |-
+    harbor:
+      url: https://<harbor-host>
+      # The chart stores these in the Secret harbor-credentials. Remove the block
+      # if you created that Secret yourself; never commit this file filled in.
+      credentials:
+        username: <harbor-user>
+        password: <password>
+      # Harbor's CA certificate (public). Remove for a publicly-rooted certificate.
+      caBundle: |
+        -----BEGIN CERTIFICATE-----
+        <contents of harbor-ca.crt>
+        -----END CERTIFICATE-----
+      # Omit when Harvester pods can already route to Harbor.
+      networkAttachment: registry-system/<harbor-network-attachment>
+    manager:
+      # A whereabouts pool sized for one pod: the old pod must release its
+      # address before the new one can start, or every upgrade stalls.
+      strategy:
+        type: Recreate

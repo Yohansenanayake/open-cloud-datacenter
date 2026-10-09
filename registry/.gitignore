@@ -37,3 +37,18 @@ go.work
 # etc.) — see config/local/kustomization.yaml. The .example template stays
 # tracked; the real patch file never does.
 config/local/manager_local_patch.yaml
+
+# Real cluster paths and addresses for hack/harvester/*.sh. The .example
+# template stays tracked.
+hack/harvester/harvester.env
+
+# kubebuilder helm plugin's intermediate output (dist/install.yaml), rebuilt by
+# `make build-installer`. charts/chart/ is the maintained chart, not this.
+dist/
+
+# Packaged chart archives — published as release assets, never committed.
+*.tgz
+
+# Personal copies of committed examples (e.g. the Addon manifest) holding a real
+# registry path or Harbor address.
+*.local.yaml

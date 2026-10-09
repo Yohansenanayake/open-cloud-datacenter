@@ -20,6 +20,10 @@ import (
 
 var scheme = runtime.NewScheme()
 
+// version is the release this binary was built from, set at build time with
+// -ldflags "-X main.version=<version>".
+var version = "dev"
+
 // init registers the API types with the scheme.
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -63,6 +67,7 @@ func main() {
 
 	registryReconciler := &controller.RegistryReconciler{
 		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorder("registry"),
 		HarborCfg: cfg.Harbor,
@@ -90,7 +95,7 @@ func main() {
 		logger.Warn("HARBOR_URL uses http, so the Harbor password is sent in clear on every request; " +
 			"this is only appropriate for a local development Harbor")
 	}
-	logger.Info("starting registry operator", zap.String("harbor", cfg.Harbor.URL))
+	logger.Info("starting registry operator", zap.String("version", version), zap.String("harbor", cfg.Harbor.URL))
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		logger.Fatal("controller manager error", zap.Error(err))
 	}

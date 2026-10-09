@@ -10,6 +10,13 @@ the `Registry`. The operator installs nothing and manages no storage.
 
 Runs on any conformant Kubernetes cluster — it uses no vendor APIs.
 
+| To | Read |
+|:---|:---|
+| Install a release (Helm chart, Harvester Addon) | [INSTALL.md](./INSTALL.md) |
+| See what changed in each release | [CHANGELOG.md](./CHANGELOG.md) |
+| Manage registries from Rancher | the Rancher UI extension in `registry-ui/` |
+| Understand and develop the operator | this README |
+
 ## Requirements
 
 | Requirement | Notes |
@@ -41,11 +48,13 @@ Once `Ready`, two Secrets exist in the same namespace, both
 | Status field | Grants | Use it for |
 |:---|:---|:---|
 | `.status.pullSecretName` | pull only | `imagePullSecrets` on the clusters that run these images |
-| `.status.pushSecretName` | pull, push, tag | a build pipeline |
+| `.status.pushSecretName` | pull, push, tag, delete | a build pipeline |
 
 They are separate Harbor accounts. A pull credential is copied onto every cluster
 that runs the images and ends up in many hands, so it must not be able to
-overwrite what it reads.
+overwrite what it reads. The push credential can also delete images, so a
+pipeline can clean up after itself; treat it as able to destroy everything in
+the project.
 
 Copying the pull Secret to another cluster means stripping the fields that tie it
 to this one — `ownerReferences`, `uid`, `resourceVersion`, `creationTimestamp`
@@ -186,13 +195,17 @@ boundary, not a per-`Registry` one.
 ## Quickstart
 
 ```sh
-make docker-build docker-push IMG=<registry>/registry-provisioner:<tag>
+make docker-build docker-push IMG=<registry>/registry-operator:<tag>
 KUBECONFIG=<kubeconfig> make install
-KUBECONFIG=<kubeconfig> make deploy IMG=<registry>/registry-provisioner:<tag>
+KUBECONFIG=<kubeconfig> make deploy IMG=<registry>/registry-operator:<tag>
 
 kubectl apply -n <your-namespace> -k config/samples/
 kubectl get registries -A -w
 ```
+
+The above is the development path (kustomize + `make deploy`). For installing a
+released version via Helm and a Harvester `Addon` — the path an administrator
+uses — see [`INSTALL.md`](./INSTALL.md).
 
 ## Uninstalling
 

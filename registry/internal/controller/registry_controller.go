@@ -45,6 +45,9 @@ const labelRegistry = "registry.opencloud.wso2.com/registry"
 // project inside that same Harbor.
 type RegistryReconciler struct {
 	client.Client
+	// APIReader reads from the API server, bypassing the cache. Credential Secrets
+	// are read through it, so one created moments ago is never mistaken for absent.
+	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 	HarborCfg config.HarborConfig
@@ -93,7 +96,7 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.transient(ctx, &cr, "read Harbor credentials", err)
 	}
 
-	// 3. Get the plan and quota. The plan is immutable, so a change is a spec error and get amount of bytes for that plan.
+	// 3. Resolve the plan to its quota in bytes. The quota is re-applied every pass, so a plan change takes effect here.
 	plan := cr.Spec.Plan
 	if plan == "" {
 		plan = planOrder[0]
@@ -238,7 +241,7 @@ var errProjectReplaced = errors.New("harbor project was replaced")
 func (r *RegistryReconciler) deleteCredentialSecrets(ctx context.Context, cr *registryv1alpha1.Registry) error {
 	for _, name := range []string{pullSecretName(cr), pushSecretName(cr)} {
 		var sec corev1.Secret
-		err := r.Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, &sec)
+		err := r.secretReader().Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, &sec)
 		if apierrors.IsNotFound(err) {
 			continue
 		}
@@ -272,7 +275,7 @@ func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv
 
 	key := client.ObjectKey{Namespace: cr.Namespace, Name: secretName}
 	var existing corev1.Secret
-	switch err := r.Get(ctx, key, &existing); {
+	switch err := r.secretReader().Get(ctx, key, &existing); {
 	case err == nil:
 		if !metav1.IsControlledBy(&existing, cr) {
 			return fmt.Errorf("%w: Secret %s/%s exists and is not owned by this Registry",
@@ -312,10 +315,29 @@ func (r *RegistryReconciler) ensureCredential(ctx context.Context, cr *registryv
 	if err := controllerutil.SetControllerReference(cr, sec, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := r.Create(ctx, sec); err == nil || !apierrors.IsAlreadyExists(err) {
 		return err
 	}
-	return nil
+
+	// Another pass wrote the Secret after the read above. Minting just replaced the
+	// robot it names, so its token no longer works: store the new one.
+	if err := r.secretReader().Get(ctx, key, &existing); err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(&existing, cr) {
+		return fmt.Errorf("%w: Secret %s/%s exists and is not owned by this Registry",
+			errSecretNameTaken, cr.Namespace, secretName)
+	}
+	existing.Data = sec.Data
+	return r.Update(ctx, &existing)
+}
+
+// secretReader is the uncached API reader when one is set, else the cached client.
+func (r *RegistryReconciler) secretReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // dockerConfigJSON renders credentials in the shape kubelet and docker expect.

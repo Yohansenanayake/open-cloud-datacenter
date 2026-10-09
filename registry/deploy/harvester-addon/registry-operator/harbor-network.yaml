@@ -1,0 +1,31 @@
+# Example pod network attachment giving the operator an interface on Harbor's
+# VLAN. Needed only when Harvester pods have no route to Harbor. Replace every
+# <placeholder>; see registry/INSTALL.md, "Reaching Harbor from Harvester".
+#
+# A VLAN attachment made for VMs usually declares "ipam": {}, which suits a VM
+# running its own DHCP client and gives a pod no address at all. This one
+# assigns addresses with whereabouts from a range reserved for it — have that
+# range excluded from DHCP by whoever runs the network.
+#
+# There is deliberately no "gateway": one would make this interface take the
+# pod's default route and cut the operator off from the Kubernetes API.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: <harbor-network-attachment>
+  namespace: registry-system
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "bridge",
+      "bridge": "<vm-network-bridge>",
+      "vlan": <vlan-id>,
+      "promiscMode": true,
+      "ipam": {
+        "type": "whereabouts",
+        "range": "<harbor-subnet-cidr>",
+        "range_start": "<first-reserved-address>",
+        "range_end": "<last-reserved-address>"
+      }
+    }

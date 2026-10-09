@@ -1,0 +1,16 @@
+apiVersion: v2
+name: registry-operator
+description: Registry operator — gives each namespace a project, quota and pull/push credentials in a shared Harbor through the Registry CRD
+type: application
+
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - kubernetes
+  - operator
+  - harbor
+  - container-registry
+
+annotations:
+  kubebuilder.io/generated-by: kubebuilder

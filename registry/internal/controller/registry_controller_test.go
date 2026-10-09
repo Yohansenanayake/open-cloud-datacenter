@@ -476,6 +476,59 @@ func TestEnsureCredential_DoesNotMintAgainForItsOwnSecret(t *testing.T) {
 	}
 }
 
+// staleOnceReader misses Secrets on its first read, as a cache that has not yet
+// seen a Secret created moments ago does.
+type staleOnceReader struct {
+	client.Reader
+	missed bool
+}
+
+func (s *staleOnceReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, isSecret := obj.(*corev1.Secret); isSecret && !s.missed {
+		s.missed = true
+		return apierrors.NewNotFound(corev1.Resource("secrets"), key.Name)
+	}
+	return s.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A read that misses an existing Secret mints again, which replaces the robot and
+// revokes the token that Secret holds. The Secret must end up with the new token.
+func TestEnsureCredential_StoresTheNewTokenWhenTheSecretAppearedMeanwhile(t *testing.T) {
+	cr := registryWithUID("acme-project-1", "web", "3f6b1c22-8e4a-4d1b-9f2c-5a7e0b1d4c93")
+	fc := newFakeClient(t, cr)
+	r := newRegistryReconciler(t, fc)
+	old := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pull", Namespace: cr.Namespace},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`)},
+	}
+	if err := controllerutil.SetControllerReference(cr, old, r.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := fc.Create(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	r.APIReader = &staleOnceReader{Reader: fc}
+	cli, _ := harborRobotStub(t)
+
+	if err := r.ensureCredential(context.Background(), cr, cli, 7, "web-30cf39a6",
+		testHarborURL, "web-pull", "pull-web", harbor.AccessPull); err != nil {
+		t.Fatalf("ensureCredential() error = %v", err)
+	}
+
+	var cfg struct {
+		Auths map[string]struct {
+			Password string `json:"password"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(secretFor(t, r, cr, "web-pull").Data[corev1.DockerConfigJsonKey], &cfg); err != nil {
+		t.Fatalf("unmarshal docker config: %v", err)
+	}
+	if got := cfg.Auths[dockerConfigHost(testHarborURL)].Password; got != "fresh" {
+		t.Errorf("password = %q, want the token minted in this pass", got)
+	}
+}
+
 // A Secret at that name which this Registry does not own belongs to whoever
 // created it. Taking it over or deleting it would destroy something the
 // operator never made, so the collision is reported and nothing is touched.

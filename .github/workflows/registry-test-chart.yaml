@@ -1,0 +1,139 @@
+name: registry-test-chart
+
+# Lint the registry operator's Helm chart (registry/charts/chart), install it
+# on kind next to a minimal Harbor, and drive one Registry through create ->
+# Ready -> delete. The operator only reports Ready after an authenticated
+# Harbor call, so a Harbor is required for the install itself to pass.
+# Not covered: Harvester-specific paths (Addon, Multus attachment) and TLS,
+# which need a real Harvester cluster.
+
+on:
+  pull_request:
+    paths:
+      - 'registry/**'
+      - '.github/workflows/registry-test-chart.yaml'
+  push:
+    branches: [operators]
+    paths:
+      - 'registry/**'
+      - '.github/workflows/registry-test-chart.yaml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test-chart:
+    permissions:
+      contents: read
+    name: Lint and deploy chart on kind
+    runs-on: ubuntu-latest
+    env:
+      IMG: controller:latest
+      HARBOR_CHART_VERSION: 1.19.2
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: registry/go.mod
+          cache-dependency-path: registry/go.sum
+
+      # Pinned, and checked against the release's published SHA-256.
+      - name: Install kind
+        env:
+          KIND_VERSION: v0.33.0
+          KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  kind" | sha256sum -c -
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Verify kind installation
+        run: kind version
+
+      - name: Create kind cluster
+        run: kind create cluster
+
+      - name: Prepare registry operator image
+        run: |
+          cd registry
+          make docker-build
+          kind load docker-image "$IMG"
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
+
+      - name: Lint Helm chart
+        run: cd registry && helm lint ./charts/chart --set harbor.url=https://harbor.example.com
+
+      - name: Install Harbor
+        run: |
+          HARBOR_PASSWORD="Ci$(openssl rand -hex 12)Z9"
+          echo "::add-mask::${HARBOR_PASSWORD}"
+          echo "HARBOR_PASSWORD=${HARBOR_PASSWORD}" >> "$GITHUB_ENV"
+          helm repo add goharbor https://helm.goharbor.io
+          helm install harbor goharbor/harbor --version "${HARBOR_CHART_VERSION}" \
+            --namespace harbor --create-namespace \
+            -f registry/hack/ci/harbor-values.yaml \
+            --set harborAdminPassword="${HARBOR_PASSWORD}" \
+            --set secretKey="$(openssl rand -hex 8)" \
+            --wait --timeout 10m
+
+      - name: Deploy manager via Helm
+        run: |
+          cd registry && make helm-deploy HELM_EXTRA_ARGS="\
+            --set harbor.url=http://harbor.harbor.svc.cluster.local \
+            --set harbor.allowPlaintextURL=true \
+            --set harbor.credentials.username=admin \
+            --set harbor.credentials.password=${HARBOR_PASSWORD}"
+
+      - name: Check Helm release status
+        run: cd registry && make helm-status
+
+      - name: Create a Registry and wait for Ready
+        run: |
+          kubectl create namespace ci-team
+          kubectl -n ci-team apply -f - <<'EOF'
+          apiVersion: registry.opencloud.wso2.com/v1alpha1
+          kind: Registry
+          metadata:
+            name: smoke
+          spec:
+            plan: starter
+          EOF
+          kubectl -n ci-team wait registry/smoke --for=jsonpath='{.status.phase}'=Ready --timeout=180s
+          for s in pull push; do
+            test "$(kubectl -n ci-team get secret "smoke-$s" -o jsonpath='{.type}')" = kubernetes.io/dockerconfigjson
+          done
+          echo "PROJECT=$(kubectl -n ci-team get registry smoke -o jsonpath='{.status.harborProject}')" >> "$GITHUB_ENV"
+
+      - name: Start an in-cluster HTTP client
+        run: |
+          kubectl -n ci-team run harbor-client --restart=Never --image=curlimages/curl:8.16.0 --command -- sleep 600
+          kubectl -n ci-team wait pod/harbor-client --for=condition=Ready --timeout=120s
+
+      - name: Delete the Registry and confirm cleanup
+        run: |
+          # Trailing dot: an absolute name, so no DNS search domain is tried.
+          project_status() {
+            kubectl -n ci-team exec harbor-client -- curl -s -o /dev/null -w '%{http_code}' \
+              -u "admin:${HARBOR_PASSWORD}" "http://harbor.harbor.svc.cluster.local./api/v2.0/projects/${PROJECT}"
+          }
+          test "$(project_status)" = 200
+          kubectl -n ci-team delete registry smoke --timeout=120s
+          kubectl -n ci-team wait --for=delete secret/smoke-pull secret/smoke-push --timeout=60s
+          test "$(project_status)" = 404
+
+      - name: Show operator logs
+        if: failure()
+        run: |
+          kubectl -n registry-system logs deploy/registry-operator-controller-manager --tail=100 || true
+          kubectl -n ci-team describe registry smoke || true
+          kubectl -n harbor get pods || true

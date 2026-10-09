@@ -1,0 +1,20 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+It drives the Harbor at {{ .Values.harbor.url }}.
+
+The pod becomes Ready only once Harbor answers and accepts the credentials in
+Secret {{ .Release.Namespace }}/{{ .Values.harbor.credentialsSecret }}. If it stays NotReady:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Values.harbor.credentialsSecret }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "registry.resourceName" (dict "suffix" "controller-manager" "context" $) }}
+
+Request a registry in any namespace:
+
+  kubectl -n <namespace> apply -f - <<'YAML'
+  apiVersion: registry.opencloud.wso2.com/v1alpha1
+  kind: Registry
+  metadata: {name: web}
+  spec: {plan: starter}
+  YAML
+  kubectl -n <namespace> get registry web -w
+
+Uninstalling keeps the Registry CRD, every Registry and every Harbor project.
