@@ -31,7 +31,6 @@
     ],
     "types": [
       "@types/node",
-      "cypress",
       "rancher",
       "shell"
     ]

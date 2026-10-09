@@ -131,8 +131,11 @@ export default {
 
       if (cluster) {
         this.retrying[row.id] = true;
-        await this.check(cluster);
-        this.retrying[row.id] = false;
+        try {
+          await this.check(cluster);
+        } finally {
+          this.retrying[row.id] = false;
+        }
       }
     },
 

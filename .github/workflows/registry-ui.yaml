@@ -124,15 +124,16 @@ jobs:
         with:
           version: v3.8.0
 
+      # This job holds the publish token: no restored cache, and no dependency
+      # install scripts that could read it.
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: registry-ui/.nvmrc
-          cache: yarn
-          cache-dependency-path: registry-ui/yarn.lock
+          package-manager-cache: false
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: yarn install --frozen-lockfile --ignore-scripts
 
       - name: Build and push the catalog image
         env:
