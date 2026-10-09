@@ -34,6 +34,11 @@ jobs:
       packages: write   # push the image and chart
     env:
       REGISTRY: ghcr.io
+      # What the registry answers for a version that is not published. Any other
+      # failure stops the job rather than risk pushing over a published version.
+      # GHCR can answer "denied" for a package that does not exist yet; a token
+      # that cannot read a package cannot write it either.
+      NOT_PUBLISHED: 'manifest unknown|not found|name unknown|denied'
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -107,7 +112,7 @@ jobs:
           IMAGE: ${{ steps.version.outputs.image }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+          if docker manifest inspect "$IMAGE" > "$RUNNER_TEMP/image.log" 2>&1; then
             docker pull -q "$IMAGE"
             revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")
             if [[ "$revision" != "$GITHUB_SHA" ]]; then
@@ -115,10 +120,14 @@ jobs:
               exit 1
             fi
             echo "Reusing $IMAGE, already pushed from this commit."
-          else
+          elif grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/image.log"; then
             docker build --build-arg VERSION="$VERSION" \
               --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "$IMAGE" .
             docker push "$IMAGE"
+          else
+            echo "::error::Cannot tell whether $IMAGE exists:"
+            cat "$RUNNER_TEMP/image.log"
+            exit 1
           fi
           digest=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -r .digest)
           [[ "$digest" == sha256:* ]] || { echo "::error::No digest for $IMAGE"; exit 1; }
@@ -133,7 +142,7 @@ jobs:
         run: |
           archive="registry-operator-$VERSION.tgz"
           helm package charts/chart --version "$VERSION" --app-version "$VERSION" -d "$RUNNER_TEMP/built"
-          if helm show chart "$CHARTS/registry-operator" --version "$VERSION" > /dev/null 2>&1; then
+          if helm show chart "$CHARTS/registry-operator" --version "$VERSION" > "$RUNNER_TEMP/show.log" 2>&1; then
             helm pull "$CHARTS/registry-operator" --version "$VERSION" -d "$RUNNER_TEMP/published" 2>&1 | tee "$RUNNER_TEMP/chart.log"
             mkdir -p "$RUNNER_TEMP/built-x" "$RUNNER_TEMP/published-x"
             tar -xzf "$RUNNER_TEMP/built/$archive" -C "$RUNNER_TEMP/built-x"
@@ -144,9 +153,13 @@ jobs:
             fi
             echo "Reusing chart $VERSION, identical to this commit's."
             cp "$RUNNER_TEMP/published/$archive" "$archive"
-          else
+          elif grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/show.log"; then
             cp "$RUNNER_TEMP/built/$archive" "$archive"
             helm push "$archive" "$CHARTS" 2>&1 | tee "$RUNNER_TEMP/chart.log"
+          else
+            echo "::error::Cannot tell whether chart $VERSION exists:"
+            cat "$RUNNER_TEMP/show.log"
+            exit 1
           fi
           digest=$(grep -o 'sha256:[0-9a-f]*' "$RUNNER_TEMP/chart.log" | head -1)
           [[ -n "$digest" ]] || { echo "::error::No chart digest in the helm output"; exit 1; }

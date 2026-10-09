@@ -129,18 +129,26 @@ jobs:
           TAG: ${{ github.ref_name }}
           IMAGE: ${{ steps.version.outputs.image }}
           ATTEMPT: ${{ github.run_attempt }}
+          # What the registry answers for an unpublished version; any other failure
+          # stops the job. GHCR can answer "denied" for a package that does not
+          # exist yet, and a token that cannot read a package cannot write it.
+          NOT_PUBLISHED: 'manifest unknown|not found|name unknown|denied'
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             echo "::error::Release $TAG already exists. Bump the version instead of re-releasing it."
             exit 1
           fi
-          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+          if docker manifest inspect "$IMAGE" > "$RUNNER_TEMP/image.log" 2>&1; then
             if (( ATTEMPT == 1 )); then
               echo "::error::$IMAGE already exists. Bump the version instead of re-releasing it."
               exit 1
             fi
             echo "Reusing $IMAGE, pushed by attempt $(( ATTEMPT - 1 )) of this run."
             echo "reuse=true" >> "$GITHUB_OUTPUT"
+          elif ! grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/image.log"; then
+            echo "::error::Cannot tell whether $IMAGE exists:"
+            cat "$RUNNER_TEMP/image.log"
+            exit 1
           fi
 
       - name: Setup Helm
