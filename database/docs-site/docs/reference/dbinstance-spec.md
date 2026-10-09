@@ -126,6 +126,14 @@ Continuous WAL archiving is not configured in this release. A restore recovers o
 
 Set automatically by the restore process on a database created by a [restore](/backup-restore/restore). **Don't set it yourself.** It can't be changed after creation, and it records where the database came from, even after the restore, the snapshot and the source are deleted.
 
+| Field | Meaning |
+| --- | --- |
+| `dbRestoreName`, `dbRestoreUID` | The restore that created this database |
+| `dbSnapshotName`, `dbSnapshotUID` | The snapshot it was restored from |
+| `sourceInstanceName`, `sourceInstanceUID` | The database that snapshot was taken of |
+
+Read it with `kubectl get dbinstance <name> -o jsonpath='{.spec.restoredFrom}'`.
+
 ## Defaults summary
 
 | Field | Value | Set by |

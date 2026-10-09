@@ -35,7 +35,8 @@ kubectl wait --for=condition=Ready dbinstance/dbinstance-sample --timeout=15m
 | `backup.nextScheduledSnapshotTime` | When the next automated snapshot is due. See [Automated backups](/backup-restore/automated-backups). |
 | `grafanaUrl`, `prometheusTarget` | The instance's dashboard and metrics address. |
 | `restartCount`, `recentUnplannedRestarts` | Unplanned VM restart counts. Three restarts in a row halt the VM (see `CrashLoopHalted`). |
-| `resources` | The names of the objects the operator created for this instance: `vmName`, `dataVolumeName`, `osDiskPVCName`, `nadName`, `adminCredentialsSecretName`, `connectionSecretName`, `cloudInitSecretName`, `metricsServiceName`, `serviceMonitor`, `internalSecretRef`, `privateTLSSecretRef`. Used for cleanup. |
+| `lastKnownVMIUID`, `lastUnplannedRestartTime` | The last VM instance the operator saw, and when the last unplanned restart happened. Used to detect restarts. Internal. |
+| `resources` | The names of the objects the operator created for this instance: `vmName`, `dataVolumeName`, `osDiskPVCName`, `pendingDeleteOSDiskPVCName` (an old OS disk waiting to be deleted after a repave), `nadName`, `adminCredentialsSecretName`, `connectionSecretName`, `cloudInitSecretName`, `metricsServiceName`, `serviceMonitor`, `internalSecretRef`, `privateTLSSecretRef`. Used for cleanup. |
 
 ## Phases
 
@@ -89,6 +90,24 @@ Each condition has `type`, `status`, `reason`, `message` and `lastTransitionTime
 ### `CredentialsReady`
 
 `True` (`CredentialsProvisioned`) when the credentials and certificates exist. `CredentialsCreated` appears briefly right after they are generated. `False` with `CredentialsResolveFailed` is a temporary error and the operator retries. See [Credentials](/security/credentials).
+
+### Reasons when everything is healthy
+
+These are the `True` reasons you'll normally see:
+
+| Condition | Healthy reason |
+| --- | --- |
+| `Accepted` | `SpecAccepted` |
+| `PreflightReady` | `PreflightPassed` |
+| `CredentialsReady` | `CredentialsProvisioned` (`CredentialsCreated` right after they are generated) |
+| `VMReady` | `VMPresent` |
+| `PowerStateReady` | `Running` (or `Stopped` when `spec.running` is `false`) |
+| `StorageReady` | `ShapeConverged` |
+| `DatabaseReady` | `PostgresReady` |
+| `MonitoringReady` | `MonitoringDeployed` |
+| `Ready` | `DBInstanceReady` |
+| `InterventionRequired` | `False`, `NoInterventionRequired` |
+| `ImageDrift` | `False`, `ImageUpToDate` |
 
 ### `Accepted`
 
@@ -168,7 +187,8 @@ It clears when the database is healthy, stopped, resizing or halted. See [Health
 | `True`, `OSUpdateAvailable` | A newer database image is available. Annotate with `repave-trigger` to apply it. |
 | `True`, `EngineVersionEOL` | A newer image exists but no longer has this engine version. Repave is blocked. Migrate the data first. |
 | `False`, `ImageUpToDate` | The VM runs the current image. |
-| `Unknown` | The image catalog has no validated stream, or the VM's image isn't known yet. |
+| `Unknown`, `ImageCatalogUnresolved` | The image catalog has no validated stream for the configured OS version, so drift can't be checked. |
+| `Unknown`, `CurrentImageRevisionUnknown` | The VM's image isn't known yet. |
 
 Branch on `status`, not on whether the condition exists. See [Images and repave](/operations/images-and-repave).
 

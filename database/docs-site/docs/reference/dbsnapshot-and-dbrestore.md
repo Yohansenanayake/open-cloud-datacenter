@@ -82,6 +82,9 @@ Short name `dbrestore`. **The whole spec is fixed after creation.** `kubectl get
 | `stage` | `Preparing`, `RestoringVolume`, `StartingDatabase`, `Succeeded` or `Failed` |
 | `reason`, `message` | Why it is in this stage. See [Stages and reasons](#stages-and-reasons). |
 | `resolved` | The settings taken from the snapshot (database name, user, engine version, port, storage type) |
+| `snapshotUID` | The snapshot this restore resolved, recorded once. If another snapshot later takes the same name, the restore fails with `SnapshotReplaced`. |
+| `sourceInstanceName`, `sourceInstanceUID` | The database the snapshot came from, copied from the snapshot. Kept even after the source is deleted. |
+| `dataVolumeSnapshotName` | The stored copy of the data volume the new disk is created from |
 | `targetInstanceUID` | The new database's UID, once created |
 | `deadline` | When the restore times out |
 
