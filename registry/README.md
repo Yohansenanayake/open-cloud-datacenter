@@ -10,6 +10,13 @@ the `Registry`. The operator installs nothing and manages no storage.
 
 Runs on any conformant Kubernetes cluster — it uses no vendor APIs.
 
+| To | Read |
+|:---|:---|
+| Install a release (Helm chart, Harvester Addon) | [INSTALL.md](./INSTALL.md) |
+| See what changed in each release | [CHANGELOG.md](./CHANGELOG.md) |
+| Manage registries from Rancher | the Rancher UI extension in `registry-ui/` |
+| Understand and develop the operator | this README |
+
 ## Requirements
 
 | Requirement | Notes |
@@ -188,9 +195,9 @@ boundary, not a per-`Registry` one.
 ## Quickstart
 
 ```sh
-make docker-build docker-push IMG=<registry>/registry-provisioner:<tag>
+make docker-build docker-push IMG=<registry>/registry-operator:<tag>
 KUBECONFIG=<kubeconfig> make install
-KUBECONFIG=<kubeconfig> make deploy IMG=<registry>/registry-provisioner:<tag>
+KUBECONFIG=<kubeconfig> make deploy IMG=<registry>/registry-operator:<tag>
 
 kubectl apply -n <your-namespace> -k config/samples/
 kubectl get registries -A -w
