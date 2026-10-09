@@ -121,7 +121,7 @@ jobs:
           }
           test "$(project_status)" = 200
           kubectl -n ci-team delete registry smoke --timeout=120s
-          ! kubectl -n ci-team get secret smoke-pull smoke-push 2>/dev/null
+          kubectl -n ci-team wait --for=delete secret/smoke-pull secret/smoke-push --timeout=60s
           test "$(project_status)" = 404
 
       - name: Show operator logs
