@@ -67,6 +67,7 @@ func main() {
 
 	registryReconciler := &controller.RegistryReconciler{
 		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorder("registry"),
 		HarborCfg: cfg.Harbor,
