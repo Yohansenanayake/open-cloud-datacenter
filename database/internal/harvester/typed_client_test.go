@@ -370,6 +370,67 @@ func TestDeletePVCDeletesExisting(t *testing.T) {
 	}
 }
 
+func TestDeletePVCWithUIDDeletesExistingAndIgnoresNotFound(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient()
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pg-orders-data", Namespace: "tenant-a", UID: "pvc-uid"}}
+	if _, err := client.KubeClient.CoreV1().PersistentVolumeClaims("tenant-a").Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed PVC: %v", err)
+	}
+
+	if err := client.DeletePVCWithUID(ctx, "tenant-a", "pg-orders-data", "pvc-uid"); err != nil {
+		t.Fatalf("DeletePVCWithUID returned error: %v", err)
+	}
+	if _, err := client.KubeClient.CoreV1().PersistentVolumeClaims("tenant-a").Get(ctx, "pg-orders-data", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("PVC should be gone, got: %v", err)
+	}
+	if err := client.DeletePVCWithUID(ctx, "tenant-a", "pg-orders-data", "pvc-uid"); err != nil {
+		t.Fatalf("DeletePVCWithUID returned error for a missing PVC: %v", err)
+	}
+}
+
+// Only the PVCs the VM mounts and owned accepts are listed, alongside any
+// entry already there; a second call changes nothing.
+func TestMarkVMPVCsForRemovalListsOwnedClaimsAndKeepsExistingEntries(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient(testTypedVMImage())
+	if _, err := client.CreatePostgresVM(ctx, testVMCreateParams()); err != nil {
+		t.Fatalf("CreatePostgresVM returned error: %v", err)
+	}
+	vms := client.Clientset.KubevirtV1().VirtualMachines("tenant-a")
+	vm, err := vms.Get(ctx, "pg-orders", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	vm.Annotations[harvesterutil.RemovedPVCsAnnotationKey] = "picked-in-the-ui"
+	if _, err := vms.Update(ctx, vm, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("seed annotation: %v", err)
+	}
+
+	owned := func(name string) bool { return name == "pg-orders-data" }
+	for range 2 {
+		found, err := client.MarkVMPVCsForRemoval(ctx, "tenant-a", "pg-orders", owned)
+		if err != nil || !found {
+			t.Fatalf("MarkVMPVCsForRemoval = (%v, %v), want (true, nil)", found, err)
+		}
+	}
+
+	vm, err = vms.Get(ctx, "pg-orders", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	if got, want := vm.Annotations[harvesterutil.RemovedPVCsAnnotationKey], "picked-in-the-ui,pg-orders-data"; got != want {
+		t.Fatalf("%s = %q, want %q", harvesterutil.RemovedPVCsAnnotationKey, got, want)
+	}
+}
+
+func TestMarkVMPVCsForRemovalReportsAMissingVM(t *testing.T) {
+	found, err := newTestTypedClient().MarkVMPVCsForRemoval(context.Background(), "tenant-a", "pg-gone", func(string) bool { return true })
+	if err != nil || found {
+		t.Fatalf("MarkVMPVCsForRemoval = (%v, %v), want (false, nil)", found, err)
+	}
+}
+
 // On a real cluster, an imported VirtualMachineImage's object name is
 // typically auto-generated (e.g. "image-c8sqv") and only its DisplayName
 // carries the human-readable string internal/catalog is keyed by

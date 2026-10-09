@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -33,5 +34,15 @@ func (r *DBInstanceReconciler) reconcileInstance(ctx context.Context, inst *dbaa
 	}
 
 	result := r.EnsureRunner.Run(ctx, inst)
-	return result.ControllerResult, result.Err
+
+	scheduleRequeue, err := r.evaluateBackupSchedule(ctx, inst)
+	if err != nil {
+		return result.ControllerResult, goerrors.Join(result.Err, err)
+	}
+
+	ctrlResult := result.ControllerResult
+	if scheduleRequeue > 0 && (ctrlResult.RequeueAfter == 0 || scheduleRequeue < ctrlResult.RequeueAfter) {
+		ctrlResult.RequeueAfter = scheduleRequeue
+	}
+	return ctrlResult, result.Err
 }

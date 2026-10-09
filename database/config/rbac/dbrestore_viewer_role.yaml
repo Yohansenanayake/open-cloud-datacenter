@@ -1,0 +1,33 @@
+# This rule is not used by the project dbaas itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants read-only access to dbrestores.
+# This role is intended for users who need visibility into these resources
+# without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: dbaas
+    app.kubernetes.io/managed-by: kustomize
+    # Aggregate into the built-in K8s `view` ClusterRole.
+    # Rancher read-only inherits `view` on project namespaces,
+    # so any group bound as read-only gets get/list/watch on DBRestores.
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+  name: dbrestore-viewer-role
+rules:
+- apiGroups:
+  - dbaas.opencloud.wso2.com
+  resources:
+  - dbrestores
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - dbaas.opencloud.wso2.com
+  resources:
+  - dbrestores/status
+  verbs:
+  - get

@@ -1,0 +1,40 @@
+# This rule is not used by the project dbaas itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants permissions to create, update, and delete dbsnapshots: tenants can
+# take (create) and delete snapshots of their own namespace's DBInstances.
+# The spec is immutable (CEL), so update/patch only reach metadata such as
+# labels. Status is written by the operator alone: read-only here. The hold
+# Leases that coordinate backups and restores are deliberately not granted.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: dbaas
+    app.kubernetes.io/managed-by: kustomize
+    # Aggregate into the built-in K8s `edit` ClusterRole.
+    # Rancher project-member inherits `edit` on project namespaces,
+    # so any group bound as project-member can manage DBSnapshots
+    # (but cannot manage RBAC).
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+  name: dbsnapshot-editor-role
+rules:
+- apiGroups:
+  - dbaas.opencloud.wso2.com
+  resources:
+  - dbsnapshots
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - dbaas.opencloud.wso2.com
+  resources:
+  - dbsnapshots/status
+  verbs:
+  - get

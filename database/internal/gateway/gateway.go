@@ -293,12 +293,10 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request, name 
 // existing instance. Every field is a pointer so the handler can tell "not
 // supplied" apart from a zero value; only non-nil fields are applied.
 type modifyRequest struct {
-	DBInstanceClass       *string `json:"dbInstanceClass,omitempty"`
-	AllocatedStorage      *int    `json:"allocatedStorage,omitempty"`
-	BackupRetentionPeriod *int    `json:"backupRetentionPeriod,omitempty"`
-	PreferredBackupWindow *string `json:"preferredBackupWindow,omitempty"`
-	DeletionProtection    *bool   `json:"deletionProtection,omitempty"`
-	Running               *bool   `json:"running,omitempty"`
+	DBInstanceClass    *string `json:"dbInstanceClass,omitempty"`
+	AllocatedStorage   *int    `json:"allocatedStorage,omitempty"`
+	DeletionProtection *bool   `json:"deletionProtection,omitempty"`
+	Running            *bool   `json:"running,omitempty"`
 }
 
 // handleModifyInstance handles PATCH /dbinstances/{name} — "modify db".
@@ -328,12 +326,6 @@ func (s *Server) handleModifyInstance(w http.ResponseWriter, r *http.Request, na
 	}
 	if req.AllocatedStorage != nil {
 		instance.Spec.AllocatedStorage = *req.AllocatedStorage
-	}
-	if req.BackupRetentionPeriod != nil {
-		instance.Spec.BackupRetentionPeriod = *req.BackupRetentionPeriod
-	}
-	if req.PreferredBackupWindow != nil {
-		instance.Spec.PreferredBackupWindow = *req.PreferredBackupWindow
 	}
 	if req.DeletionProtection != nil {
 		instance.Spec.DeletionProtection = *req.DeletionProtection

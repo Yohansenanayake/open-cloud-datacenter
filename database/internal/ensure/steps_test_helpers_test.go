@@ -67,8 +67,10 @@ func newProvisionInst() *dbaasv1.DBInstance { return testutil.NewProvisionInstan
 
 func newTestHarness(t testing.TB, stub *stubHarvester, objects ...client.Object) *testHarness {
 	t.Helper()
+	c := testutil.NewClient(t, objects...)
 	return &testHarness{Dependencies: Dependencies{
-		Client:            testutil.NewClient(t, objects...),
+		Client:            c,
+		APIReader:         c, // the fake client has no cache
 		Harvester:         stub,
 		Recorder:          record.NewFakeRecorder(100),
 		GrafanaBaseURL:    "https://grafana.example",

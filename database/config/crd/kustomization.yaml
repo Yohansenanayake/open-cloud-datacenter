@@ -3,6 +3,8 @@
 # It should be run by config/default
 resources:
 - bases/dbaas.opencloud.wso2.com_dbinstances.yaml
+- bases/dbaas.opencloud.wso2.com_dbsnapshots.yaml
+- bases/dbaas.opencloud.wso2.com_dbrestores.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

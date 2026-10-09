@@ -61,6 +61,19 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.DatabaseDefaults.OSVersion) == "" {
 		return fmt.Errorf("databaseDefaults.osVersion must not be empty")
 	}
+	if c.Restore.RecoveryTimeout <= 0 {
+		return fmt.Errorf("restore.recoveryTimeout must be positive")
+	}
+	if c.Restore.Timeout <= c.Restore.RecoveryTimeout {
+		return fmt.Errorf("restore.timeout (%s) must exceed restore.recoveryTimeout (%s), which is only one part of a restore",
+			c.Restore.Timeout, c.Restore.RecoveryTimeout)
+	}
+	if c.Backup.MaxConcurrent < 1 {
+		return fmt.Errorf("backup.maxConcurrent must be at least 1")
+	}
+	if c.Backup.Timeout <= 0 {
+		return fmt.Errorf("backup.timeout must be positive")
+	}
 	if problems := validation.IsDNS1123Label(c.Infrastructure.Harvester.ImageNamespace); len(problems) > 0 {
 		return fmt.Errorf("infrastructure.harvester.imageNamespace %q is invalid: %s",
 			c.Infrastructure.Harvester.ImageNamespace, strings.Join(problems, ", "))

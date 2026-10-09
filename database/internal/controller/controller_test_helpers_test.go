@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
@@ -72,6 +74,7 @@ func testEnsureDependencies(r *DBInstanceReconciler) ensure.Dependencies {
 	}
 	return ensure.Dependencies{
 		Client:            r.Client,
+		APIReader:         r.Client, // test clients (fake / envtest) are uncached
 		Harvester:         r.Harvester,
 		Recorder:          r.Recorder,
 		GrafanaBaseURL:    r.GrafanaBaseURL,
@@ -139,4 +142,28 @@ func convergeMonitoring(t interface {
 	if result := runEnsureStep(ctx, r, inst, "monitoring"); result.Outcome != ensure.OutcomeSatisfied {
 		t.Fatalf("monitoring observe result = %+v, want Satisfied", result)
 	}
+}
+
+// drainEvents returns every event recorded so far, as "<Type> <Reason> <Message>".
+func drainEvents(r *record.FakeRecorder) []string {
+	var events []string
+	for {
+		select {
+		case e := <-r.Events:
+			events = append(events, e)
+		default:
+			return events
+		}
+	}
+}
+
+// eventsWithReason counts events whose reason is reason.
+func eventsWithReason(events []string, reason string) int {
+	n := 0
+	for _, e := range events {
+		if f := strings.Fields(e); len(f) > 1 && f[1] == reason {
+			n++
+		}
+	}
+	return n
 }

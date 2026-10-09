@@ -54,6 +54,14 @@ func Default() Config {
 			Port:           5432,
 			OSVersion:      "22.04",
 		},
+		Restore: RestoreConfig{
+			RecoveryTimeout: time.Hour,
+			Timeout:         6 * time.Hour,
+		},
+		Backup: BackupConfig{
+			MaxConcurrent: 4,
+			Timeout:       6 * time.Hour,
+		},
 		Observability: ObservabilityConfig{
 			Grafana: GrafanaConfig{BaseURL: "https://grafana.monitoring.svc"},
 			Metrics: MetricsConfig{

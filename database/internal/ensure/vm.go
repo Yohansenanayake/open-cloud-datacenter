@@ -19,6 +19,7 @@ package ensure
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,13 +51,49 @@ func vmNameFor(inst *dbaasv1.DBInstance) string {
 
 // diskIdentifierFor returns "<name>-<uid8>", used to build this instance's
 // disk PVC names. Including the UID means a deleted-and-recreated instance
-// (same name, new UID) never reattaches a disk left over from before the deletion.
+// (same name, new UID) never reattaches a disk left over from before the
+// deletion.
+//
+// When spec.restoredFrom is set, the salt is derived from the owning
+// DBRestore's UID instead of this instance's own UID ("<name>-restore-<uid8>").
+// DBRestoreReconciler computes this same name via RestoreDataVolumeName
+// before this instance exists, and creates the data-disk PVC under it.
 func diskIdentifierFor(inst *dbaasv1.DBInstance) string {
-	uid := strings.ReplaceAll(string(inst.UID), "-", "")
-	if len(uid) > 8 {
-		uid = uid[:8]
+	if inst.Spec.RestoredFrom != nil {
+		return fmt.Sprintf("%s-restore-%s", inst.Name, shortUID(inst.Spec.RestoredFrom.DBRestoreUID))
 	}
-	return fmt.Sprintf("%s-%s", inst.Name, uid)
+	return fmt.Sprintf("%s-%s", inst.Name, shortUID(inst.UID))
+}
+
+// shortUID is the naming salt diskIdentifierFor and RestoreDataVolumeName
+// both derive from a UID: dashes stripped, truncated to 8 characters.
+func shortUID(uid types.UID) string {
+	s := strings.ReplaceAll(string(uid), "-", "")
+	if len(s) > 8 {
+		s = s[:8]
+	}
+	return s
+}
+
+// RestoreDataVolumeName returns the deterministic data-disk PVC name a
+// DBInstance named targetInstanceName will have once created with
+// spec.restoredFrom.dbRestoreUID set to dbRestoreUID. DBRestoreReconciler
+// calls this to create that PVC before the DBInstance exists; see
+// diskIdentifierFor's doc comment for why this must produce an identical
+// name to what that future DBInstance's own dataVolumeNameFor computes.
+func RestoreDataVolumeName(targetInstanceName string, dbRestoreUID types.UID) string {
+	return harvester.DataVolumeName(fmt.Sprintf("%s-restore-%s", targetInstanceName, shortUID(dbRestoreUID)))
+}
+
+// restoreIDFor is the bootstrap RestoreID for inst: its DBRestore's UID, or
+// "" for an ordinary instance. Passed on every cloud-init render (create,
+// VM recreation, repave) — the guest itself decides from the data disk's
+// own restore marker whether the one-time restore work is still pending.
+func restoreIDFor(inst *dbaasv1.DBInstance) string {
+	if inst.Spec.RestoredFrom == nil {
+		return ""
+	}
+	return string(inst.Spec.RestoredFrom.DBRestoreUID)
 }
 
 // dataVolumeNameFor derives the controller's deterministic data-disk PVC
@@ -66,6 +103,43 @@ func diskIdentifierFor(inst *dbaasv1.DBInstance) string {
 // preserve pre-dates this convention on a live cluster.
 func dataVolumeNameFor(inst *dbaasv1.DBInstance) string {
 	return harvester.DataVolumeName(diskIdentifierFor(inst))
+}
+
+// osDiskPVCNameFor is the OS-disk PVC name an instance's VM is created with.
+// Repave later moves the VM onto "<this>-<image>" (SwapVMOSDisk).
+func osDiskPVCNameFor(inst *dbaasv1.DBInstance) string {
+	return fmt.Sprintf("pg-%s-os", diskIdentifierFor(inst))
+}
+
+// OwnsPVCName reports whether name is one of inst's own disk PVCs: its data
+// disk, its original OS disk, or a repaved OS disk. Every one embeds the
+// instance's UID-salted disk identifier, so a same-named instance from
+// before a delete-and-recreate never matches. Teardown deletes nothing
+// this rejects.
+func OwnsPVCName(inst *dbaasv1.DBInstance, name string) bool {
+	osDisk := osDiskPVCNameFor(inst)
+	return name == dataVolumeNameFor(inst) || name == osDisk || strings.HasPrefix(name, osDisk+"-")
+}
+
+// TeardownPVCNames returns the PVC names teardown deletes directly once the
+// VM is gone: the deterministic data and original OS-disk names, plus the
+// recorded OS-disk names repave may have moved to (kept only if
+// OwnsPVCName accepts them). Harvester deletes whatever the live VM mounted
+// (MarkVMPVCsForRemoval); this is the backstop for a VM that was already
+// gone, or whose annotation never landed.
+func TeardownPVCNames(inst *dbaasv1.DBInstance) []string {
+	names := []string{dataVolumeNameFor(inst), osDiskPVCNameFor(inst)}
+	for _, recorded := range []string{inst.Status.Resources.OSDiskPVCName, inst.Status.Resources.PendingDeleteOSDiskPVCName} {
+		if recorded != "" && OwnsPVCName(inst, recorded) && !slices.Contains(names, recorded) {
+			names = append(names, recorded)
+		}
+	}
+	return names
+}
+
+// VMNameFor exports vmNameFor for teardown.
+func VMNameFor(inst *dbaasv1.DBInstance) string {
+	return vmNameFor(inst)
 }
 
 // ownerRefFor builds the controller owner reference the provider stamps on the
@@ -149,10 +223,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 	if masterUser == "" {
 		masterUser = defaults.MasterUsername
 	}
-	dbName := inst.Spec.DBName
-	if dbName == "" {
-		dbName = inst.Name
-	}
+	dbName := inst.EffectiveDBName()
 	// Recomputed here rather than passed forward from preflight — ensureVM
 	// doesn't trust state from other steps, matching how every other input
 	// above is re-derived independently.
@@ -181,7 +252,7 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 
 	dataVolumeName := dataVolumeNameFor(inst)
 	inst.Status.Resources.DataVolumeName = dataVolumeName
-	osDiskPVCName := fmt.Sprintf("pg-%s-os", diskIdentifierFor(inst))
+	osDiskPVCName := osDiskPVCNameFor(inst)
 
 	// Material was already resolved (and its three durable Secrets created)
 	// by ensureCredentials earlier in the step order; this re-read is cheap.
@@ -199,12 +270,12 @@ func (r *vmStep) createVM(ctx context.Context, inst *dbaasv1.DBInstance) Result 
 		Port:           specPortWithDefault(inst.Spec.Port, defaults.Port),
 		MasterUser:     masterUser,
 		MaxConnections: classSpec.MaxConnections,
-		BackupEnabled:  inst.Spec.BackupRetentionPeriod > 0,
-		BackupWindow:   inst.Spec.PreferredBackupWindow,
-		S3Config:       inst.Spec.S3BackupConfig,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork,
 		EngineVersion:  engineVersion,
+		RestoreID:      restoreIDFor(inst),
+		// Only read by the guest when RestoreID is set.
+		RestoreRecoveryTimeout: r.restoreConfig().RecoveryTimeout,
 	}, resolved.Material)
 
 	cloudInitName := resource.CloudInitSecretName(inst)

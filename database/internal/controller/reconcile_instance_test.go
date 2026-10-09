@@ -47,8 +47,10 @@ func newProvisionInst() *dbaasv1.DBInstance {
 // monitoring step can apply its builder-managed children through the fake client.
 func newProvisionReconciler(t *testing.T, stub *stubHarvester, objs ...client.Object) *DBInstanceReconciler {
 	t.Helper()
+	c := testutil.NewClient(t, objs...)
 	r := &DBInstanceReconciler{
-		Client:         testutil.NewClient(t, objs...),
+		Client:         c,
+		APIReader:      c, // the fake client is uncached
 		Harvester:      stub,
 		Recorder:       record.NewFakeRecorder(100),
 		GrafanaBaseURL: "https://grafana.example",

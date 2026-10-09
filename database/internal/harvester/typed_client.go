@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -681,6 +682,60 @@ func (c *TypedClient) GetVMOSDiskPVCName(ctx context.Context, ns, vmName string)
 	return name, err
 }
 
+// MarkVMPVCsForRemoval lists, in the live VM's harvesterhci.io/
+// removedPersistentVolumeClaims annotation, every PVC the VM mounts that
+// owned accepts. Harvester's VM finalizer deletes the listed PVCs once the
+// VM is being removed — the same mechanism its UI uses to delete volumes
+// along with a VM. Deleting them through the VM is what keeps Harvester's
+// VM controller from recreating a blank PVC from volumeClaimTemplates, which
+// it stops doing only once the VM has a deletionTimestamp. Entries already
+// listed are kept. found is false (and nothing is done) when the VM is gone.
+func (c *TypedClient) MarkVMPVCsForRemoval(ctx context.Context, ns, vmName string, owned func(pvcName string) bool) (found bool, err error) {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, getErr := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			found = false
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		found = true
+		if vm.Spec.Template == nil {
+			return nil
+		}
+
+		existing := vm.Annotations[util.RemovedPVCsAnnotationKey]
+		listed := map[string]bool{}
+		var names []string
+		add := func(name string) {
+			if name = strings.TrimSpace(name); name != "" && !listed[name] {
+				listed[name] = true
+				names = append(names, name)
+			}
+		}
+		for _, name := range strings.Split(existing, ",") {
+			add(name)
+		}
+		for _, vol := range vm.Spec.Template.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && owned(vol.PersistentVolumeClaim.ClaimName) {
+				add(vol.PersistentVolumeClaim.ClaimName)
+			}
+		}
+		want := strings.Join(names, ",")
+		if want == existing {
+			return nil
+		}
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[util.RemovedPVCsAnnotationKey] = want
+		_, updateErr := c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
+		return updateErr
+	})
+	return found, err
+}
+
 // ResolveVMImageDisplayName returns the DisplayName of the
 // VirtualMachineImage identified by ns/name. See the ClientInterface doc
 // comment for why this indirection exists: GetVMOSDiskImageID's caller needs
@@ -799,6 +854,146 @@ func (c *TypedClient) SwapVMOSDisk(ctx context.Context, ns, vmName, instID, newI
 // DeletePVC deletes a PVC by name. Idempotent; NotFound is success.
 func (c *TypedClient) DeletePVC(ctx context.Context, ns, name string) error {
 	return ignoreNotFound(c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{}))
+}
+
+// DeletePVCWithUID deletes the PVC only if it is still the object with uid.
+// NotFound is success; a different object under the name is a Conflict.
+func (c *TypedClient) DeletePVCWithUID(ctx context.Context, ns, name string, uid types.UID) error {
+	return ignoreNotFound(c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}))
+}
+
+// CreateVMBackup requests a durable Harvester backup of sourceVMName. Always
+// spec.type: Backup — Snapshot is local-only and must never be used for this
+// design (yohan-docs/backups/harvester-vm-backup/).
+func (c *TypedClient) CreateVMBackup(ctx context.Context, ns, name, sourceVMName string, owner *metav1.OwnerReference) error {
+
+	_, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	vmBackup := &harvesterhciov1beta1.VirtualMachineBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       ns,
+			OwnerReferences: ownerRefSlice(owner),
+		},
+		Spec: harvesterhciov1beta1.VirtualMachineBackupSpec{
+			Source: corev1.TypedLocalObjectReference{
+				APIGroup: ptr(kubevirtv1.SchemeGroupVersion.Group),
+				Kind:     kubevirtv1.VirtualMachineGroupVersionKind.Kind,
+				Name:     sourceVMName,
+			},
+			Type: harvesterhciov1beta1.Backup,
+		},
+	}
+	_, err = c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Create(ctx, vmBackup, metav1.CreateOptions{})
+	return ignoreAlreadyExists(err)
+}
+
+// GetVMBackupStatus returns the translated status of a VirtualMachineBackup.
+// dataVolumePVCName identifies which volume is the PostgreSQL data volume —
+// a VirtualMachineBackup covers every volume on the source VM, but DBaaS
+// restore only ever needs this one.
+func (c *TypedClient) GetVMBackupStatus(ctx context.Context, ns, name, dataVolumePVCName string) (VMBackupStatus, error) {
+	vmBackup, err := c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return VMBackupStatus{}, err
+	}
+
+	status := VMBackupStatus{
+		CreatedAt:  vmBackup.CreationTimestamp.Time,
+		ReadyToUse: vmBackup.Status.ReadyToUse != nil && *vmBackup.Status.ReadyToUse,
+		Progress:   vmBackup.Status.Progress,
+	}
+	if vmBackup.Status.Error != nil && vmBackup.Status.Error.Message != nil {
+		status.ErrorMessage = *vmBackup.Status.Error.Message
+	}
+	for _, vb := range vmBackup.Status.VolumeBackups {
+		if vb.PersistentVolumeClaim.ObjectMeta.Name != dataVolumePVCName {
+			continue
+		}
+		if vb.Name != nil {
+			status.DataVolumeSnapshotName = *vb.Name
+		}
+		break
+	}
+	return status, nil
+}
+
+// DeleteVMBackup deletes a VirtualMachineBackup by name. Idempotent; NotFound
+// is success.
+func (c *TypedClient) DeleteVMBackup(ctx context.Context, ns, name string) error {
+	return ignoreNotFound(c.Clientset.HarvesterhciV1beta1().VirtualMachineBackups(ns).Delete(ctx, name, metav1.DeleteOptions{}))
+}
+
+// restoreVolumeSnapshotAPIGroup is the CSI external-snapshotter API group a
+// restore PVC's dataSource references. Not vendored as a typed dependency —
+// a TypedLocalObjectReference only needs the group/kind/name strings, and
+// pulling in the snapshot clientset just for that would be unjustified for
+// what's otherwise a plain Kubernetes PVC create.
+const restoreVolumeSnapshotAPIGroup = "snapshot.storage.k8s.io"
+
+// CreateRestorePVC creates a PVC that restores data from an existing
+// VolumeSnapshot — the same same-namespace mechanism Harvester's own restore
+// controller uses internally (getDataSourceSameNs), without going through
+// VirtualMachineRestore. AlreadyExists is swallowed — see the interface doc
+// for why callers must still verify the result. Matches the data disk's
+// existing shape (ReadWriteMany, Block) so the restored PVC attaches to a new
+// VM the same way an ordinary one would.
+func (c *TypedClient) CreateRestorePVC(ctx context.Context, ns, pvcName, volumeSnapshotName string, sizeGB int, storageClassName string, labels map[string]string) error {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: ns,
+			Labels:    labels,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			VolumeMode:  ptr(corev1.PersistentVolumeBlock),
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", sizeGB)),
+				},
+			},
+			StorageClassName: &storageClassName,
+			DataSource: &corev1.TypedLocalObjectReference{
+				APIGroup: ptr(restoreVolumeSnapshotAPIGroup),
+				Kind:     "VolumeSnapshot",
+				Name:     volumeSnapshotName,
+			},
+		},
+	}
+	_, err := c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Create(ctx, pvc, metav1.CreateOptions{})
+	return ignoreAlreadyExists(err)
+}
+
+// GetPVC returns the live PVC straight from the API server (not a cache).
+func (c *TypedClient) GetPVC(ctx context.Context, ns, name string) (*corev1.PersistentVolumeClaim, error) {
+	return c.KubeClient.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+}
+
+// GetVolumeSnapshotState reads the VolumeSnapshot straight from the API
+// server, through the snapshot.storage.k8s.io client Harvester's own
+// clientset already carries.
+func (c *TypedClient) GetVolumeSnapshotState(ctx context.Context, ns, name string) (VolumeSnapshotState, error) {
+	vs, err := c.Clientset.SnapshotV1().VolumeSnapshots(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return VolumeSnapshotState{}, err
+	}
+	state := VolumeSnapshotState{Deleting: !vs.DeletionTimestamp.IsZero()}
+	if vs.Status != nil {
+		state.ReadyToUse = vs.Status.ReadyToUse != nil && *vs.Status.ReadyToUse
+		if vs.Status.Error != nil && vs.Status.Error.Message != nil {
+			state.ErrorMessage = *vs.Status.Error.Message
+		}
+	}
+	return state, nil
 }
 
 func ptr[T any](v T) *T {
