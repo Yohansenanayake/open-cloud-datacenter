@@ -96,7 +96,7 @@ func (r *RegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.transient(ctx, &cr, "read Harbor credentials", err)
 	}
 
-	// 3. Get the plan and quota. The plan is immutable, so a change is a spec error and get amount of bytes for that plan.
+	// 3. Resolve the plan to its quota in bytes. The quota is re-applied every pass, so a plan change takes effect here.
 	plan := cr.Spec.Plan
 	if plan == "" {
 		plan = planOrder[0]

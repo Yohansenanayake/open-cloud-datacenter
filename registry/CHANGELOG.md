@@ -57,4 +57,5 @@ Harvester Addon in [`deploy/harvester-addon/`](deploy/harvester-addon/). See [IN
 - **Changing `harbor.url` does not rewrite existing Secrets** — they keep the old host. Treat the
   Harbor hostname as permanent.
 - **A private CA must be trusted by every consumer node**; the operator cannot distribute it.
-- **No end-to-end test suite runs in CI** (#298); the release was verified manually as above.
+- **CI covers install, a `Registry` reaching Ready, and delete clean-up** against a real Harbor on kind.
+  Push/pull, credential revoke and plan change were verified manually, as above.
