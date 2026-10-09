@@ -64,6 +64,7 @@ function initCluster($plugin: IPlugin, store: Store<unknown>) {
     labelKey:   'registryUi.overview.title',
     name:       OVERVIEW_PAGE,
     namespaced: false,
+    weight:     100,
     route:      { name: OVERVIEW_ROUTE, params: { product: PRODUCT_NAME } },
   });
 
@@ -74,7 +75,6 @@ function initCluster($plugin: IPlugin, store: Store<unknown>) {
   });
 
   basicType([OVERVIEW_PAGE, REGISTRY]);
-  weightType(OVERVIEW_PAGE, 100, true);
   weightType(REGISTRY, 90, true);
 
   headers(REGISTRY, [
