@@ -24,6 +24,24 @@ and Addon. It never reads Secrets.
   `registry.opencloud.wso2.com/v1alpha1`) installed. Clusters without the operator do not appear in
   the list.
 
+## Install in Rancher
+
+1. Rancher → ☰ → **Extensions** → ⋮ → **Manage Extension Catalogs** → **Import Extension Catalog**,
+   image `ghcr.io/wso2/ui-extension-registry-ui:<version>`.
+2. **Extensions** → **Available** → **Registries** → **Install**, then reload the page.
+
+## Use
+
+1. Rancher's left menu → **Registries** → the clusters with the operator → **Manage**.
+2. **Overview**: registries, which need attention, quota per plan, operator health.
+3. **Registries** → **Create**: namespace, name and plan → **Create**. It becomes **Ready** in seconds.
+4. Open a registry → **Connect** tab: commands to read its credentials, push an image, and copy the
+   pull credential to another cluster.
+5. Change the plan with **Edit**; **Delete** removes the registry with its Harbor project and images.
+
+Who sees what is decided by Rancher RBAC on the cluster: anyone with the **edit** role in a namespace
+can manage registries there.
+
 ## Development
 
 Node 24 and Yarn 1. From `registry-ui/`:
