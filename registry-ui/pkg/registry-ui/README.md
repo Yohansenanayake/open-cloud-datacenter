@@ -4,6 +4,9 @@ Private container registries for Harvester, from Rancher. A team requests a regi
 the registry operator (`registry.opencloud.wso2.com`) creates its Harbor project, storage quota and
 credentials.
 
+The [user guide](https://github.com/wso2/open-cloud-datacenter/blob/operators/registry-ui/docs/USER-GUIDE.md)
+walks through every screen.
+
 ## Features
 
 - **Registries** entry in the left navigation, listing the Harvester clusters that have the registry
