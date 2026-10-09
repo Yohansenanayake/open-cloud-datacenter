@@ -1,17 +1,26 @@
 name: registry-release
 
-# Publish a registry operator release from a registry/vX.Y.Z tag:
-#   ghcr.io/<owner>/registry-operator:X.Y.Z            (image)
-#   oci://ghcr.io/<owner>/charts/registry-operator      (chart, version X.Y.Z)
-# and a GitHub Release with the version's CHANGELOG section as its text, the
-# image and chart digests, and the chart archive attached.
+# Release the registry operator and its Rancher UI extension together from a
+# registry/vX.Y.Z tag on the operators branch. All artifacts share the version:
 #
-# A failed release is finished by re-running the workflow for the same tag.
+#   operator image   ghcr.io/<owner>/registry-operator:X.Y.Z
+#   Helm chart       oci://ghcr.io/<owner>/charts/registry-operator  (version X.Y.Z)
+#   UI extension     ghcr.io/<owner>/ui-extension-registry-ui:X.Y.Z  (Extension Catalog Image)
 #
-# Release: bump version and appVersion in registry/charts/chart/Chart.yaml, add
-# the version's section to registry/CHANGELOG.md, merge, then push the tag
-# registry/v<version> (for example registry/v0.1.0). After the first release,
-# make both packages public under the owner's Packages settings.
+# and creates a DRAFT GitHub release with the chart, a Harvester Addon manifest
+# with the chart filled in, a release manifest (digests) and checksums. A
+# maintainer installs from the draft, then publishes it.
+#
+# Before tagging, the release PR must set the version in:
+#   registry/charts/chart/Chart.yaml (version and appVersion)
+#   registry-ui/package.json and registry-ui/pkg/registry-ui/package.json
+# and add the release notes: registry/release-notes/X.Y.Z.md
+#
+# A run that fails part-way is finished by re-running it: artifacts it already
+# pushed from this commit are reused, anything else is refused.
+#
+# <owner> is the repository owner, so a fork rehearses the whole release
+# against its own ghcr.io namespace.
 
 on:
   push:
@@ -20,23 +29,137 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: registry-release
+  cancel-in-progress: false
+
 defaults:
   run:
     shell: bash
-    working-directory: registry
 
 jobs:
-  release:
-    name: Publish image, chart and release
+  prepare:
+    name: Check versions
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # create the GitHub Release
-      packages: write   # push the image and chart
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      owner: ${{ steps.version.outputs.owner }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag, versions and release notes
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+
+          version="${TAG#registry/v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || fail "Tag $TAG is not registry/vX.Y.Z"
+
+          git branch -r --contains "$GITHUB_SHA" | grep -qx '  origin/operators' \
+            || fail "$TAG is not on the operators branch"
+
+          chart_version=$(yq '.version' registry/charts/chart/Chart.yaml)
+          chart_app=$(yq '.appVersion' registry/charts/chart/Chart.yaml)
+          ui_root=$(jq -r .version registry-ui/package.json)
+          ui_pkg=$(jq -r .version registry-ui/pkg/registry-ui/package.json)
+          for pair in "Chart.yaml version:$chart_version" "Chart.yaml appVersion:$chart_app" \
+                      "registry-ui/package.json:$ui_root" "registry-ui/pkg/registry-ui/package.json:$ui_pkg"; do
+            [[ "${pair##*:}" == "$version" ]] || fail "$TAG does not match ${pair%:*} (${pair##*:})"
+          done
+
+          notes="registry/release-notes/$version.md"
+          [[ -s "$notes" ]] || fail "Missing release notes: $notes"
+          ! grep -n 'TODO' "$notes" || fail "$notes still contains TODO"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+  test-operator:
+    name: Operator tests
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: registry/go.mod
+          cache-dependency-path: registry/go.sum
+
+      - name: Unit tests
+        run: cd registry && make test
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
+
+      - name: Lint Helm chart
+        run: helm lint registry/charts/chart --set harbor.url=https://harbor.example.com
+
+  test-ui:
+    name: UI tests
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: registry-ui
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: registry-ui/.nvmrc
+          cache: yarn
+          cache-dependency-path: registry-ui/yarn.lock
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Unit tests
+        run: yarn test:ci
+
+      - name: Build extension
+        run: yarn build-pkg registry-ui
+
+  publish:
+    name: Publish artifacts and draft release
+    needs: [prepare, test-operator, test-ui]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the draft release
+      packages: write   # push to ghcr.io
     env:
-      REGISTRY: ghcr.io
-      # What the registry answers for a version that is not published. Any other
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      REGISTRY: ghcr.io/${{ needs.prepare.outputs.owner }}
+      # What ghcr.io answers for a version that is not published. Any other
       # failure stops the job rather than risk pushing over a published version.
-      # GHCR can answer "denied" for a package that does not exist yet; a token
+      # It can answer "denied" for a package that does not exist yet; a token
       # that cannot read a package cannot write it either.
       NOT_PUBLISHED: 'manifest unknown|not found|name unknown|denied'
     steps:
@@ -45,161 +168,231 @@ jobs:
         with:
           persist-credentials: false
 
-      # The tag, the chart version and appVersion, and a CHANGELOG section must
-      # all name the same version.
-      - name: Check versions
-        id: version
-        env:
-          TAG: ${{ github.ref_name }}
-          REPO_OWNER: ${{ github.repository_owner }}
+      - name: Set artifact names
         run: |
-          version="${TAG#registry/v}"
-          chart=$(awk '/^version:/ {print $2}' charts/chart/Chart.yaml)
-          app=$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2}' charts/chart/Chart.yaml)
-          if ! [[ "$version" == "$chart" && "$version" == "$app" ]]; then
-            echo "::error::Tag $TAG does not match Chart.yaml (version $chart, appVersion $app)"
-            exit 1
-          fi
-          # Relative links resolve against the repository, not the release page.
-          awk -v h="## $version" '$0 == h || index($0, h " ") == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md \
-            | sed -E "s#\]\(([^):]+)\)#](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/registry/\1)#g" > "$RUNNER_TEMP/notes.md"
-          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
-            echo "::error::CHANGELOG.md has no section for $version"
-            exit 1
-          fi
-          owner=$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
           {
-            echo "version=$version"
-            echo "image=$REGISTRY/$owner/registry-operator:$version"
-            echo "charts=oci://$REGISTRY/$owner/charts"
-          } >> "$GITHUB_OUTPUT"
+            echo "OPERATOR_IMAGE=$REGISTRY/registry-operator"
+            echo "CHART_REPO=oci://$REGISTRY/charts"
+            echo "UI_IMAGE=$REGISTRY/ui-extension-registry-ui"
+          } >> "$GITHUB_ENV"
+          mkdir -p dist
 
       - name: Log in to ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Helm
+      - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.22.0
 
-      - name: Log in to the chart registry
+      - name: Log in to ghcr.io (Helm)
         env:
-          ACTOR: ${{ github.actor }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
 
-      # A published release is never replaced: users and digests depend on it.
-      # The GitHub Release is created last, so it marks a finished release. An
-      # image or chart an earlier, failed run pushed is reused only when it was
-      # built from this commit, so a rerun can finish the release.
-      - name: Refuse to overwrite a published release
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Published versions are immutable: a mistake means a new version, not a
+      # re-push. The release, created last, marks a finished release. An image or
+      # chart an earlier, failed run pushed from this commit is reused.
+      - name: Refuse to overwrite a published version
+        id: existing
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "::error::Release $TAG already exists. Bump the version instead of re-releasing it."
-            exit 1
+          fail() { echo "::error::$*"; exit 1; }
+          bump="Bump the version instead of re-releasing it."
+
+          if gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' | grep -qxF "$TAG"; then
+            fail "A release for $TAG already exists, possibly as a draft. $bump"
           fi
 
-      - name: Build and push the image
-        id: image
-        env:
-          IMAGE: ${{ steps.version.outputs.image }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if docker manifest inspect "$IMAGE" > "$RUNNER_TEMP/image.log" 2>&1; then
-            docker pull -q "$IMAGE"
-            revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")
-            if [[ "$revision" != "$GITHUB_SHA" ]]; then
-              echo "::error::$IMAGE already exists from another commit. Bump the version instead of re-releasing it."
-              exit 1
-            fi
-            echo "Reusing $IMAGE, already pushed from this commit."
-          elif grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/image.log"; then
-            docker build --build-arg VERSION="$VERSION" \
-              --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "$IMAGE" .
-            docker push "$IMAGE"
-          else
-            echo "::error::Cannot tell whether $IMAGE exists:"
-            cat "$RUNNER_TEMP/image.log"
-            exit 1
+          if docker manifest inspect "$OPERATOR_IMAGE:$VERSION" > "$RUNNER_TEMP/operator.log" 2>&1; then
+            docker pull -q "$OPERATOR_IMAGE:$VERSION"
+            revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$OPERATOR_IMAGE:$VERSION")
+            [[ "$revision" == "$GITHUB_SHA" ]] || fail "$OPERATOR_IMAGE:$VERSION exists from another commit. $bump"
+            echo "Reusing $OPERATOR_IMAGE:$VERSION, pushed from this commit."
+            echo "operator=reuse" >> "$GITHUB_OUTPUT"
+          elif ! grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/operator.log"; then
+            cat "$RUNNER_TEMP/operator.log"; fail "Cannot tell whether $OPERATOR_IMAGE:$VERSION exists"
           fi
-          digest=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -r .digest)
-          [[ "$digest" == sha256:* ]] || { echo "::error::No digest for $IMAGE"; exit 1; }
+
+          if helm show chart "$CHART_REPO/registry-operator" --version "$VERSION" > "$RUNNER_TEMP/chart.log" 2>&1; then
+            echo "chart=reuse" >> "$GITHUB_OUTPUT"   # contents are compared after packaging
+          elif ! grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/chart.log"; then
+            cat "$RUNNER_TEMP/chart.log"; fail "Cannot tell whether chart $VERSION exists"
+          fi
+
+          # Rancher's script builds the UI image, so it carries no revision label:
+          # only a rerun of this run may reuse it.
+          if docker manifest inspect "$UI_IMAGE:$VERSION" > "$RUNNER_TEMP/ui.log" 2>&1; then
+            (( ATTEMPT > 1 )) || fail "$UI_IMAGE:$VERSION already exists. $bump"
+            echo "Reusing $UI_IMAGE:$VERSION, pushed by an earlier attempt of this run."
+            echo "ui=reuse" >> "$GITHUB_OUTPUT"
+          elif ! grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/ui.log"; then
+            cat "$RUNNER_TEMP/ui.log"; fail "Cannot tell whether $UI_IMAGE:$VERSION exists"
+          fi
+
+      - name: Build and push the operator image
+        if: steps.existing.outputs.operator != 'reuse'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./registry
+          platforms: linux/amd64
+          push: true
+          build-args: VERSION=${{ env.VERSION }}
+          tags: ${{ env.OPERATOR_IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.title=registry-operator
+
+      - name: Record the operator image digest
+        id: operator
+        run: |
+          digest=$(docker buildx imagetools inspect "$OPERATOR_IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" == sha256:* ]] || { echo "::error::No digest for $OPERATOR_IMAGE:$VERSION"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # The attached archive is always the one in the registry.
+      # values.yaml leaves the image tag empty, so it follows appVersion. The
+      # attached archive is always the one in the registry.
       - name: Package and push the chart
         id: chart
         env:
-          CHARTS: ${{ steps.version.outputs.charts }}
-          VERSION: ${{ steps.version.outputs.version }}
+          REUSE: ${{ steps.existing.outputs.chart }}
         run: |
+          yq -i '.manager.image.repository = strenv(OPERATOR_IMAGE)' registry/charts/chart/values.yaml
           archive="registry-operator-$VERSION.tgz"
-          helm package charts/chart --version "$VERSION" --app-version "$VERSION" -d "$RUNNER_TEMP/built"
-          if helm show chart "$CHARTS/registry-operator" --version "$VERSION" > "$RUNNER_TEMP/show.log" 2>&1; then
-            helm pull "$CHARTS/registry-operator" --version "$VERSION" -d "$RUNNER_TEMP/published" 2>&1 | tee "$RUNNER_TEMP/chart.log"
+          helm package registry/charts/chart --destination "$RUNNER_TEMP/built"
+          if [[ "$REUSE" == reuse ]]; then
+            out=$(helm pull "$CHART_REPO/registry-operator" --version "$VERSION" --destination dist 2>&1)
             mkdir -p "$RUNNER_TEMP/built-x" "$RUNNER_TEMP/published-x"
             tar -xzf "$RUNNER_TEMP/built/$archive" -C "$RUNNER_TEMP/built-x"
-            tar -xzf "$RUNNER_TEMP/published/$archive" -C "$RUNNER_TEMP/published-x"
-            if ! diff -r "$RUNNER_TEMP/built-x" "$RUNNER_TEMP/published-x" > /dev/null; then
-              echo "::error::Chart $VERSION already exists with different contents. Bump the version instead of re-releasing it."
-              exit 1
-            fi
+            tar -xzf "dist/$archive" -C "$RUNNER_TEMP/published-x"
+            diff -r "$RUNNER_TEMP/built-x" "$RUNNER_TEMP/published-x" > /dev/null \
+              || { echo "::error::Chart $VERSION exists with different contents. Bump the version instead of re-releasing it."; exit 1; }
             echo "Reusing chart $VERSION, identical to this commit's."
-            cp "$RUNNER_TEMP/published/$archive" "$archive"
-          elif grep -qiE "$NOT_PUBLISHED" "$RUNNER_TEMP/show.log"; then
-            cp "$RUNNER_TEMP/built/$archive" "$archive"
-            helm push "$archive" "$CHARTS" 2>&1 | tee "$RUNNER_TEMP/chart.log"
           else
-            echo "::error::Cannot tell whether chart $VERSION exists:"
-            cat "$RUNNER_TEMP/show.log"
-            exit 1
+            cp "$RUNNER_TEMP/built/$archive" dist/
+            out=$(helm push "dist/$archive" "$CHART_REPO" 2>&1)
           fi
-          digest=$(grep -o 'sha256:[0-9a-f]*' "$RUNNER_TEMP/chart.log" | head -1)
+          echo "$out"
+          digest=$(grep -o 'sha256:[0-9a-f]\{64\}' <<< "$out" | tail -1)
           [[ -n "$digest" ]] || { echo "::error::No chart digest in the helm output"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # 0.x versions are previews, so they are marked as pre-releases.
-      - name: Create the GitHub Release
+      # This job holds the publish token: no restored cache, and no dependency
+      # install scripts that could read it.
+      - name: Setup Node.js
+        if: steps.existing.outputs.ui != 'reuse'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: registry-ui/.nvmrc
+          package-manager-cache: false
+
+      # Rancher's publish script builds the catalog image (Helm index, chart and
+      # bundle behind nginx). It does not stop on errors, so the push is checked.
+      - name: Build and push the UI extension image
+        if: steps.existing.outputs.ui != 'reuse'
+        working-directory: registry-ui
+        env:
+          OWNER: ${{ needs.prepare.outputs.owner }}
+        run: |
+          yarn install --frozen-lockfile --ignore-scripts
+          yarn publish-pkgs -c -p -r ghcr.io -o "$OWNER"
+
+      - name: Record the UI extension image digest
+        id: ui
+        run: |
+          digest=$(docker buildx imagetools inspect "$UI_IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" == sha256:* ]] || { echo "::error::$UI_IMAGE:$VERSION was not pushed"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Write the Addon manifest, release manifest and checksums
+        env:
+          OPERATOR_DIGEST: ${{ steps.operator.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          UI_DIGEST: ${{ steps.ui.outputs.digest }}
+        run: |
+          # Harvester Addon: the repo template with the registry and version filled in.
+          # The Harbor values stay placeholders: they belong to each installation.
+          {
+            echo "# Registry operator $VERSION as a Harvester Addon. Fill in the Harbor values"
+            echo "# (<harbor-host>, credentials, CA), then on the Harvester cluster:"
+            echo "#   kubectl apply -f registry-operator-addon.yaml"
+            awk 'header && /^#/ { next } { header = 0; print }' header=1 \
+              registry/deploy/harvester-addon/registry-operator/registry-operator.yaml \
+              | sed -e "s|<registry>|$REGISTRY|g" -e "s|<version>|$VERSION|g"
+          } > dist/registry-operator-addon.yaml
+          if grep -n '<registry>\|<version>' dist/registry-operator-addon.yaml; then
+            echo "::error::Unfilled placeholder in the Addon manifest"; exit 1
+          fi
+          yq 'true' dist/registry-operator-addon.yaml > /dev/null
+
+          crd_api=$(yq '.spec.group + "/" + (.spec.versions[] | select(.served) | .name)' \
+            registry/config/crd/bases/registry.opencloud.wso2.com_registries.yaml | head -1)
+          rancher_version=$(jq -r '.rancher.annotations["catalog.cattle.io/rancher-version"]' registry-ui/pkg/registry-ui/package.json)
+          cat > dist/registry-release-manifest.yaml <<EOF
+          release: $TAG
+          version: $VERSION
+          commit: $GITHUB_SHA
+          crdApiVersion: $crd_api
+          artifacts:
+            operatorImage: $OPERATOR_IMAGE:$VERSION@$OPERATOR_DIGEST
+            chart: $CHART_REPO/registry-operator:$VERSION@$CHART_DIGEST
+            uiExtensionImage: $UI_IMAGE:$VERSION@$UI_DIGEST
+          requires:
+            rancher: "$rancher_version"
+          EOF
+          yq 'true' dist/registry-release-manifest.yaml > /dev/null
+
+          (cd dist && sha256sum ./*.tgz ./*.yaml | sed 's|\./||' > SHA256SUMS)
+          cat dist/registry-release-manifest.yaml dist/SHA256SUMS
+
+      - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.version.outputs.version }}
-          IMAGE: ${{ steps.version.outputs.image }}
-          CHARTS: ${{ steps.version.outputs.charts }}
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          OPERATOR_DIGEST: ${{ steps.operator.outputs.digest }}
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          UI_DIGEST: ${{ steps.ui.outputs.digest }}
         run: |
           {
+            cat "registry/release-notes/$VERSION.md"
+            echo
+            echo "## Artifacts"
+            echo
             echo "| Artifact | Reference | Digest |"
-            echo "| --- | --- | --- |"
-            echo "| Image | \`$IMAGE\` | \`$IMAGE_DIGEST\` |"
-            echo "| Chart | \`$CHARTS/registry-operator\`, version \`$VERSION\` | \`$CHART_DIGEST\` |"
-            cat "$RUNNER_TEMP/notes.md"
-          } > "$RUNNER_TEMP/release.md"
+            echo "|---|---|---|"
+            echo "| Operator image | \`$OPERATOR_IMAGE:$VERSION\` | \`$OPERATOR_DIGEST\` |"
+            echo "| Helm chart | \`$CHART_REPO/registry-operator\` version \`$VERSION\` | \`$CHART_DIGEST\` |"
+            echo "| UI extension (Extension Catalog Image) | \`$UI_IMAGE:$VERSION\` | \`$UI_DIGEST\` |"
+            echo
+            echo "Attached: the chart, \`registry-operator-addon.yaml\` (Harvester Addon), \`registry-release-manifest.yaml\` and \`SHA256SUMS\`."
+          } > dist/release-notes.md
+
           prerelease=()
-          [[ "$VERSION" == 0.* ]] && prerelease=(--prerelease)
-          gh release create "$TAG" "registry-operator-$VERSION.tgz" \
-            --repo "$GITHUB_REPOSITORY" --title "registry-operator v$VERSION" \
-            --notes-file "$RUNNER_TEMP/release.md" "${prerelease[@]}"
+          [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag "${prerelease[@]}" \
+            --title "Registry $VERSION" --notes-file dist/release-notes.md \
+            "dist/registry-operator-$VERSION.tgz" dist/registry-operator-addon.yaml \
+            dist/registry-release-manifest.yaml dist/SHA256SUMS
 
       - name: Summary
-        env:
-          IMAGE: ${{ steps.version.outputs.image }}
-          CHARTS: ${{ steps.version.outputs.charts }}
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           {
-            echo "### registry-operator $VERSION published"
+            echo "### Registry $VERSION: draft release created"
             echo
-            echo "- Image: \`$IMAGE\`"
-            echo "- Chart: \`$CHARTS/registry-operator\` version \`$VERSION\`"
+            echo "- \`$OPERATOR_IMAGE:$VERSION\`"
+            echo "- \`$CHART_REPO/registry-operator\` \`$VERSION\`"
+            echo "- \`$UI_IMAGE:$VERSION\`"
             echo
-            echo "First release only: make both packages public in the owner's Packages settings."
+            echo "Install from the draft, verify, then publish it."
           } >> "$GITHUB_STEP_SUMMARY"

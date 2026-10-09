@@ -61,12 +61,9 @@ Developer load URL: `http://127.0.0.1:4500/registry-ui-0.1.0/registry-ui-0.1.0.u
 
 ## Release
 
-Bump `version` in `registry-ui/package.json` and `pkg/registry-ui/package.json`, add the version's
-section to `registry-ui/CHANGELOG.md`, merge, then push the tag `registry-ui/v<version>`. The workflow
-publishes an Extension Catalog Image, `ghcr.io/<owner>/ui-extension-registry-ui:<version>`. After its
-first publish, make the package public (GitHub → **Packages** → package → **Package settings**), or
-Rancher cannot pull it. The workflow also creates the GitHub Release, with the version's changelog
-section and the image digest.
-
-To try it, import the image in Rancher under **Extensions → ⋮ → Manage Extension Catalogs**, then
-install **Registries** from the **Available** tab.
+The extension is released together with the registry operator, at the same version, by
+`.github/workflows/registry-release.yaml` from a `registry/vX.Y.Z` tag: set `version` in
+`registry-ui/package.json` and `pkg/registry-ui/package.json` to match the chart, then see
+`registry/INSTALL.md`, "Publishing a release". The release publishes the Extension Catalog Image
+`ghcr.io/<owner>/ui-extension-registry-ui:<version>`; import it in Rancher under **Extensions → ⋮ →
+Manage Extension Catalogs**, then install **Registries** from the **Available** tab.

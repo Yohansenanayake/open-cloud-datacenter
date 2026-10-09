@@ -1,4 +1,5 @@
-# Example Addon manifest — replace every <placeholder> before applying.
+# Example Addon manifest — replace every <placeholder> before applying. Each
+# release attaches a copy with <registry> and <version> filled in.
 # See registry/INSTALL.md for the full walkthrough, including the network
 # attachment this expects in registry-system when there is no route to Harbor.
 # For your own environment, copy this to registry-operator.local.yaml
@@ -22,8 +23,8 @@ spec:
   # `helm repo add` when it is non-empty — and that does not understand oci://.
   # An explicit empty string satisfies the schema; the pull goes through `chart`.
   repo: ""
-  chart: oci://ghcr.io/wso2/charts/registry-operator
-  version: 0.1.0
+  chart: oci://<registry>/charts/registry-operator
+  version: <version>
   valuesContent: |-
     harbor:
       url: https://<harbor-host>

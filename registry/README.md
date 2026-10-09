@@ -13,7 +13,7 @@ Runs on any conformant Kubernetes cluster — it uses no vendor APIs.
 | To | Read |
 |:---|:---|
 | Install a release (Helm chart, Harvester Addon) | [INSTALL.md](./INSTALL.md) |
-| See what changed in each release | [CHANGELOG.md](./CHANGELOG.md) |
+| See what changed in each release | [`release-notes/`](./release-notes/) |
 | Manage registries from Rancher | the Rancher UI extension in `registry-ui/` |
 | Understand and develop the operator | this README |
 

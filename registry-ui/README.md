@@ -8,4 +8,4 @@ cluster it manages.
 | --- | --- |
 | Use it: every screen, step by step | [docs/USER-GUIDE.md](docs/USER-GUIDE.md) |
 | Install it in Rancher, develop or release it | [pkg/registry-ui/README.md](pkg/registry-ui/README.md) |
-| See what changed in each release | [CHANGELOG.md](CHANGELOG.md) |
+| See what changed in each release | [`registry/release-notes/`](../registry/release-notes/) (released with the operator) |

@@ -1,6 +1,6 @@
 # Installing the registry operator
 
-> **Version:** 0.1.0 (preview) · **Release notes:** [CHANGELOG.md](CHANGELOG.md) · **Chart source:** `charts/chart/`
+> **Version:** 0.1.0 · **Release notes:** [`release-notes/`](release-notes/) · **Chart source:** `charts/chart/`
 
 This is the install path for a Harvester administrator: the published Helm chart, applied through a Harvester `Addon`. [`README.md`](./README.md)'s Quickstart covers the kustomize path for development; the two are independent, don't co-install both over the same resources.
 
@@ -8,7 +8,7 @@ This is the install path for a Harvester administrator: the published Helm chart
 | --- | --- |
 | Image | `ghcr.io/wso2/registry-operator:<version>` |
 | Chart | `oci://ghcr.io/wso2/charts/registry-operator`, version `<version>` |
-| Addon example | [`deploy/harvester-addon/registry-operator/`](deploy/harvester-addon/registry-operator/) |
+| Addon manifest | `registry-operator-addon.yaml` on each release page, or the template in [`deploy/harvester-addon/registry-operator/`](deploy/harvester-addon/registry-operator/) |
 
 ## What runs where
 
@@ -76,7 +76,7 @@ With **one** reserved address, keep `replicas: 1` and `strategy: Recreate` (the 
 
 ## 2. Apply the Harvester Addon
 
-Copy [`registry-operator.yaml`](deploy/harvester-addon/registry-operator/registry-operator.yaml) to `registry-operator.local.yaml` (gitignored) and fill it in:
+Download `registry-operator-addon.yaml` from the release page: the chart and version are filled in. (Or copy the template [`registry-operator.yaml`](deploy/harvester-addon/registry-operator/registry-operator.yaml) to `registry-operator.local.yaml`, which is gitignored, and fill in `<registry>` too.) Fill in:
 
 | Field | Value |
 | --- | --- |
@@ -160,7 +160,7 @@ Copying `web-pull` to another cluster means stripping `ownerReferences`, `uid`, 
 
 A version bump needs no disable/re-enable: Harvester runs `helm upgrade --install` when `spec.version` changes. The CRD, every `Registry`, every Harbor project and every credential are untouched — credentials are minted only when their Secret is absent.
 
-1. Read the new version's section in [CHANGELOG.md](CHANGELOG.md) for breaking changes.
+1. Read the new version's release notes (`release-notes/<version>.md`, or the release page) for breaking changes.
 2. `kubectl -n registry-system patch addon registry-operator --type merge -p '{"spec":{"version":"<new-version>"}}'`
 3. Verify as in step 3, plus `kubectl get registries -A` to confirm every `Registry` stayed `Ready`.
 
@@ -255,11 +255,17 @@ GHCR packages default to **Private**, and the Addon's install Job and the kubele
 
 ### Publishing a release
 
-A tag publishes the release through [`registry-release.yaml`](../.github/workflows/registry-release.yaml). The build and push steps above are for testing in a registry of your own; never push a release version to `ghcr.io/wso2` by hand, or the workflow refuses it. If a release run fails part-way, re-run it for the same tag: it reuses what it already pushed from that commit.
+Releases are built by [`registry-release.yaml`](../.github/workflows/registry-release.yaml) from a `registry/vX.Y.Z` tag on `operators`. The operator and the Rancher UI extension (`registry-ui/`) are released together at the same version.
 
-1. In a PR: bump `Chart.yaml`'s `version` and `appVersion` together — they move in lockstep — add the version's section to [CHANGELOG.md](CHANGELOG.md), and add its row to "Compatibility" above. Merge it.
-2. A maintainer tags the merged commit: `git tag registry/vX.Y.Z <commit> && git push <wso2 remote> registry/vX.Y.Z`.
-3. The workflow checks that the tag, `Chart.yaml` and the CHANGELOG agree, refuses to overwrite a published version, then pushes `ghcr.io/wso2/registry-operator:X.Y.Z` and the chart, and creates the GitHub Release: the CHANGELOG section, both digests, and the chart archive attached. 0.x versions are marked as pre-releases.
-4. First release only: make both packages public — GitHub → **Packages** → package → **Package settings** → **Change visibility**.
+1. In a release PR, set the version in `Chart.yaml` (`version` and `appVersion`), `registry-ui/package.json` and `registry-ui/pkg/registry-ui/package.json`, add `registry/release-notes/X.Y.Z.md`, and add the version's row to "Compatibility" above.
+2. After it merges, a maintainer pushes the tag: `git tag registry/vX.Y.Z && git push upstream registry/vX.Y.Z`.
+3. The workflow checks the versions, runs the operator and UI tests, then publishes to `ghcr.io/<owner>`:
+   - `registry-operator:X.Y.Z` (operator image);
+   - `charts/registry-operator` version `X.Y.Z` (Helm chart, OCI);
+   - `ui-extension-registry-ui:X.Y.Z` (Extension Catalog Image).
 
-For a digest-pinned install, set `manager.image.repository` to `ghcr.io/wso2/registry-operator@sha256:<digest>` from the release page.
+   It then creates a **draft** GitHub release with the chart, an Addon manifest with the chart filled in (`registry-operator-addon.yaml`), a release manifest with digests (`registry-release-manifest.yaml`) and `SHA256SUMS`.
+4. First release only: make the three packages public — GitHub → **Packages** → package → **Package settings** → **Change visibility**.
+5. Install from the draft and verify it, then publish the release.
+
+Published versions are never overwritten: the workflow stops if an artifact already exists from another commit. Fix a bad release with a new version. A run that fails part-way is finished with **Re-run jobs**, which reuses what it already pushed from the same commit. A fork runs the same workflow against its own `ghcr.io/<fork owner>` namespace, which is how to rehearse a release. The build and push steps above are only for testing in a registry of your own.
