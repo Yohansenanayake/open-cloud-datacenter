@@ -58,14 +58,12 @@ Release version: `v0.1.0` (experimental). The class names (`db.t3.medium`) and t
 DBaaS v0.1.0 is deliberately narrow. The CRD schema is broader than the implementation, so the following are **not**
 available yet:
 
-- High availability or replicas: `multiAZ` is reserved, no standby is created and `status.readReplicas` is not
-  populated.
+- High availability or replicas: there is one VM per instance and no standby is created.
 - Point-in-time recovery or continuous archiving. Backups are snapshots; a restore returns the database as of the
   snapshot (see [what is not implemented](/backup-restore/overview#what-is-not-implemented)). Backup is opt-in when
   the instance is created: `spec.backup` cannot be added later.
-- Parameter groups (`dbParameterGroupRef`) and `tags` propagation.
-- `manageMasterUserPassword` and `masterUserPasswordRef`: reserved and ignored. Use `spec.credentials` to bring your
-  own password.
+- Custom PostgreSQL parameter groups and resource tags.
+- Choosing your own master password. The operator always generates it.
 - Changing the password of a running database. The operator reports a changed source Secret but never alters the
   database.
 - Creating networks. The operator only attaches to an existing Multus `NetworkAttachmentDefinition`.

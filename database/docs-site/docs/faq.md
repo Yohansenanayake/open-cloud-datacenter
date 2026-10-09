@@ -98,7 +98,7 @@ Manual snapshots do, and can still be restored. Automated snapshots are owned by
 
 ### Is there high availability or read replicas?
 
-No. `multiAZ` is accepted by the schema and ignored. There is one VM per instance, and `status.readReplicas` is never populated. If the VM fails the database is unavailable until it is restarted. Repeated unplanned restarts halt the VM (see [Troubleshooting](/troubleshooting)).
+No. There is one VM per instance, with no standby or replicas. If the VM fails the database is unavailable until it is restarted. Repeated unplanned restarts halt the VM (see [Troubleshooting](/troubleshooting)).
 
 ### What happens to my data when I delete a DBInstance?
 
@@ -108,11 +108,7 @@ The VM, monitoring objects and the Secrets the operator created are deleted. You
 
 ### Where is the master password?
 
-By default the operator generates it and stores it in the Secret `pg-NAME-credentials` in the instance namespace, keys `admin_user` and `admin_password`. To choose your own, use `spec.credentials` with a Secret reference. See [Credentials](/security/credentials).
-
-### What are `manageMasterUserPassword` and `masterUserPasswordRef`?
-
-Reserved fields that do nothing. Use `spec.credentials`. The API rejects combining `credentials` with those two.
+By default the operator generates it and stores it in the Secret `pg-NAME-credentials` in the instance namespace, keys `admin_user` and `admin_password`. You can't choose it yourself. See [Credentials](/security/credentials).
 
 ### Can I change the password later by editing my Secret?
 

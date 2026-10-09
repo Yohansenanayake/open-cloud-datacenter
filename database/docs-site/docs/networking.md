@@ -38,10 +38,6 @@ spec:
   networkRef: iaas-net/vm-subnet-001
 ```
 
-### Custom DNS server
-
-`spec.dnsServerIP` pins the VM's resolver (KubeVirt `dnsPolicy: None` with that nameserver). Use it only when the cluster resolver is unreachable from the VM. Leave it empty on ordinary VLANs.
-
 ## The published endpoint
 
 `status.endpoint` is updated on every healthy reconcile, so it follows the VM when its IP changes (restart, live migration).

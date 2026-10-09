@@ -48,7 +48,6 @@ This creates:
 Things to know:
 - It has no `spec.backup`, so it can **never** be snapshotted. Backup is chosen at creation. See the backup example below.
 - `deletionProtection: true` blocks `kubectl delete` until you set it to `false`.
-- The shipped sample file also sets `manageMasterUserPassword: true`. That field does nothing, so leave it out of your own manifests.
 
 Apply and watch:
 

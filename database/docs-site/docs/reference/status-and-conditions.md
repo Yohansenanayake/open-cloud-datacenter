@@ -37,8 +37,6 @@ kubectl wait --for=condition=Ready dbinstance/dbinstance-sample --timeout=15m
 | `restartCount`, `recentUnplannedRestarts` | Unplanned VM restart counts. Three restarts in a row halt the VM (see `CrashLoopHalted`). |
 | `resources` | The names of the objects the operator created for this instance: `vmName`, `dataVolumeName`, `osDiskPVCName`, `nadName`, `adminCredentialsSecretName`, `connectionSecretName`, `cloudInitSecretName`, `metricsServiceName`, `serviceMonitor`, `internalSecretRef`, `privateTLSSecretRef`. Used for cleanup. |
 
-`status.readReplicas` is declared but never written.
-
 ## Phases
 
 `status.phase` is the first row below that matches.

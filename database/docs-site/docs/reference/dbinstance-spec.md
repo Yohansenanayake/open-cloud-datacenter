@@ -29,7 +29,6 @@ spec:
 | **Required** | `dbInstanceClass`, `allocatedStorage`, `networkRef` |
 | **Can change later** | `dbInstanceClass`, `allocatedStorage` (grow only), `running`, `deletionProtection` |
 | **Fixed at creation** | `networkRef`, `engineVersion`, `dbName`, `masterUsername`, `port`, `storageType`, `vmPassword`, and whether `backup` is set |
-| **Not implemented** | `manageMasterUserPassword`, `masterUserPasswordRef`, `multiAZ`, `dbParameterGroupRef`, `tags` (accepted but ignored) |
 
 **Name.** `metadata.name` can be at most 52 characters: lowercase letters, digits and `-`, starting and ending with a letter or digit. It's checked at creation.
 
@@ -86,7 +85,6 @@ See [Networking](/networking) for how it fits together.
 | Field | Required | Default | Change later? | Notes |
 | --- | --- | --- | --- | --- |
 | `networkRef` | yes | | no | The network the VM connects to, as `namespace/name` (a Harvester network attachment). It must already exist, and it needs outbound internet access for first boot. The operator doesn't check that it exists. |
-| `dnsServerIP` | no | KubeVirt default | applied only at VM creation | Sets the VM's DNS server. Use it only when the cluster's DNS can't be reached from the VM. |
 
 ## Lifecycle
 
@@ -127,17 +125,6 @@ Continuous WAL archiving is not configured in this release. A restore recovers o
 ### `spec.restoredFrom`
 
 Set automatically by the restore process on a database created by a [restore](/backup-restore/restore). **Don't set it yourself.** It can't be changed after creation, and it records where the database came from, even after the restore, the snapshot and the source are deleted.
-
-## Not implemented
-
-These fields are accepted but ignored:
-
-| Field | Notes |
-| --- | --- |
-| `multiAZ` | No standby VM is created |
-| `dbParameterGroupRef` | The `DBParameterGroup` resource doesn't exist |
-| `tags` | Not passed on to child resources or dashboards |
-| `manageMasterUserPassword`, `masterUserPasswordRef` | Reserved; the operator always generates the password |
 
 ## Defaults summary
 

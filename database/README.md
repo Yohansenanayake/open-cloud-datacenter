@@ -144,10 +144,9 @@ Then see [Troubleshooting](docs-site/docs/troubleshooting.md).
 
 - **No point-in-time recovery.** A restore returns the data as of the snapshot.
 - **No password rotation.** The operator always generates the admin password.
-- **No standby or replicas.** `multiAZ` is reserved and does nothing.
+- **No standby or replicas.** There is one VM per instance.
 - **Restore always makes a new database.** There is no in-place restore.
 - **Some settings are fixed at creation:** the network, port, database name, admin user, storage class, PostgreSQL version, and whether backups are on.
-- Ignored fields: `multiAZ`, `dbParameterGroupRef`, `tags`, `manageMasterUserPassword`, `masterUserPasswordRef`.
 
 See the [DBInstance spec](docs-site/docs/reference/dbinstance-spec.md) for every field.
 

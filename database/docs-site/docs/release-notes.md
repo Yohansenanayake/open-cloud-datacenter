@@ -79,8 +79,8 @@ Only Harvester 1.7.1 has been exercised. Other versions are untested and unsuppo
 - No point-in-time recovery and no continuous WAL archiving. A restore returns the database as of the snapshot; `DBRestore.spec.mode` accepts only `Snapshot`.
 - `spec.backup` must be set when the instance is created; it cannot be added or removed later.
 - Backups use Harvester `VirtualMachineBackup`. The operator does not configure or validate Harvester's backup target.
-- No high availability or replicas. `multiAZ` is ignored.
-- `manageMasterUserPassword`, `masterUserPasswordRef`, `dbParameterGroupRef` and `tags` are ignored.
+- No high availability or replicas.
+- No custom parameter groups or resource tags, and you can't choose your own master password.
 - Passwords cannot be changed or reset on a running database through the operator.
 - No certificate rotation or client certificate authentication.
 - Baked images must be uploaded to Harvester by hand.
