@@ -231,6 +231,7 @@ Combinations tested together. Add a row for every release.
 | Operator | Harbor (chart) | Kubernetes | Where |
 | --- | --- | --- | --- |
 | 0.1.0 | 2.15.2 (1.19.2) | 1.36 (kind) | Helm install, Registry to Ready, push/pull, uninstall/reinstall |
+| 0.1.0 | 2.15.2 (1.19.2) | Harvester v1.9.0 (1.36); pulls from RKE2 v1.36 | Addon install over a Multus attachment, Registry to Ready, push/pull/delete, credential revoke, plan change, Harbor outage recovery, uninstall keeps data |
 
 ## Known gotchas
 
