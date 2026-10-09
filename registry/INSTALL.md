@@ -69,7 +69,7 @@ docker push <registry>/registry-operator:$VERSION
 ## 3. Package and push the chart
 
 ```sh
-helm package registry/charts/chart --version <X.Y.Z> --app-version <X.Y.Z>
+helm package charts/chart --version <X.Y.Z> --app-version <X.Y.Z>    # still in registry/, from step 2
 # → registry-operator-<X.Y.Z>.tgz   (gitignored; a release asset, never committed)
 helm push registry-operator-<X.Y.Z>.tgz oci://<registry>/charts
 ```

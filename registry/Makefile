@@ -68,7 +68,7 @@ docker-push: ## Push the container image ($(IMG)).
 	$(CONTAINER_TOOL) push ${IMG}
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with the CRD and deployment into dist/install.yaml.
+build-installer: manifests generate kustomize ## Generate the operator's deployment, without the CRD, into dist/install.yaml (the helm plugin's input).
 	mkdir -p dist
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
