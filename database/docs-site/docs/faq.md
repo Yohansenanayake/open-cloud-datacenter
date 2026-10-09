@@ -15,7 +15,7 @@ A Kubernetes operator that provisions managed PostgreSQL on Harvester HCI. You c
 
 ### Is it production ready?
 
-No. v0.1.0 is an experimental release (chart and app version `0.1.0-experiment.2`) with API version `v1alpha1`. Backup and restore exist (see below), but there is no high availability and no supported upgrade path between releases yet. See [Release notes](/release-notes).
+No. v0.1.0 is an early release with API version `v1alpha1`. Backup and restore exist (see below), but there is no high availability and no supported upgrade path between releases yet. See [Release notes](/release-notes).
 
 ### Which PostgreSQL versions are supported?
 
@@ -30,7 +30,7 @@ Versions come from the baked-image catalog compiled into the operator.
 
 ### Which Harvester version is supported?
 
-The repository documents testing on Harvester 1.7.1 on RKE2 v1.34.3. It is compiled against KubeVirt API v1.6.0 and controller-runtime v0.20.4. No other Harvester version has been certified.
+v0.1.0 is tested on Harvester 1.9.0. It is compiled against KubeVirt API v1.6.0 and controller-runtime v0.20.4. No other Harvester version has been certified. The Rancher UI extension needs Rancher 2.15 or later and is tested on Rancher 2.15.2.
 
 ## Installation
 

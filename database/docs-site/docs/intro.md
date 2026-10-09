@@ -72,12 +72,13 @@ available yet:
 
 | Requirement | Details |
 | --- | --- |
-| Harvester HCI | Tested on Harvester 1.7.1 (RKE2 v1.34.3). KubeVirt, CDI and Harvester's `VirtualMachineImage` API must be present. |
+| Harvester HCI | Tested on Harvester 1.9.0. KubeVirt, CDI and Harvester's `VirtualMachineImage` API must be present. |
 | Network | A Multus `NetworkAttachmentDefinition` already exists; `spec.networkRef` is `namespace/name` of it. Preflight requires the field to be set but does not yet verify that the NAD exists. |
 | Baked OS image | The catalog compiled into the operator names the images it will use (default OS stream `22.04` resolves to `ubuntu-2204-postgres-v20260515`). That image must be imported into Harvester and ready, in the configured image namespace (default `default`). See [Images and repave](/operations/images-and-repave). |
 | Storage class | `longhorn` unless `databaseDefaults.storageClass` or `spec.storageType` says otherwise. |
 | Monitoring stack | Rancher Monitoring (Prometheus Operator) with the `ServiceMonitor` CRD. The controller watches `ServiceMonitor`s and creates one per instance unconditionally. |
 | Tooling | `kubectl` with a kubeconfig for the Harvester cluster. |
+| Rancher (optional) | Only for the [Rancher UI extension](/rancher-ui-extension): Rancher 2.15 or later, tested on 2.15.2. |
 | Reachability | Clients must be able to reach the VM's data-network IP; the database is not exposed through a pod or Service. |
 
 Installation is covered in [Helm and Addon install](/installation/helm-addon) and operator flags in

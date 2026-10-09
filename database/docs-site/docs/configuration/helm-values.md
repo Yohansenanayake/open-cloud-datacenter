@@ -5,7 +5,7 @@ sidebar_position: 3
 
 # Helm values
 
-Reference for `charts/chart/values.yaml` (chart `dbaas-operator`, version `0.1.0-experiment.2`). Resource names are `RELEASE-NAME-SUFFIX` unless `fullnameOverride` is set; if the release name already contains the chart name it is used as is.
+Reference for `charts/chart/values.yaml` (chart `dbaas-operator`, version `0.1.0`). Resource names are `RELEASE-NAME-SUFFIX` unless `fullnameOverride` is set; if the release name already contains the chart name it is used as is.
 
 ## Naming
 
@@ -81,7 +81,7 @@ RBAC is always cluster-wide; there is no namespaced option. See [RBAC](/installa
 manager:
   image:
     repository: ghcr.io/YOU/dbaas-operator
-    tag: "0.1.0-experiment.2"
+    tag: "0.1.0"
   args:
     - --operator.leaderElection.enabled=true
     - --observability.metrics.bindAddress=:8443

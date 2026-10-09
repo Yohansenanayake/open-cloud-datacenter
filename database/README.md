@@ -16,10 +16,11 @@ Create a `DBInstance` and the operator gives you a PostgreSQL database in its ow
 
 ### 1. Check the requirements
 
-- A **Harvester** cluster (tested on 1.7.1 with RKE2 v1.34.3), and `kubectl` with its kubeconfig.
+- A **Harvester** cluster (tested on 1.9.0), and `kubectl` with its kubeconfig.
 - An existing Multus **NetworkAttachmentDefinition** for the database VM's network. The operator never creates networks. The network needs outbound internet access for first boot.
 - The **database images** uploaded to Harvester and `Active`. Without them, new instances stop with `OSImageNotFound`. See [Prerequisites](docs-site/docs/installation/prerequisites.md).
 - **Rancher Monitoring**, or the Prometheus Operator CRDs, because each database gets a `ServiceMonitor`.
+- Optional: **Rancher** 2.15 or later (tested on 2.15.2) for the [Rancher UI extension](docs-site/docs/rancher-ui-extension/).
 
 ### 2. Install the operator
 

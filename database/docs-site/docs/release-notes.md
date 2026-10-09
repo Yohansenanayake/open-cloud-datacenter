@@ -5,20 +5,21 @@ sidebar_position: 15
 
 # Release notes
 
-## v0.1.0 (experiment)
+## v0.1.0
 
-Chart version and app version: `0.1.0-experiment.2`. CRDs: `dbaas.opencloud.wso2.com/v1alpha1`, kinds `DBInstance`, `DBSnapshot` and `DBRestore`.
+Released from tag `dbaas/v0.1.0`. The operator image, Helm chart and Rancher UI extension are all version `0.1.0`. CRDs: `dbaas.opencloud.wso2.com/v1alpha1`, kinds `DBInstance`, `DBSnapshot` and `DBRestore`.
 
-:::caution[Experimental]
-This is a preview. The API is `v1alpha1`, there is no tested upgrade path between experimental builds, and no high availability. Backup and restore are snapshot-based with no point-in-time recovery. Do not use it for data you cannot lose.
+:::caution[Early release]
+The API is `v1alpha1` and may change. There is no tested upgrade path yet, and no high availability. Backup and restore are snapshot-based with no point-in-time recovery. Do not use it for data you cannot lose.
 :::
 
 ### Supported and tested versions
 
 | Component | Version |
 | --- | --- |
-| Harvester | 1.7.1 (tested) |
-| RKE2 | v1.34.3 (tested) |
+| Harvester | 1.9.0 (tested) |
+| RKE2 | As bundled with Harvester 1.9.0 |
+| Rancher (UI extension only) | 2.15 or later (tested on 2.15.2) |
 | KubeVirt API and client | v1.6.0 (built against) |
 | controller-runtime | v0.20.4 (built against) |
 | Kubernetes client libraries | v0.32.5 (built against) |
@@ -27,7 +28,7 @@ This is a preview. The API is `v1alpha1`, there is no tested upgrade path betwee
 | PostgreSQL | 15, 16, 17 on Ubuntu 22.04; 15, 16, 17, 18 on Ubuntu 24.04 |
 | Storage | Longhorn (default StorageClass `longhorn`) |
 
-Only Harvester 1.7.1 has been exercised. Other versions are untested and unsupported. The Harvester `Addon` route was validated on the maintainer's cluster, not on a range of versions.
+Only Harvester 1.9.0 has been exercised. Other versions are untested and unsupported. The Harvester `Addon` route was validated on the maintainer's cluster, not on a range of versions.
 
 ### Highlights
 
@@ -68,8 +69,13 @@ Only Harvester 1.7.1 has been exercised. Other versions are untested and unsuppo
 - Centralised operator configuration (flags and environment) with `databaseDefaults`, `infrastructure`, `observability`, `security` and `logging` sections. See [Operator configuration](/configuration/operator-config).
 - Prometheus `ServiceMonitor` per instance and a metrics endpoint for the operator.
 - Thin REST gateway over the CRD that forwards the caller's token.
-- A chart-test CI workflow.
+- A chart-test CI workflow, and a release workflow that publishes the operator image, chart and UI extension together from a `dbaas/vX.Y.Z` tag.
 
+**Rancher UI extension**
+
+- A **DBaaS** entry in Rancher's left menu that lists the Harvester clusters running the operator.
+- Create, edit, start, stop and delete databases; view connection details and events; take snapshots, restore and update the OS; administrators manage database images. See [Rancher UI extension](/rancher-ui-extension).
+- Published as an Extension Catalog Image that administrators import into Rancher.
 
 ### Known limitations
 
@@ -84,5 +90,7 @@ Only Harvester 1.7.1 has been exercised. Other versions are untested and unsuppo
 - The image catalog is compiled into the operator binary.
 - The NetworkAttachmentDefinition named by `networkRef` is not validated.
 - Single-namespace installs are not supported.
+- Overlay (Kube-OVN) networks are not supported in this release; use VLAN networks.
+- After an instance class change, PostgreSQL keeps the previous class's `max_connections` until the next repave.
 
 See [Troubleshooting](/troubleshooting) for problems you may hit.
