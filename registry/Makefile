@@ -156,10 +156,10 @@ HELM_CHART_DIR ?= charts/chart
 HELM_EXTRA_ARGS ?=
 
 .PHONY: install-helm
-install-helm: ## Install the latest version of Helm.
+install-helm: ## Check that Helm is installed.
 	@command -v $(HELM) >/dev/null 2>&1 || { \
-		echo "Installing Helm..." && \
-		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
+		echo "Helm not found. Install a released version: https://helm.sh/docs/intro/install/"; \
+		exit 1; \
 	}
 
 .PHONY: helm-deploy

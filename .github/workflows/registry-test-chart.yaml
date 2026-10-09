@@ -42,9 +42,14 @@ jobs:
           go-version-file: registry/go.mod
           cache-dependency-path: registry/go.sum
 
-      - name: Install the latest version of kind
+      # Pinned, and checked against the release's published SHA-256.
+      - name: Install kind
+        env:
+          KIND_VERSION: v0.33.0
+          KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  kind" | sha256sum -c -
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
@@ -58,10 +63,12 @@ jobs:
         run: |
           cd registry
           make docker-build
-          kind load docker-image $IMG
+          kind load docker-image "$IMG"
 
       - name: Install Helm
-        run: cd registry && make install-helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
 
       - name: Lint Helm chart
         run: cd registry && helm lint ./charts/chart --set harbor.url=https://harbor.example.com

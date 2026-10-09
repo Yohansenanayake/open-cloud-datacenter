@@ -64,7 +64,7 @@ kubectl run netcheck -n registry-system --rm -i --restart=Never --image=curlimag
   --command -- curl -sS -m 8 -o /dev/null -w '%{http_code}\n' https://<harbor-host>/api/v2.0/ping
 ```
 
-An HTTP code means there is a route. A timeout means there is not: Harvester carries VM VLANs as bridges and gives its own hosts no address on them. Give the operator a second interface on Harbor's VLAN with [`harbor-network.yaml`](deploy/harvester-addon/registry-operator/harbor-network.yaml):
+An HTTP code means there is a route. With a private CA the check prints `000` and `SSL certificate problem` instead: that also means there is a route, since this pod lacks the CA the operator gets from the chart. A timeout means there is not: Harvester carries VM VLANs as bridges and gives its own hosts no address on them. Give the operator a second interface on Harbor's VLAN with [`harbor-network.yaml`](deploy/harvester-addon/registry-operator/harbor-network.yaml):
 
 1. Reserve one or more addresses on Harbor's subnet and have them excluded from DHCP.
 2. Fill in the placeholders and `kubectl apply -f` it on Harvester.
