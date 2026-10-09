@@ -65,7 +65,8 @@ Bump `version` in `registry-ui/package.json` and `pkg/registry-ui/package.json`,
 section to `registry-ui/CHANGELOG.md`, merge, then push the tag `registry-ui/v<version>`. The workflow
 publishes an Extension Catalog Image, `ghcr.io/<owner>/ui-extension-registry-ui:<version>`. After its
 first publish, make the package public (GitHub → **Packages** → package → **Package settings**), or
-Rancher cannot pull it. Use the version's changelog section as the GitHub Release text.
+Rancher cannot pull it. The workflow also creates the GitHub Release, with the version's changelog
+section and the image digest.
 
 To try it, import the image in Rancher under **Extensions → ⋮ → Manage Extension Catalogs**, then
 install **Registries** from the **Available** tab.

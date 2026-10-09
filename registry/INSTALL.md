@@ -255,9 +255,11 @@ GHCR packages default to **Private**, and the Addon's install Job and the kubele
 
 ### Publishing a release
 
-1. Bump `Chart.yaml`'s `version`/`appVersion` and the image tag together — they move in lockstep — and add the version's section to [CHANGELOG.md](CHANGELOG.md).
-2. `git tag registry/vX.Y.Z && git push origin registry/vX.Y.Z`
-3. Build, package and push as above against `ghcr.io/wso2`, with `VERSION=X.Y.Z`.
-4. Create a GitHub Release for the tag, with the version's CHANGELOG section as its text, and attach the chart archive as a release asset: `gh release upload registry/vX.Y.Z registry-operator-X.Y.Z.tgz`.
-5. Record the image and chart digests in the release text. For a digest-pinned install, set `manager.image.repository` to `ghcr.io/wso2/registry-operator@sha256:<digest>`.
-6. Add the release's row to "Compatibility" above.
+A tag publishes the release through [`registry-release.yaml`](../.github/workflows/registry-release.yaml); the steps above are for testing a build by hand.
+
+1. In a PR: bump `Chart.yaml`'s `version` and `appVersion` together — they move in lockstep — add the version's section to [CHANGELOG.md](CHANGELOG.md), and add its row to "Compatibility" above. Merge it.
+2. A maintainer tags the merged commit: `git tag registry/vX.Y.Z <commit> && git push <wso2 remote> registry/vX.Y.Z`.
+3. The workflow checks that the tag, `Chart.yaml` and the CHANGELOG agree, refuses to overwrite a published version, then pushes `ghcr.io/wso2/registry-operator:X.Y.Z` and the chart, and creates the GitHub Release: the CHANGELOG section, both digests, and the chart archive attached. 0.x versions are marked as pre-releases.
+4. First release only: make both packages public — GitHub → **Packages** → package → **Package settings** → **Change visibility**.
+
+For a digest-pinned install, set `manager.image.repository` to `ghcr.io/wso2/registry-operator@sha256:<digest>` from the release page.
